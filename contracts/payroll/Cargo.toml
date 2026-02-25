@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 soroban-sdk = "21.0.0"
+proof_verifier = { path = "../proof_verifier" }
+salary_commitment = { path = "../salary_commitment" }
+token = { path = "../token" }
 
 [lib]
 crate-type = ["cdylib"]
