@@ -1,3 +1,19 @@
 target/
 .DS_Store
 **/*.rs.bk
+
+# ZK trusted setup artifacts — large files, never commit
+ptau/
+build/circuits/
+
+# snarkjs intermediate zkeys
+*.zkey
+
+# Circom compiled output (reproducible from source)
+*.r1cs
+*.sym
+*.wtns
+
+# Environment / secrets
+.env
+.env.*
