@@ -1,12 +1,12 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
 /// View key for selective disclosure
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ViewKey {
-    pub id: [u8; 32],
+    pub id: BytesN<32>,
     pub company_id: Symbol,
     pub auditor: Address,
     pub granted_by: Address,
@@ -17,12 +17,12 @@ pub struct ViewKey {
 
 /// Scope of audit access
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum AuditScope {
-    FullCompany,           // All employees, all time
-    TimeRange(u64, u64),   // Start and end timestamps
-    EmployeeList,          // Specific employees only
-    AggregateOnly,         // Only totals, no individual data
+    FullCompany = 0,
+    TimeRange = 1,
+    EmployeeList = 2,
+    AggregateOnly = 3,
 }
 
 /// Audit report (what auditors can verify)
@@ -40,7 +40,7 @@ pub struct AuditReport {
 /// Storage keys
 #[contracttype]
 pub enum DataKey {
-    ViewKey([u8; 32]),
+    ViewKey(BytesN<32>),
     CompanyAuditors(Symbol),
 }
 
@@ -67,7 +67,7 @@ impl AuditModule {
         let key_id = Self::generate_key_id(&env, &company_id, &auditor, current_time);
 
         let view_key = ViewKey {
-            id: key_id,
+            id: key_id.clone(),
             company_id: company_id.clone(),
             auditor: auditor.clone(),
             granted_by: company_admin,
@@ -83,11 +83,11 @@ impl AuditModule {
     }
 
     /// Verify an auditor has valid access
-    pub fn verify_access(env: Env, key_id: [u8; 32], auditor: Address) -> bool {
+    pub fn verify_access(env: Env, key_id: BytesN<32>, auditor: Address) -> bool {
         let storage_key = DataKey::ViewKey(key_id);
-        
+
         let view_key: Option<ViewKey> = env.storage().persistent().get(&storage_key);
-        
+
         match view_key {
             Some(vk) => {
                 let current_time = env.ledger().timestamp();
@@ -98,7 +98,7 @@ impl AuditModule {
     }
 
     /// Revoke a view key
-    pub fn revoke_view_key(env: Env, company_admin: Address, key_id: [u8; 32]) {
+    pub fn revoke_view_key(env: Env, company_admin: Address, key_id: BytesN<32>) {
         company_admin.require_auth();
 
         let storage_key = DataKey::ViewKey(key_id);
@@ -119,7 +119,7 @@ impl AuditModule {
     /// Generate aggregate audit report (no individual salaries revealed)
     pub fn generate_aggregate_report(
         env: Env,
-        key_id: [u8; 32],
+        key_id: BytesN<32>,
         auditor: Address,
         period_start: u64,
         period_end: u64,
@@ -127,7 +127,7 @@ impl AuditModule {
         auditor.require_auth();
 
         // Verify access
-        if !Self::verify_access(env.clone(), key_id, auditor) {
+        if !Self::verify_access(env.clone(), key_id.clone(), auditor) {
             panic!("Invalid or expired view key");
         }
 
@@ -137,15 +137,15 @@ impl AuditModule {
         // TODO: Query payment executor for aggregate data
         // let executor = PaymentExecutorClient::new(&env, &executor_address);
         // let total = executor.get_total_paid(&view_key.company_id);
-        
+
         // TODO: Query registry for employee count
         // let registry = PayrollRegistryClient::new(&env, &registry_address);
         // let company = registry.get_company(&view_key.company_id);
 
         AuditReport {
             company_id: view_key.company_id,
-            total_employees: 0,  // Placeholder
-            total_paid: 0,       // Placeholder
+            total_employees: 0, // Placeholder
+            total_paid: 0,      // Placeholder
             period_start,
             period_end,
             verified: true,
@@ -155,12 +155,12 @@ impl AuditModule {
     /// Verify a specific payment was made (with view key)
     pub fn verify_payment(
         env: Env,
-        key_id: [u8; 32],
+        key_id: BytesN<32>,
         auditor: Address,
         employee: Address,
         claimed_amount: i128,
         period: u32,
-        blinding_factor: [u8; 32],
+        blinding_factor: BytesN<32>,
     ) -> bool {
         auditor.require_auth();
 
@@ -181,19 +181,20 @@ impl AuditModule {
 
     /// Generate a unique key ID
     fn generate_key_id(
-        _env: &Env,
-        _company_id: &Symbol,
-        _auditor: &Address,
-        _timestamp: u64,
-    ) -> [u8; 32] {
+        env: &Env,
+        company_id: &Symbol,
+        auditor: &Address,
+        timestamp: u64,
+    ) -> BytesN<32> {
         // TODO: Use Poseidon hash for deterministic ID generation
         // poseidon_hash(company_id, auditor, timestamp)
-        
-        [0u8; 32] // Placeholder
+        let mut data = [0u8; 32];
+        // ... simple placeholder logic
+        BytesN::from_array(env, &data)
     }
 
     /// Get view key details
-    pub fn get_view_key(env: Env, key_id: [u8; 32]) -> ViewKey {
+    pub fn get_view_key(env: Env, key_id: BytesN<32>) -> ViewKey {
         let storage_key = DataKey::ViewKey(key_id);
         env.storage()
             .persistent()

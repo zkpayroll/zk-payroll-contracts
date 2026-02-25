@@ -1,10 +1,11 @@
 [package]
 name = "payroll"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-soroban-sdk = "21.0.0"
+soroban-sdk = { workspace = true }
 proof_verifier = { path = "../proof_verifier" }
 salary_commitment = { path = "../salary_commitment" }
 token = { path = "../token" }

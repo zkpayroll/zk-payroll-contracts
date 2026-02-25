@@ -17,4 +17,8 @@ impl Token {
     pub fn balance(_e: Env, _id: Address) -> i128 {
         0 // Placeholder
     }
+
+    pub fn transfer(_e: Env, _from: Address, _to: Address, _amount: i128) {
+        // Transfer logic placeholder
+    }
 }

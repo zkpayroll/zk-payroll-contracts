@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Map, Symbol, Vec};
 
 /// Company registration data
 #[contracttype]
@@ -19,7 +19,7 @@ pub struct Company {
 pub struct Employee {
     pub address: Address,
     pub company_id: Symbol,
-    pub salary_commitment: [u8; 32], // Poseidon hash commitment
+    pub salary_commitment: BytesN<32>, // Poseidon hash commitment
     pub is_active: bool,
     pub last_payment_timestamp: u64,
 }
@@ -71,7 +71,7 @@ impl PayrollRegistry {
         env: Env,
         company_id: Symbol,
         employee_address: Address,
-        salary_commitment: [u8; 32],
+        salary_commitment: BytesN<32>,
     ) -> Employee {
         // Get company and verify admin
         let company_key = DataKey::Company(company_id.clone());
@@ -108,7 +108,7 @@ impl PayrollRegistry {
         env: Env,
         company_id: Symbol,
         employee_address: Address,
-        new_commitment: [u8; 32],
+        new_commitment: BytesN<32>,
     ) {
         // Verify admin authorization
         let company_key = DataKey::Company(company_id.clone());
@@ -227,9 +227,8 @@ mod tests {
         let treasury = Address::generate(&env);
         let company_id = Symbol::new(&env, "ACME");
         let employee_addr = Address::generate(&env);
-        let commitment = [0u8; 32]; // Mock commitment
-
         client.register_company(&company_id, &admin, &treasury);
+        let commitment = BytesN::from_array(&env, &[0u8; 32]);
         let employee = client.add_employee(&company_id, &employee_addr, &commitment);
 
         assert_eq!(employee.address, employee_addr);

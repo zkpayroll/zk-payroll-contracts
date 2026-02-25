@@ -1,12 +1,12 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
 /// Commitment data structure
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SalaryCommitment {
-    pub commitment: [u8; 32],     // Poseidon(salary, blinding_factor)
+    pub commitment: BytesN<32>, // Poseidon(salary, blinding_factor)
     pub created_at: u64,
     pub updated_at: u64,
     pub version: u32,
@@ -16,7 +16,7 @@ pub struct SalaryCommitment {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PaymentNullifier {
-    pub nullifier: [u8; 32],
+    pub nullifier: BytesN<32>,
     pub used_at: u64,
 }
 
@@ -24,7 +24,7 @@ pub struct PaymentNullifier {
 #[contracttype]
 pub enum DataKey {
     Commitment(Address),
-    Nullifier([u8; 32]),
+    Nullifier(BytesN<32>),
     CompanyRoot(Symbol),
 }
 
@@ -37,10 +37,10 @@ impl SalaryCommitmentContract {
     pub fn store_commitment(
         env: Env,
         employee: Address,
-        commitment: [u8; 32],
+        commitment: BytesN<32>,
     ) -> SalaryCommitment {
         let timestamp = env.ledger().timestamp();
-        
+
         let salary_commitment = SalaryCommitment {
             commitment,
             created_at: timestamp,
@@ -58,7 +58,7 @@ impl SalaryCommitmentContract {
     pub fn update_commitment(
         env: Env,
         employee: Address,
-        new_commitment: [u8; 32],
+        new_commitment: BytesN<32>,
     ) -> SalaryCommitment {
         let key = DataKey::Commitment(employee);
         let mut existing: SalaryCommitment = env
@@ -92,11 +92,11 @@ impl SalaryCommitmentContract {
     }
 
     /// Record a payment nullifier (prevents double payment)
-    pub fn record_nullifier(env: Env, nullifier: [u8; 32]) {
-        let key = DataKey::Nullifier(nullifier);
-        
+    pub fn record_nullifier(env: Env, nullifier: BytesN<32>) {
+        let key = DataKey::Nullifier(nullifier.clone());
+
         if env.storage().persistent().has(&key) {
-            panic!("Nullifier already used - double payment attempt");
+            panic!("Nullifier already used");
         }
 
         let payment_nullifier = PaymentNullifier {
@@ -108,24 +108,20 @@ impl SalaryCommitmentContract {
     }
 
     /// Check if a nullifier has been used
-    pub fn is_nullifier_used(env: Env, nullifier: [u8; 32]) -> bool {
+    pub fn is_nullifier_used(env: Env, nullifier: BytesN<32>) -> bool {
         let key = DataKey::Nullifier(nullifier);
         env.storage().persistent().has(&key)
     }
 
     /// Compute Poseidon hash (placeholder - will use host function)
-    /// 
+    ///
     /// In production, this will use CAP-0075 Poseidon host functions
-    pub fn compute_commitment(
-        _env: Env,
-        _salary: u64,
-        _blinding_factor: [u8; 32],
-    ) -> [u8; 32] {
+    pub fn compute_commitment(_env: Env, _salary: u64, _blinding_factor: BytesN<32>) -> BytesN<32> {
         // TODO: Use Soroban Poseidon host function
         // poseidon_hash([salary_bytes, blinding_factor])
-        
+
         // Placeholder implementation
-        [0u8; 32]
+        BytesN::from_array(&_env, &[0u8; 32])
     }
 
     /// Verify a commitment matches a salary (with proof)
@@ -134,11 +130,11 @@ impl SalaryCommitmentContract {
         env: Env,
         employee: Address,
         claimed_salary: u64,
-        blinding_factor: [u8; 32],
+        blinding_factor: BytesN<32>,
     ) -> bool {
         let stored = Self::get_commitment(env.clone(), employee);
         let computed = Self::compute_commitment(env, claimed_salary, blinding_factor);
-        
+
         stored.commitment == computed
     }
 }
@@ -156,7 +152,7 @@ mod tests {
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let employee = Address::generate(&env);
-        let commitment = [42u8; 32];
+        let commitment = BytesN::from_array(&env, &[42u8; 32]);
 
         let result = client.store_commitment(&employee, &commitment);
 
@@ -171,8 +167,8 @@ mod tests {
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let employee = Address::generate(&env);
-        let initial = [1u8; 32];
-        let updated = [2u8; 32];
+        let initial = BytesN::from_array(&env, &[1u8; 32]);
+        let updated = BytesN::from_array(&env, &[2u8; 32]);
 
         client.store_commitment(&employee, &initial);
         let result = client.update_commitment(&employee, &updated);
@@ -187,12 +183,12 @@ mod tests {
         let contract_id = env.register_contract(None, SalaryCommitmentContract);
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
-        let nullifier = [99u8; 32];
+        let nullifier = BytesN::from_array(&env, &[99u8; 32]);
 
         assert!(!client.is_nullifier_used(&nullifier));
-        
+
         client.record_nullifier(&nullifier);
-        
+
         assert!(client.is_nullifier_used(&nullifier));
     }
 
@@ -203,7 +199,7 @@ mod tests {
         let contract_id = env.register_contract(None, SalaryCommitmentContract);
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
-        let nullifier = [99u8; 32];
+        let nullifier = BytesN::from_array(&env, &[99u8; 32]);
 
         client.record_nullifier(&nullifier);
         client.record_nullifier(&nullifier); // Should panic

@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
 
 /// Payment record
 #[contracttype]
@@ -8,7 +8,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 pub struct PaymentRecord {
     pub company_id: Symbol,
     pub employee: Address,
-    pub proof_hash: [u8; 32],
+    pub proof_hash: BytesN<32>,
     pub timestamp: u64,
     pub period: u32, // Payment period (e.g., month number)
 }
@@ -46,7 +46,7 @@ impl PaymentExecutor {
     }
 
     /// Execute a private payment with ZK proof
-    /// 
+    ///
     /// The proof verifies:
     /// 1. The payment amount matches the salary commitment
     /// 2. The recipient is the correct employee
@@ -56,10 +56,10 @@ impl PaymentExecutor {
         company_id: Symbol,
         employee: Address,
         amount: i128, // Payment amount (verified by ZK proof)
-        proof_a: [u8; 64],
-        proof_b: [u8; 128],
-        proof_c: [u8; 64],
-        nullifier: [u8; 32],
+        proof_a: BytesN<64>,
+        proof_b: BytesN<128>,
+        proof_c: BytesN<64>,
+        nullifier: BytesN<32>,
         period: u32,
     ) -> PaymentRecord {
         let addresses: ContractAddresses = env
@@ -77,10 +77,10 @@ impl PaymentExecutor {
         // TODO: Call proof verifier contract
         // let verifier = ProofVerifierClient::new(&env, &addresses.verifier);
         // let proof = Groth16Proof { a: proof_a, b: proof_b, c: proof_c };
-        // 
+        //
         // let commitment = commitment_client.get_commitment(&employee);
         // let recipient_hash = poseidon_hash(employee);
-        // 
+        //
         // if !verifier.verify_payment_proof(
         //     &proof,
         //     &commitment.commitment,
@@ -96,21 +96,21 @@ impl PaymentExecutor {
 
         // Execute token transfer
         let token_client = token::Client::new(&env, &addresses.token);
-        
+
         // Get company treasury from registry
         // let registry = PayrollRegistryClient::new(&env, &addresses.registry);
         // let company = registry.get_company(&company_id);
         // token_client.transfer(&company.treasury, &employee, &amount);
 
         // For now, use placeholder
-        let _ = (proof_a, proof_b, proof_c, nullifier, amount);
+        let _ = (proof_a, proof_b, proof_c, nullifier.clone(), amount);
         let _ = token_client;
 
         // Record payment
         let record = PaymentRecord {
             company_id: company_id.clone(),
             employee: employee.clone(),
-            proof_hash: nullifier, // Use nullifier as unique identifier
+            proof_hash: nullifier.clone(), // Use nullifier as unique identifier
             timestamp: env.ledger().timestamp(),
             period,
         };
@@ -119,11 +119,7 @@ impl PaymentExecutor {
 
         // Update total paid
         let total_key = DataKey::TotalPaid(company_id);
-        let current_total: i128 = env
-            .storage()
-            .persistent()
-            .get(&total_key)
-            .unwrap_or(0);
+        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
         env.storage()
             .persistent()
             .set(&total_key, &(current_total + amount));
@@ -137,14 +133,14 @@ impl PaymentExecutor {
         company_id: Symbol,
         employees: soroban_sdk::Vec<Address>,
         amounts: soroban_sdk::Vec<i128>,
-        proofs_a: soroban_sdk::Vec<[u8; 64]>,
-        proofs_b: soroban_sdk::Vec<[u8; 128]>,
-        proofs_c: soroban_sdk::Vec<[u8; 64]>,
-        nullifiers: soroban_sdk::Vec<[u8; 32]>,
+        proofs_a: soroban_sdk::Vec<BytesN<64>>,
+        proofs_b: soroban_sdk::Vec<BytesN<128>>,
+        proofs_c: soroban_sdk::Vec<BytesN<64>>,
+        nullifiers: soroban_sdk::Vec<BytesN<32>>,
         period: u32,
     ) -> soroban_sdk::Vec<PaymentRecord> {
         let count = employees.len();
-        
+
         if amounts.len() != count
             || proofs_a.len() != count
             || proofs_b.len() != count
@@ -231,7 +227,7 @@ mod tests {
         client.initialize(&addresses);
 
         let employee = Address::generate(&env);
-        
+
         assert!(!client.is_paid(&employee, &1));
     }
 }
