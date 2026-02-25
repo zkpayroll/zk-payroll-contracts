@@ -51,6 +51,7 @@ impl PaymentExecutor {
     /// 1. The payment amount matches the salary commitment
     /// 2. The recipient is the correct employee
     /// 3. The nullifier is fresh (no double payment)
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_payment(
         env: Env,
         company_id: Symbol,
@@ -128,6 +129,7 @@ impl PaymentExecutor {
     }
 
     /// Execute batch payroll for multiple employees
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_batch_payroll(
         env: Env,
         company_id: Symbol,

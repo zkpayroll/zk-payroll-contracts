@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, BytesN, Env};
 
 /// Groth16 proof structure
 #[contracttype]
@@ -219,7 +219,12 @@ mod tests {
 
         client.initialize(&mock_verification_key(&env));
 
-        let result = client.verify_payment_proof(&mock_proof(&env), &BytesN::from_array(&env, &[0u8; 32]), &BytesN::from_array(&env, &[1u8; 32]), &BytesN::from_array(&env, &[2u8; 32]));
+        let result = client.verify_payment_proof(
+            &mock_proof(&env),
+            &BytesN::from_array(&env, &[0u8; 32]),
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &BytesN::from_array(&env, &[2u8; 32]),
+        );
 
         assert!(result);
     }

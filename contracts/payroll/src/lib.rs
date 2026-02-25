@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, token as soroban_token, Address, BytesN, Env, Vec,
 };
 
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
@@ -157,7 +157,7 @@ impl Payroll {
         let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
         let token_client = soroban_token::Client::new(&e, &addrs.token);
 
-        for i in 0..count as u32 {
+        for i in 0..count {
             let proof = proofs.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
             let employee = employees.get(i).unwrap();
