@@ -19,10 +19,10 @@ pub struct ViewKey {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum AuditScope {
-    FullCompany,           // All employees, all time
-    TimeRange(u64, u64),   // Start and end timestamps
-    EmployeeList,          // Specific employees only
-    AggregateOnly,         // Only totals, no individual data
+    FullCompany,         // All employees, all time
+    TimeRange(u64, u64), // Start and end timestamps
+    EmployeeList,        // Specific employees only
+    AggregateOnly,       // Only totals, no individual data
 }
 
 /// Audit report (what auditors can verify)
@@ -85,9 +85,9 @@ impl AuditModule {
     /// Verify an auditor has valid access
     pub fn verify_access(env: Env, key_id: [u8; 32], auditor: Address) -> bool {
         let storage_key = DataKey::ViewKey(key_id);
-        
+
         let view_key: Option<ViewKey> = env.storage().persistent().get(&storage_key);
-        
+
         match view_key {
             Some(vk) => {
                 let current_time = env.ledger().timestamp();
@@ -137,15 +137,15 @@ impl AuditModule {
         // TODO: Query payment executor for aggregate data
         // let executor = PaymentExecutorClient::new(&env, &executor_address);
         // let total = executor.get_total_paid(&view_key.company_id);
-        
+
         // TODO: Query registry for employee count
         // let registry = PayrollRegistryClient::new(&env, &registry_address);
         // let company = registry.get_company(&view_key.company_id);
 
         AuditReport {
             company_id: view_key.company_id,
-            total_employees: 0,  // Placeholder
-            total_paid: 0,       // Placeholder
+            total_employees: 0, // Placeholder
+            total_paid: 0,      // Placeholder
             period_start,
             period_end,
             verified: true,
@@ -188,7 +188,7 @@ impl AuditModule {
     ) -> [u8; 32] {
         // TODO: Use Poseidon hash for deterministic ID generation
         // poseidon_hash(company_id, auditor, timestamp)
-        
+
         [0u8; 32] // Placeholder
     }
 

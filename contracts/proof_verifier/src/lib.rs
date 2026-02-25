@@ -43,7 +43,7 @@ impl ProofVerifier {
     }
 
     /// Verify a Groth16 proof for a payment
-    /// 
+    ///
     /// Public inputs:
     /// - salary_commitment: The Poseidon hash commitment of the salary
     /// - payment_nullifier: Unique identifier to prevent double-spending
@@ -62,23 +62,19 @@ impl ProofVerifier {
             .expect("Verifier not initialized");
 
         // Construct public inputs
-        let _public_inputs = [
-            salary_commitment,
-            payment_nullifier,
-            recipient_hash,
-        ];
+        let _public_inputs = [salary_commitment, payment_nullifier, recipient_hash];
 
         // TODO: Implement actual BN254 pairing check using Soroban host functions
         // This will use the new CAP-0074 host functions for BN254 operations:
         // - bn254_g1_add
-        // - bn254_g1_mul  
+        // - bn254_g1_mul
         // - bn254_pairing_check
         //
         // The verification equation is:
         // e(A, B) = e(alpha, beta) * e(IC, gamma) * e(C, delta)
         //
         // For now, return true to allow testing of other components
-        
+
         Self::verify_groth16_pairing(&env, &proof, &_vk, &_public_inputs)
     }
 
@@ -98,15 +94,15 @@ impl ProofVerifier {
 
         // Verify that the committed value is within [min_value, max_value]
         // without revealing the actual value
-        
+
         let _ = (commitment, min_value, max_value);
-        
+
         // TODO: Implement range proof verification
         Self::verify_groth16_pairing(&env, &proof, &_vk, &[[0u8; 32]; 3])
     }
 
     /// Internal: Groth16 pairing verification
-    /// 
+    ///
     /// Uses Protocol X-Ray BN254 primitives
     fn verify_groth16_pairing(
         _env: &Env,
@@ -115,7 +111,7 @@ impl ProofVerifier {
         _public_inputs: &[[u8; 32]; 3],
     ) -> bool {
         // TODO: Implement using Soroban host functions
-        // 
+        //
         // Step 1: Compute linear combination of IC points
         // let mut ic_sum = vk.ic[0];
         // for (i, input) in public_inputs.iter().enumerate() {
@@ -129,7 +125,7 @@ impl ProofVerifier {
         //     (proof.c, vk.delta),
         //     (vk.alpha, vk.beta)
         // ])
-        
+
         true // Placeholder
     }
 
@@ -141,9 +137,9 @@ impl ProofVerifier {
         nullifiers: soroban_sdk::Vec<[u8; 32]>,
         recipient_hashes: soroban_sdk::Vec<[u8; 32]>,
     ) -> bool {
-        if proofs.len() != commitments.len() 
-            || proofs.len() != nullifiers.len() 
-            || proofs.len() != recipient_hashes.len() 
+        if proofs.len() != commitments.len()
+            || proofs.len() != nullifiers.len()
+            || proofs.len() != recipient_hashes.len()
         {
             return false;
         }
@@ -154,13 +150,7 @@ impl ProofVerifier {
             let nullifier = nullifiers.get(i).unwrap();
             let recipient = recipient_hashes.get(i).unwrap();
 
-            if !Self::verify_payment_proof(
-                env.clone(),
-                proof,
-                commitment,
-                nullifier,
-                recipient,
-            ) {
+            if !Self::verify_payment_proof(env.clone(), proof, commitment, nullifier, recipient) {
                 return false;
             }
         }
@@ -210,12 +200,7 @@ mod tests {
 
         client.initialize(&mock_verification_key());
 
-        let result = client.verify_payment_proof(
-            &mock_proof(),
-            &[0u8; 32],
-            &[1u8; 32],
-            &[2u8; 32],
-        );
+        let result = client.verify_payment_proof(&mock_proof(), &[0u8; 32], &[1u8; 32], &[2u8; 32]);
 
         assert!(result);
     }

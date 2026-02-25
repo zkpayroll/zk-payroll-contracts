@@ -46,7 +46,7 @@ impl PaymentExecutor {
     }
 
     /// Execute a private payment with ZK proof
-    /// 
+    ///
     /// The proof verifies:
     /// 1. The payment amount matches the salary commitment
     /// 2. The recipient is the correct employee
@@ -77,10 +77,10 @@ impl PaymentExecutor {
         // TODO: Call proof verifier contract
         // let verifier = ProofVerifierClient::new(&env, &addresses.verifier);
         // let proof = Groth16Proof { a: proof_a, b: proof_b, c: proof_c };
-        // 
+        //
         // let commitment = commitment_client.get_commitment(&employee);
         // let recipient_hash = poseidon_hash(employee);
-        // 
+        //
         // if !verifier.verify_payment_proof(
         //     &proof,
         //     &commitment.commitment,
@@ -96,7 +96,7 @@ impl PaymentExecutor {
 
         // Execute token transfer
         let token_client = token::Client::new(&env, &addresses.token);
-        
+
         // Get company treasury from registry
         // let registry = PayrollRegistryClient::new(&env, &addresses.registry);
         // let company = registry.get_company(&company_id);
@@ -119,11 +119,7 @@ impl PaymentExecutor {
 
         // Update total paid
         let total_key = DataKey::TotalPaid(company_id);
-        let current_total: i128 = env
-            .storage()
-            .persistent()
-            .get(&total_key)
-            .unwrap_or(0);
+        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
         env.storage()
             .persistent()
             .set(&total_key, &(current_total + amount));
@@ -144,7 +140,7 @@ impl PaymentExecutor {
         period: u32,
     ) -> soroban_sdk::Vec<PaymentRecord> {
         let count = employees.len();
-        
+
         if amounts.len() != count
             || proofs_a.len() != count
             || proofs_b.len() != count
@@ -231,7 +227,7 @@ mod tests {
         client.initialize(&addresses);
 
         let employee = Address::generate(&env);
-        
+
         assert!(!client.is_paid(&employee, &1));
     }
 }

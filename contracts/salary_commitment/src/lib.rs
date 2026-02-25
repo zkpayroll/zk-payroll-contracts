@@ -6,7 +6,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SalaryCommitment {
-    pub commitment: [u8; 32],     // Poseidon(salary, blinding_factor)
+    pub commitment: [u8; 32], // Poseidon(salary, blinding_factor)
     pub created_at: u64,
     pub updated_at: u64,
     pub version: u32,
@@ -34,13 +34,9 @@ pub struct SalaryCommitmentContract;
 #[contractimpl]
 impl SalaryCommitmentContract {
     /// Store a new salary commitment for an employee
-    pub fn store_commitment(
-        env: Env,
-        employee: Address,
-        commitment: [u8; 32],
-    ) -> SalaryCommitment {
+    pub fn store_commitment(env: Env, employee: Address, commitment: [u8; 32]) -> SalaryCommitment {
         let timestamp = env.ledger().timestamp();
-        
+
         let salary_commitment = SalaryCommitment {
             commitment,
             created_at: timestamp,
@@ -94,7 +90,7 @@ impl SalaryCommitmentContract {
     /// Record a payment nullifier (prevents double payment)
     pub fn record_nullifier(env: Env, nullifier: [u8; 32]) {
         let key = DataKey::Nullifier(nullifier);
-        
+
         if env.storage().persistent().has(&key) {
             panic!("Nullifier already used - double payment attempt");
         }
@@ -114,16 +110,12 @@ impl SalaryCommitmentContract {
     }
 
     /// Compute Poseidon hash (placeholder - will use host function)
-    /// 
+    ///
     /// In production, this will use CAP-0075 Poseidon host functions
-    pub fn compute_commitment(
-        _env: Env,
-        _salary: u64,
-        _blinding_factor: [u8; 32],
-    ) -> [u8; 32] {
+    pub fn compute_commitment(_env: Env, _salary: u64, _blinding_factor: [u8; 32]) -> [u8; 32] {
         // TODO: Use Soroban Poseidon host function
         // poseidon_hash([salary_bytes, blinding_factor])
-        
+
         // Placeholder implementation
         [0u8; 32]
     }
@@ -138,7 +130,7 @@ impl SalaryCommitmentContract {
     ) -> bool {
         let stored = Self::get_commitment(env.clone(), employee);
         let computed = Self::compute_commitment(env, claimed_salary, blinding_factor);
-        
+
         stored.commitment == computed
     }
 }
@@ -190,9 +182,9 @@ mod tests {
         let nullifier = [99u8; 32];
 
         assert!(!client.is_nullifier_used(&nullifier));
-        
+
         client.record_nullifier(&nullifier);
-        
+
         assert!(client.is_nullifier_used(&nullifier));
     }
 
