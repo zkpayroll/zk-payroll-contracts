@@ -62,7 +62,7 @@ mod tests {
         // register dependent contracts
         let verifier_id = env.register_contract(None, ProofVerifier);
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
-        verifier_client.initialize(&mock_vk(&env));
+        verifier_client.initialize_verifier(&mock_vk(&env));
 
         let commitment_id = env.register_contract(None, SalaryCommitmentContract);
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);

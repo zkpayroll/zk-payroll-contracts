@@ -34,7 +34,7 @@ pub struct ProofVerifier;
 #[contractimpl]
 impl ProofVerifier {
     /// Initialize the verifier with a verification key
-    pub fn initialize(env: Env, vk: VerificationKey) {
+    pub fn initialize_verifier(env: Env, vk: VerificationKey) {
         let key = DataKey::VerificationKey;
         if env.storage().persistent().has(&key) {
             panic!("Already initialized");
