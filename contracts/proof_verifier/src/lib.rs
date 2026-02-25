@@ -208,7 +208,7 @@ mod tests {
         let client = ProofVerifierClient::new(&env, &contract_id);
 
         let vk = mock_verification_key(&env);
-        client.initialize(&vk);
+        client.initialize_verifier(&vk);
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         let contract_id = env.register_contract(None, ProofVerifier);
         let client = ProofVerifierClient::new(&env, &contract_id);
 
-        client.initialize(&mock_verification_key(&env));
+        client.initialize_verifier(&mock_verification_key(&env));
 
         let result = client.verify_payment_proof(
             &mock_proof(&env),
