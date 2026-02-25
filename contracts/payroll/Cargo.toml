@@ -11,7 +11,7 @@ salary_commitment = { path = "../salary_commitment" }
 token = { path = "../token" }
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dev-dependencies]

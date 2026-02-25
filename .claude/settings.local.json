@@ -3,7 +3,9 @@
     "allow": [
       "Bash(git add .github/ISSUE_TEMPLATE/bug_report.yml .github/ISSUE_TEMPLATE/feature_request.yml .github/PULL_REQUEST_TEMPLATE.md .github/scripts/setup-labels.sh .github/workflows/ci.yml .gitignore CONTRIBUTING.md LICENSE LICENSE-APACHE LICENSE-MIT)",
       "WebFetch(domain:github.com)",
-      "Bash(cargo metadata --no-deps --format-version 1)"
+      "Bash(cargo metadata --no-deps --format-version 1)",
+      "Bash(/home/codespace/.cargo/bin/cargo test -p integration_tests)",
+      "Bash(/home/codespace/.cargo/bin/cargo test --workspace)"
     ]
   }
 }
