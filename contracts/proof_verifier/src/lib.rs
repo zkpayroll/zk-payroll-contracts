@@ -1,25 +1,25 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Bytes, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Bytes, BytesN, Env};
 
 /// Groth16 proof structure
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Groth16Proof {
-    pub a: [u8; 64],  // G1 point
-    pub b: [u8; 128], // G2 point
-    pub c: [u8; 64],  // G1 point
+    pub a: BytesN<64>,  // G1 point
+    pub b: BytesN<128>, // G2 point
+    pub c: BytesN<64>,  // G1 point
 }
 
 /// Verification key for the payment circuit
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct VerificationKey {
-    pub alpha: [u8; 64],
-    pub beta: [u8; 128],
-    pub gamma: [u8; 128],
-    pub delta: [u8; 128],
-    pub ic: [[u8; 64]; 4], // Input commitments
+    pub alpha: BytesN<64>,
+    pub beta: BytesN<128>,
+    pub gamma: BytesN<128>,
+    pub delta: BytesN<128>,
+    pub ic: soroban_sdk::Vec<BytesN<64>>, // Input commitments
 }
 
 /// Storage keys
@@ -51,9 +51,9 @@ impl ProofVerifier {
     pub fn verify_payment_proof(
         env: Env,
         proof: Groth16Proof,
-        salary_commitment: [u8; 32],
-        payment_nullifier: [u8; 32],
-        recipient_hash: [u8; 32],
+        salary_commitment: BytesN<32>,
+        payment_nullifier: BytesN<32>,
+        recipient_hash: BytesN<32>,
     ) -> bool {
         let _vk: VerificationKey = env
             .storage()
@@ -62,7 +62,10 @@ impl ProofVerifier {
             .expect("Verifier not initialized");
 
         // Construct public inputs
-        let _public_inputs = [salary_commitment, payment_nullifier, recipient_hash];
+        let _public_inputs = soroban_sdk::Vec::from_array(
+            &env,
+            [salary_commitment, payment_nullifier, recipient_hash],
+        );
 
         // TODO: Implement actual BN254 pairing check using Soroban host functions
         // This will use the new CAP-0074 host functions for BN254 operations:
@@ -82,7 +85,7 @@ impl ProofVerifier {
     pub fn verify_range_proof(
         env: Env,
         proof: Groth16Proof,
-        commitment: [u8; 32],
+        commitment: BytesN<32>,
         min_value: u64,
         max_value: u64,
     ) -> bool {
@@ -98,7 +101,15 @@ impl ProofVerifier {
         let _ = (commitment, min_value, max_value);
 
         // TODO: Implement range proof verification
-        Self::verify_groth16_pairing(&env, &proof, &_vk, &[[0u8; 32]; 3])
+        let empty_inputs = soroban_sdk::Vec::from_array(
+            &env,
+            [
+                BytesN::from_array(&env, &[0u8; 32]),
+                BytesN::from_array(&env, &[0u8; 32]),
+                BytesN::from_array(&env, &[0u8; 32]),
+            ],
+        );
+        Self::verify_groth16_pairing(&env, &proof, &_vk, &empty_inputs)
     }
 
     /// Internal: Groth16 pairing verification
@@ -108,7 +119,7 @@ impl ProofVerifier {
         _env: &Env,
         _proof: &Groth16Proof,
         _vk: &VerificationKey,
-        _public_inputs: &[[u8; 32]; 3],
+        _public_inputs: &soroban_sdk::Vec<BytesN<32>>,
     ) -> bool {
         // TODO: Implement using Soroban host functions
         //
@@ -133,9 +144,9 @@ impl ProofVerifier {
     pub fn verify_batch_proofs(
         env: Env,
         proofs: soroban_sdk::Vec<Groth16Proof>,
-        commitments: soroban_sdk::Vec<[u8; 32]>,
-        nullifiers: soroban_sdk::Vec<[u8; 32]>,
-        recipient_hashes: soroban_sdk::Vec<[u8; 32]>,
+        commitments: soroban_sdk::Vec<BytesN<32>>,
+        nullifiers: soroban_sdk::Vec<BytesN<32>>,
+        recipient_hashes: soroban_sdk::Vec<BytesN<32>>,
     ) -> bool {
         if proofs.len() != commitments.len()
             || proofs.len() != nullifiers.len()
@@ -164,21 +175,29 @@ mod tests {
     use super::*;
     use soroban_sdk::Env;
 
-    fn mock_verification_key() -> VerificationKey {
+    fn mock_verification_key(env: &Env) -> VerificationKey {
         VerificationKey {
-            alpha: [0u8; 64],
-            beta: [0u8; 128],
-            gamma: [0u8; 128],
-            delta: [0u8; 128],
-            ic: [[0u8; 64]; 4],
+            alpha: BytesN::from_array(env, &[0u8; 64]),
+            beta: BytesN::from_array(env, &[0u8; 128]),
+            gamma: BytesN::from_array(env, &[0u8; 128]),
+            delta: BytesN::from_array(env, &[0u8; 128]),
+            ic: soroban_sdk::Vec::from_array(
+                env,
+                [
+                    BytesN::from_array(env, &[0u8; 64]),
+                    BytesN::from_array(env, &[0u8; 64]),
+                    BytesN::from_array(env, &[0u8; 64]),
+                    BytesN::from_array(env, &[0u8; 64]),
+                ],
+            ),
         }
     }
 
-    fn mock_proof() -> Groth16Proof {
+    fn mock_proof(env: &Env) -> Groth16Proof {
         Groth16Proof {
-            a: [0u8; 64],
-            b: [0u8; 128],
-            c: [0u8; 64],
+            a: BytesN::from_array(env, &[0u8; 64]),
+            b: BytesN::from_array(env, &[0u8; 128]),
+            c: BytesN::from_array(env, &[0u8; 64]),
         }
     }
 
@@ -188,7 +207,7 @@ mod tests {
         let contract_id = env.register_contract(None, ProofVerifier);
         let client = ProofVerifierClient::new(&env, &contract_id);
 
-        let vk = mock_verification_key();
+        let vk = mock_verification_key(&env);
         client.initialize(&vk);
     }
 
@@ -198,9 +217,9 @@ mod tests {
         let contract_id = env.register_contract(None, ProofVerifier);
         let client = ProofVerifierClient::new(&env, &contract_id);
 
-        client.initialize(&mock_verification_key());
+        client.initialize(&mock_verification_key(&env));
 
-        let result = client.verify_payment_proof(&mock_proof(), &[0u8; 32], &[1u8; 32], &[2u8; 32]);
+        let result = client.verify_payment_proof(&mock_proof(&env), &BytesN::from_array(&env, &[0u8; 32]), &BytesN::from_array(&env, &[1u8; 32]), &BytesN::from_array(&env, &[2u8; 32]));
 
         assert!(result);
     }

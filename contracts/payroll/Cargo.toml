@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[dependencies]
+soroban-sdk = { workspace = true }
+proof_verifier = { path = "../proof_verifier" }
+salary_commitment = { path = "../salary_commitment" }
+token = { path = "../token" }
+
 [lib]
 crate-type = ["cdylib"]
 doctest = false

@@ -1,6 +1,9 @@
 target/
 .DS_Store
 **/*.rs.bk
+scripts/
+*.diff
+**/test_snapshots/
 
 # ZK trusted setup artifacts — large files, never commit
 ptau/

@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
 
 /// Payment record
 #[contracttype]
@@ -8,7 +8,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 pub struct PaymentRecord {
     pub company_id: Symbol,
     pub employee: Address,
-    pub proof_hash: [u8; 32],
+    pub proof_hash: BytesN<32>,
     pub timestamp: u64,
     pub period: u32, // Payment period (e.g., month number)
 }
@@ -56,10 +56,10 @@ impl PaymentExecutor {
         company_id: Symbol,
         employee: Address,
         amount: i128, // Payment amount (verified by ZK proof)
-        proof_a: [u8; 64],
-        proof_b: [u8; 128],
-        proof_c: [u8; 64],
-        nullifier: [u8; 32],
+        proof_a: BytesN<64>,
+        proof_b: BytesN<128>,
+        proof_c: BytesN<64>,
+        nullifier: BytesN<32>,
         period: u32,
     ) -> PaymentRecord {
         let addresses: ContractAddresses = env
@@ -103,14 +103,14 @@ impl PaymentExecutor {
         // token_client.transfer(&company.treasury, &employee, &amount);
 
         // For now, use placeholder
-        let _ = (proof_a, proof_b, proof_c, nullifier, amount);
+        let _ = (proof_a, proof_b, proof_c, nullifier.clone(), amount);
         let _ = token_client;
 
         // Record payment
         let record = PaymentRecord {
             company_id: company_id.clone(),
             employee: employee.clone(),
-            proof_hash: nullifier, // Use nullifier as unique identifier
+            proof_hash: nullifier.clone(), // Use nullifier as unique identifier
             timestamp: env.ledger().timestamp(),
             period,
         };
@@ -133,10 +133,10 @@ impl PaymentExecutor {
         company_id: Symbol,
         employees: soroban_sdk::Vec<Address>,
         amounts: soroban_sdk::Vec<i128>,
-        proofs_a: soroban_sdk::Vec<[u8; 64]>,
-        proofs_b: soroban_sdk::Vec<[u8; 128]>,
-        proofs_c: soroban_sdk::Vec<[u8; 64]>,
-        nullifiers: soroban_sdk::Vec<[u8; 32]>,
+        proofs_a: soroban_sdk::Vec<BytesN<64>>,
+        proofs_b: soroban_sdk::Vec<BytesN<128>>,
+        proofs_c: soroban_sdk::Vec<BytesN<64>>,
+        nullifiers: soroban_sdk::Vec<BytesN<32>>,
         period: u32,
     ) -> soroban_sdk::Vec<PaymentRecord> {
         let count = employees.len();

@@ -777,7 +777,10 @@ dependencies = [
 name = "payroll"
 version = "0.1.0"
 dependencies = [
+ "proof_verifier",
+ "salary_commitment",
  "soroban-sdk",
+ "token",
 ]
 
 [[package]]
