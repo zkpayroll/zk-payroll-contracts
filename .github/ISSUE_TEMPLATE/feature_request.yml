@@ -1,0 +1,160 @@
+name: Feature Request
+description: Propose a new feature or enhancement for ZK Payroll Contracts
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for proposing a new feature! Please fill out each section carefully.
+        Well-scoped proposals with clear motivation and design details are prioritised.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight Checklist
+      options:
+        - label: I have searched [existing issues](https://github.com/zkpayroll/zk-payroll-contracts/issues) and this feature has not already been requested.
+          required: true
+        - label: I have reviewed the project [README](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target Component
+      description: Which part of the system would this feature affect?
+      multiple: true
+      options:
+        - payroll_registry
+        - salary_commitment
+        - proof_verifier
+        - payment_executor
+        - audit_module
+        - token
+        - ZK Circuit (Circom)
+        - CI/CD / DevOps
+        - Documentation
+        - New Contract / Module
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: |
+        What problem does this feature solve? Who does it benefit?
+        Please be specific — reference real use cases or pain points in the current codebase.
+      placeholder: |
+        Currently, batch payroll is limited to X employees per transaction because of Y.
+        This causes Z for organizations with > 100 employees.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: |
+        Describe the feature you would like to see implemented.
+        Include API/interface design where applicable.
+      placeholder: |
+        Add a `batch_process_payroll_v2` function that uses recursive proofs
+        to aggregate N payment proofs into a single on-chain verification call.
+    validations:
+      required: true
+
+  - type: textarea
+    id: design-proposal
+    attributes:
+      label: Design Proposal
+      description: |
+        Provide a technical design for your proposed feature.
+        Include contract changes, circuit modifications, storage layout impacts,
+        and any cryptographic considerations (e.g. Poseidon hash variants, Groth16 key changes).
+      placeholder: |
+        ## Data Structures
+        ```rust
+        pub struct BatchPayrollRequest {
+            proofs: Vec<Groth16Proof>,
+            commitments: Vec<BytesN<32>>,
+        }
+        ```
+
+        ## Circuit Changes
+        - Modify `payment.circom` to support aggregated witness inputs.
+        - New trusted setup required (new ptau phase 2).
+
+        ## Storage Impact
+        - One additional storage slot per batch record (~8 bytes state rent).
+
+        ## Cryptographic Considerations
+        - Recursive Groth16 requires Pasta curves; verify Soroban host support.
+    validations:
+      required: true
+
+  - type: textarea
+    id: blockchain-cost-analysis
+    attributes:
+      label: Blockchain Cost Analysis
+      description: |
+        Provide an estimate of the on-chain cost (fees, state rent) of your feature.
+        Include comparisons to the current approach where possible.
+        Reference Stellar fee schedules or Soroban resource limits.
+      placeholder: |
+        | Operation            | Current (per employee) | Proposed (per batch of N) |
+        |----------------------|------------------------|---------------------------|
+        | CPU instructions     | ~1,000,000             | ~2,500,000 (amortised)    |
+        | Memory bytes         | 4,096                  | 4,096 + N * 64            |
+        | State entries (rent) | 2                      | 3 (+1 batch record)       |
+        | Ledger entries read  | 4                      | 4 + N                     |
+        | Estimated fee (XLM)  | ~0.01                  | ~0.015 for N=50           |
+
+        Cost estimation based on Stellar Protocol 21 fee schedule.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: |
+        What alternative solutions did you consider and why did you rule them out?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: breaking-change
+    attributes:
+      label: Breaking Change?
+      description: Would this feature require changes to existing contract interfaces or ZK circuits (necessitating a new trusted setup)?
+      options:
+        - "No — purely additive"
+        - "Yes — contract interface change (semver bump required)"
+        - "Yes — ZK circuit change (new trusted setup required)"
+        - "Unsure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: |
+        Any other context, references, prior art, or links to related work
+        (e.g. Circom libraries, EIPs, Stellar CAPs, academic papers).
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to implement this feature and submit a PR.
+        - label: I am willing to write tests for this feature.
+        - label: I am willing to write documentation for this feature.
