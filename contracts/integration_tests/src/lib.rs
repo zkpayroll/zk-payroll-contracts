@@ -122,7 +122,6 @@ mod e2e {
 
         // Register a company up-front; first ID is always 0.
         let company_id = registry_client.register_company(&admin, &treasury);
-
         TestContext {
             env,
             admin,
@@ -159,7 +158,6 @@ mod e2e {
         // Register Alice in the registry with the same commitment.
         ctx.registry_client
             .add_employee(&ctx.company_id, &ctx.alice, &commitment);
-
         // ── PHASE 3: EXECUTION ────────────────────────────────────────────────
         // Mint tokens into the company treasury.
         let initial_treasury: i128 = 10_000;
@@ -303,6 +301,29 @@ mod e2e {
     // ── Dynamic proof generation test ─────────────────────────────────────────
 
     /// Tests the full proof-generation pipeline using a dynamically generated proof.
+    ///
+    /// This test bridges Circom/SnarkJS with the Soroban test framework by:
+    ///
+    /// 1. Invoking `node circuits/generate_proof.js 5000 123` as a subprocess.
+    /// 2. Reading and parsing the resulting `proof_bytes.json` into Rust byte
+    ///    arrays via [`crate::proof_helper::try_generate_proof`].
+    /// 3. Constructing Soroban `BytesN` types from those bytes.
+    /// 4. Running the full payroll flow — commitment storage, employee
+    ///    registration, treasury funding, and batch payroll execution.
+    /// 5. Asserting that treasury and employee balances change correctly and
+    ///    that the payment nullifier is recorded on-chain.
+    ///
+    /// **Graceful skip**: if Node.js is not installed or
+    /// `circuits/generate_proof.js` is not found the test logs a warning to
+    /// stderr and returns without failing, so Rust-only CI pipelines continue
+    /// to pass.
+    ///
+    /// When SnarkJS and compiled circuit artefacts are present, `generate_proof.js`
+    /// produces a real Groth16 proof; otherwise it produces a deterministic
+    /// mock proof in identical format.  The Soroban verifier currently returns
+    /// `true` for all proofs (placeholder pending CAP-0074 BN254 host
+    /// functions), so both paths exercise the complete deserialization and
+    /// execution pipeline.
     #[test]
     fn test_dynamic_proof_integration() {
         use crate::proof_helper::try_generate_proof;
@@ -314,7 +335,6 @@ mod e2e {
 
         let ctx = setup();
         let env = &ctx.env;
-
         let proof = Groth16Proof {
             a: BytesN::from_array(env, &proof_data.pi_a),
             b: BytesN::from_array(env, &proof_data.pi_b),

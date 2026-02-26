@@ -108,7 +108,7 @@ pub fn try_generate_proof(salary: u64, blinding: u64) -> Option<GeneratedProof> 
 
     // Spawn: node <script_path> <salary> <blinding>
     // Arguments are validated u64 values converted to decimal — no injection.
-    let salary_str   = u64_to_decimal(salary);
+    let salary_str = u64_to_decimal(salary);
     let blinding_str = u64_to_decimal(blinding);
 
     let output = Command::new("node")
@@ -176,7 +176,11 @@ fn find_script() -> Option<PathBuf> {
     // contracts/integration_tests/ → contracts/ → workspace root
     let workspace_root = Path::new(&manifest_dir).parent()?.parent()?;
     let script = workspace_root.join("circuits").join("generate_proof.js");
-    if script.exists() { Some(script) } else { None }
+    if script.exists() {
+        Some(script)
+    } else {
+        None
+    }
 }
 
 /// Convert a `u64` to its decimal ASCII representation without relying on
@@ -206,20 +210,20 @@ fn u64_to_decimal(mut n: u64) -> String {
 /// sequences — so a lightweight hand-rolled parser suffices, avoiding any
 /// external JSON library dependency.
 fn parse_proof_bytes(json: &str) -> Option<GeneratedProof> {
-    let pi_a_hex       = extract_str_field(json, "pi_a")?;
-    let pi_b_hex       = extract_str_field(json, "pi_b")?;
-    let pi_c_hex       = extract_str_field(json, "pi_c")?;
-    let commit_hex     = extract_str_field(json, "salary_commitment")?;
-    let nullifier_hex  = extract_str_field(json, "payment_nullifier")?;
-    let recipient_hex  = extract_str_field(json, "recipient_hash")?;
+    let pi_a_hex = extract_str_field(json, "pi_a")?;
+    let pi_b_hex = extract_str_field(json, "pi_b")?;
+    let pi_c_hex = extract_str_field(json, "pi_c")?;
+    let commit_hex = extract_str_field(json, "salary_commitment")?;
+    let nullifier_hex = extract_str_field(json, "payment_nullifier")?;
+    let recipient_hex = extract_str_field(json, "recipient_hash")?;
 
     Some(GeneratedProof {
-        pi_a:              hex_decode::<64>(pi_a_hex)?,
-        pi_b:              hex_decode::<128>(pi_b_hex)?,
-        pi_c:              hex_decode::<64>(pi_c_hex)?,
+        pi_a: hex_decode::<64>(pi_a_hex)?,
+        pi_b: hex_decode::<128>(pi_b_hex)?,
+        pi_c: hex_decode::<64>(pi_c_hex)?,
         salary_commitment: hex_decode::<32>(commit_hex)?,
         payment_nullifier: hex_decode::<32>(nullifier_hex)?,
-        recipient_hash:    hex_decode::<32>(recipient_hex)?,
+        recipient_hash: hex_decode::<32>(recipient_hex)?,
     })
 }
 
@@ -229,16 +233,16 @@ fn parse_proof_bytes(json: &str) -> Option<GeneratedProof> {
 /// slice of `json` between the value's enclosing quotes.  Handles flat JSON
 /// objects with string values only — sufficient for `proof_bytes.json`.
 fn extract_str_field<'a>(json: &'a str, field: &str) -> Option<&'a str> {
-    let bytes       = json.as_bytes();
+    let bytes = json.as_bytes();
     let field_bytes = field.as_bytes();
-    let flen        = field_bytes.len();
+    let flen = field_bytes.len();
 
     let mut i = 0usize;
     while i + flen + 2 <= bytes.len() {
         // Match the pattern: `"<field>"`
         if bytes[i] == b'"'
             && bytes.get(i + 1..i + 1 + flen) == Some(field_bytes)
-            && bytes.get(i + 1 + flen)         == Some(&b'"')
+            && bytes.get(i + 1 + flen) == Some(&b'"')
         {
             // Advance past the closing `"` of the key name.
             let after_key = &json[i + 1 + flen + 1..];
@@ -247,7 +251,7 @@ fn extract_str_field<'a>(json: &'a str, field: &str) -> Option<&'a str> {
             let after_col = after_key.strip_prefix(':')?;
             // Expect optional whitespace, then the opening `"` of the value.
             let after_col = after_col.trim_start_matches(|c: char| c.is_ascii_whitespace());
-            let value     = after_col.strip_prefix('"')?;
+            let value = after_col.strip_prefix('"')?;
             // Value extends to the next `"`.
             let end = value.find('"')?;
             return Some(&value[..end]);
@@ -284,8 +288,8 @@ mod inner {
 
     #[test]
     fn test_u64_to_decimal_values() {
-        assert_eq!(u64_to_decimal(1),        "1");
-        assert_eq!(u64_to_decimal(5000),     "5000");
+        assert_eq!(u64_to_decimal(1), "1");
+        assert_eq!(u64_to_decimal(5000), "5000");
         assert_eq!(u64_to_decimal(u64::MAX), "18446744073709551615");
     }
 
