@@ -1,0 +1,36 @@
+[package]
+name    = "zk-payroll-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zk-payroll"
+path = "src/main.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# SQLite — bundled so no system libsqlite3 is required
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Cryptographically secure random bytes (OsRng)
+rand = "0.8"
+
+# BN254 scalar field for field-element arithmetic
+ark-bn254    = "0.4"
+ark-ff       = "0.4"
+ark-serialize = "0.4"
+
+# Poseidon hash with circomlib-compatible parameters over BN254
+light-poseidon = "0.2"
+
+# Hex encoding for database storage and user-facing output
+hex = "0.4"
+
+# Cross-platform home directory (~/.zk-payroll)
+dirs = "5"
+
+# Ergonomic error propagation for CLI binaries
+anyhow = "1"

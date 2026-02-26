@@ -44,7 +44,9 @@ jobs:
         run: cargo test --workspace
 
       - name: Build contracts (explicit target)
-        run: cargo build --target wasm32v1-none --release
+        # Exclude the native-only CLI crate — it uses OS-dependent dependencies
+        # (rusqlite, rand/OsRng, dirs) that cannot compile for wasm32v1-none.
+        run: cargo build --workspace --target wasm32v1-none --release --exclude zk-payroll-cli
 
       - name: Build contracts (Soroban CLI)
         run: soroban contract build
