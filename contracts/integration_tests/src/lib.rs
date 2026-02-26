@@ -8,11 +8,11 @@
 /// The happy-path test exercises:
 ///   1. SETUP    – Register a company with admin privileges
 ///   2. ONBOARDING – Enrol Alice with a salary commitment
-///                   representing Poseidon_Hash(salary=5000, blinding=123)
+///      representing Poseidon_Hash(salary=5000, blinding=123)
 ///   3. EXECUTION  – Generate a mock Groth16 proof and run batch payroll
 ///   4. ASSERTIONS – Treasury decreases by 5 000; Alice's balance increases by 5 000;
-///                   payment event is emitted; double-payment is rejected;
-///                   unregistered employees cannot be paid.
+///      payment event is emitted; double-payment is rejected;
+///      unregistered employees cannot be paid.
 #[cfg(test)]
 mod e2e {
     use payroll::{Payroll, PayrollClient};
