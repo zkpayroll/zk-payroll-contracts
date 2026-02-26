@@ -1,0 +1,66 @@
+name: Rust Format & Lint
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt-and-clippy:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install Rust stable (≥ 1.74) with rustfmt and clippy components.
+      # actions-rust-lang/setup-rust-toolchain also sets RUSTFLAGS=-D warnings
+      # for the remainder of the job, so clippy warnings become hard errors.
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          # Disable the default -D warnings in RUSTFLAGS so we control it
+          # explicitly in the clippy step below.
+          rustflags: ""
+
+      # Swatinem/rust-cache caches ~/.cargo/registry, ~/.cargo/git, and the
+      # target/ directory, keyed on Cargo.lock and the job name.
+      # This meaningfully reduces PR merge times on repeated runs.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Workspace root — where the [workspace] Cargo.toml lives.
+          workspaces: ". -> target"
+          # Include the job name in the cache key so fmt and clippy don't share
+          # a cache that might be partially dirty.
+          shared-key: "fmt-clippy"
+
+      # ── Step 1: Format check ──────────────────────────────────────────────
+      # Runs rustfmt on every crate that is a member of the workspace
+      # (i.e. every crate under contracts/).  The -- --check flag makes
+      # rustfmt exit with a non-zero code if any file would be reformatted,
+      # without actually writing changes.
+      - name: Check formatting (cargo fmt)
+        working-directory: .
+        run: cargo fmt --all -- --check
+
+      # ── Step 2: Lint (Clippy) ─────────────────────────────────────────────
+      # --workspace  : lint every crate in the workspace (all contracts/)
+      # --all-targets: include tests, examples, and benchmarks
+      # --all-features: enable every feature flag (important for conditional code)
+      # -D warnings  : treat all Clippy warnings as errors
+      #
+      # Soroban-specific lints caught here include:
+      #   - use of f32/f64 (unsupported in WASM target)
+      #   - unnecessary heap allocations inside contract logic
+      #   - dead code that inflates WASM binary size
+      - name: Run Clippy (deny warnings)
+        working-directory: .
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings

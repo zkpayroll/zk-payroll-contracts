@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
+    Env, Symbol, Vec,
 };
 
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
@@ -14,16 +15,124 @@ pub struct Payroll;
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContractAddresses {
+    pub admin: Address,
     pub token: Address,
     pub verifier: Address,
     pub commitment: Address,
     pub treasury: Address,
 }
 
+#[contracttype]
+pub enum DataKey {
+    Addresses,
+}
+
+#[contractimpl]
+impl Payroll {
+    /// Initialize with admin, token contract, verifier, commitment contracts and treasury address
+    pub fn initialize(
+        e: Env,
+        admin: Address,
+        token: Address,
+        verifier: Address,
+        commitment: Address,
+        treasury: Address,
+    ) {
+        let key = DataKey::Addresses;
+        if e.storage().persistent().has(&key) {
+            panic!("Already initialized")
+        }
+        let addrs = ContractAddresses {
+            admin,
+            token,
+            verifier,
+            commitment,
+            treasury,
+        };
+        e.storage().persistent().set(&key, &addrs);
+    }
+
+    pub fn deposit(_e: Env, _from: Address, _amount: i128) {
+        // Deposit placeholder
+    }
+
+    /// Batch process payroll: verify each proof and execute token transfers.
+    ///
+    /// Only the registered admin may trigger payroll execution.
+    pub fn batch_process_payroll(
+        e: Env,
+        proofs: Vec<Groth16Proof>,
+        amounts: Vec<i128>,
+        employees: Vec<Address>,
+    ) {
+        let count = proofs.len();
+
+        if amounts.len() != count || employees.len() != count {
+            panic!("Array length mismatch");
+        }
+
+        // Enforce conservative max batch size to avoid hitting Soroban instruction limit
+        assert!(count <= MAX_BATCH, "Batch too large");
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        // Only the registered admin may trigger payroll execution
+        addrs.admin.require_auth();
+
+        let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+
+        for i in 0..count {
+            let proof = proofs.get(i).unwrap();
+            let amount = amounts.get(i).unwrap();
+            let employee = employees.get(i).unwrap();
+
+            // Retrieve stored commitment for employee
+            let commitment_struct = commitment_client.get_commitment(&employee);
+            let commitment = commitment_struct.commitment;
+
+            // Derive a unique nullifier per (batch_index) to prevent double-payment.
+            // In production these come from the prover's public inputs.
+            let mut nullifier_arr = [0u8; 32];
+            nullifier_arr[0] = (i % 256) as u8;
+            nullifier_arr[1] = (i / 256) as u8;
+            let nullifier = BytesN::from_array(&e, &nullifier_arr);
+            let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
+
+            // Verify the Groth16 proof for this payment
+            let ok =
+                verifier.verify_payment_proof(&proof, &commitment, &nullifier, &recipient_hash);
+            if !ok {
+                panic!("Invalid payment proof for employee {}", i);
+            }
+
+            // Record nullifier to prevent double payment
+            commitment_client.record_nullifier(&nullifier);
+
+            // Execute token transfer from treasury → employee
+            token_client.transfer(&addrs.treasury, &employee, &amount);
+
+            // Emit payment event for indexers
+            e.events().publish(
+                (
+                    symbol_short!("payroll"),
+                    Symbol::new(&e, "payment_executed"),
+                ),
+                (employee.clone(), amount),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::token::Token;
+    use ::token::{Token, TokenClient};
     use proof_verifier::{Groth16Proof, ProofVerifier, VerificationKey};
     use salary_commitment::SalaryCommitmentContract;
     use soroban_sdk::testutils::Address as _;
@@ -58,16 +167,18 @@ mod tests {
     #[test]
     fn benchmark_50_batch_validations() {
         let env = Env::default();
+        env.mock_all_auths(); // required: batch_process_payroll enforces admin.require_auth()
 
         // register dependent contracts
         let verifier_id = env.register_contract(None, ProofVerifier);
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
-        verifier_client.initialize(&mock_vk(&env));
+        verifier_client.initialize_verifier(&mock_vk(&env));
 
         let commitment_id = env.register_contract(None, SalaryCommitmentContract);
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
 
         let token_id = env.register_contract(None, Token);
+        let token_client = TokenClient::new(&env, &token_id);
 
         // register payroll contract
         let payroll_id = env.register_contract(None, Payroll);
@@ -77,6 +188,9 @@ mod tests {
         let treasury = Address::generate(&env);
         let admin = Address::generate(&env);
         payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+
+        // amounts are 100..149; total = sum(100..=149) = 6225
+        token_client.mint(&treasury, &10_000i128);
 
         // prepare 50 proofs/amounts/employees
         let mut proofs = Vec::new(&env);
@@ -95,96 +209,5 @@ mod tests {
 
         // Execute batch - should succeed with MAX_BATCH == 50
         payroll_client.batch_process_payroll(&proofs, &amounts, &employees);
-    }
-}
-
-#[contracttype]
-pub enum DataKey {
-    Addresses,
-}
-
-#[contractimpl]
-impl Payroll {
-    /// Initialize with admin, token contract, verifier, commitment contracts and treasury address
-    pub fn initialize(
-        e: Env,
-        _admin: Address,
-        token: Address,
-        verifier: Address,
-        commitment: Address,
-        treasury: Address,
-    ) {
-        let key = DataKey::Addresses;
-        if e.storage().persistent().has(&key) {
-            panic!("Already initialized")
-        }
-        let addrs = ContractAddresses {
-            token,
-            verifier,
-            commitment,
-            treasury,
-        };
-        e.storage().persistent().set(&key, &addrs);
-    }
-
-    pub fn deposit(_e: Env, _from: Address, _amount: i128) {
-        // Deposit placeholder
-    }
-
-    /// Batch process payroll: verify each proof and transfer the token amount
-    pub fn batch_process_payroll(
-        e: Env,
-        proofs: Vec<Groth16Proof>,
-        amounts: Vec<i128>,
-        employees: Vec<Address>,
-    ) {
-        let count = proofs.len();
-
-        if amounts.len() != count || employees.len() != count {
-            panic!("Array length mismatch");
-        }
-
-        // Enforce conservative max batch size to avoid hitting Soroban instruction limit
-        assert!(count <= MAX_BATCH, "Batch too large");
-
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-
-        let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
-        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
-        let token_client = soroban_token::Client::new(&e, &addrs.token);
-
-        for i in 0..count as u32 {
-            let proof = proofs.get(i).unwrap();
-            let amount = amounts.get(i).unwrap();
-            let employee = employees.get(i).unwrap();
-
-            // Retrieve stored commitment for employee
-            let commitment_struct = commitment_client.get_commitment(&employee);
-            let commitment = commitment_struct.commitment;
-
-            // Placeholder nullifier and recipient hash for now; in production these come from the prover/public inputs
-            let mut nullifier_arr = [0u8; 32];
-            nullifier_arr[0] = (i % 256) as u8;
-            nullifier_arr[1] = (i / 256) as u8;
-            let nullifier = BytesN::from_array(&e, &nullifier_arr);
-            let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
-
-            // Verify the proof for this payment
-            let ok =
-                verifier.verify_payment_proof(&proof, &commitment, &nullifier, &recipient_hash);
-            if !ok {
-                panic!("Invalid payment proof for employee {}", i);
-            }
-
-            // Record nullifier to prevent double payment
-            commitment_client.record_nullifier(&nullifier);
-
-            // Execute token transfer from treasury -> employee
-            token_client.transfer(&addrs.treasury, &employee, &amount);
-        }
     }
 }

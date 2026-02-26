@@ -182,13 +182,13 @@ impl AuditModule {
     /// Generate a unique key ID
     fn generate_key_id(
         env: &Env,
-        company_id: &Symbol,
-        auditor: &Address,
-        timestamp: u64,
+        _company_id: &Symbol,
+        _auditor: &Address,
+        _timestamp: u64,
     ) -> BytesN<32> {
         // TODO: Use Poseidon hash for deterministic ID generation
         // poseidon_hash(company_id, auditor, timestamp)
-        let mut data = [0u8; 32];
+        let data = [0u8; 32];
         // ... simple placeholder logic
         BytesN::from_array(env, &data)
     }
