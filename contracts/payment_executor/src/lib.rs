@@ -103,10 +103,6 @@ impl PaymentExecutor {
         // let company = registry.get_company(&company_id);
         // token_client.transfer(&company.treasury, &employee, &amount);
 
-        // For now, use placeholder
-        let _ = (proof_a, proof_b, proof_c, nullifier.clone(), amount);
-        let _ = token_client;
-
         // Record payment
         let record = PaymentRecord {
             company_id: company_id.clone(),
@@ -116,6 +112,9 @@ impl PaymentExecutor {
             period,
         };
 
+        // Enforce Checks-Effects-Interactions (CEI) Pattern:
+        // Update the contract's local persistent storage state BEFORE interacting
+        // with any external contracts (like token and token_client transfers).
         env.storage().persistent().set(&payment_key, &record);
 
         // Update total paid
@@ -132,6 +131,10 @@ impl PaymentExecutor {
             (Symbol::new(&env, "PayrollProcessed"), company_id),
             (employee, amount, period),
         );
+
+        // For now, use placeholder
+        let _ = (proof_a, proof_b, proof_c, nullifier.clone(), amount);
+        let _ = token_client;
 
         record
     }
@@ -239,5 +242,89 @@ mod tests {
         let employee = Address::generate(&env);
 
         assert!(!client.is_paid(&employee, &1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Payment already made for this period")]
+    fn test_double_spend_proof_reuse_fails() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let company_id = Symbol::new(&env, "tech_corp");
+        let employee = Address::generate(&env);
+
+        let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let valid_nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        // Attacker submits a perfectly valid proof once.
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &valid_proof_a,
+            &valid_proof_b,
+            &valid_proof_c,
+            &valid_nullifier,
+            &1, // Period 1
+        );
+
+        // Attacker attempts to replay the exact same valid proof for the same period.
+        // It must panic before any transfer occurs.
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &valid_proof_a,
+            &valid_proof_b,
+            &valid_proof_c,
+            &valid_nullifier,
+            &1, // Period 1
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Array length mismatch")]
+    fn test_batch_array_length_mismatch_fails() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let company_id = Symbol::new(&env, "tech_corp");
+
+        // Admin provides 2 employees
+        let employees =
+            soroban_sdk::Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+
+        // But maliciously only provides 1 amount to try and break out-of-bounds bounds.
+        let amounts: soroban_sdk::Vec<i128> = soroban_sdk::Vec::from_array(&env, [1000]);
+        let proofs_a: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let proofs_b: soroban_sdk::Vec<BytesN<128>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 128])]);
+        let proofs_c: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let nullifiers: soroban_sdk::Vec<BytesN<32>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 32])]);
+
+        // Should panic instantly without interacting with state.
+        client.execute_batch_payroll(
+            &company_id,
+            &employees,
+            &amounts,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &1, // Period
+        );
     }
 }
