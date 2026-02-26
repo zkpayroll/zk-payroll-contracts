@@ -20,7 +20,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, wasm32v1-none
 
       - name: Cache Cargo registry & build artifacts
         uses: actions/cache@v4
@@ -44,14 +44,14 @@ jobs:
         run: cargo test --workspace
 
       - name: Build contracts (explicit target)
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: cargo build --target wasm32v1-none --release
 
       - name: Build contracts (Soroban CLI)
         run: soroban contract build
 
       - name: Optimize WASM binaries
         run: |
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+          for wasm in target/wasm32v1-none/release/*.wasm; do
             soroban contract optimize --wasm "$wasm"
           done
 
@@ -59,7 +59,7 @@ jobs:
         run: |
           MAX_SIZE=65536
           failed=0
-          for wasm in target/wasm32-unknown-unknown/release/*.optimized.wasm; do
+          for wasm in target/wasm32v1-none/release/*.optimized.wasm; do
             size=$(stat -c%s "$wasm")
             name=$(basename "$wasm")
             if [ "$size" -gt "$MAX_SIZE" ]; then
