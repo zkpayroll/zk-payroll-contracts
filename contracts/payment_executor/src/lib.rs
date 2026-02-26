@@ -248,7 +248,7 @@ mod tests {
 
         let company_id = Symbol::new(&env, "tech_corp");
         let employee = Address::generate(&env);
-        
+
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
         let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
@@ -291,19 +291,21 @@ mod tests {
         client.initialize(&addresses);
 
         let company_id = Symbol::new(&env, "tech_corp");
-        
+
         // Admin provides 2 employees
-        let employees = soroban_sdk::Vec::from_array(&env, [
-            Address::generate(&env),
-            Address::generate(&env)
-        ]);
+        let employees =
+            soroban_sdk::Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
 
         // But maliciously only provides 1 amount to try and break out-of-bounds bounds.
         let amounts: soroban_sdk::Vec<i128> = soroban_sdk::Vec::from_array(&env, [1000]);
-        let proofs_a: soroban_sdk::Vec<BytesN<64>> = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
-        let proofs_b: soroban_sdk::Vec<BytesN<128>> = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 128])]);
-        let proofs_c: soroban_sdk::Vec<BytesN<64>> = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
-        let nullifiers: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 32])]);
+        let proofs_a: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let proofs_b: soroban_sdk::Vec<BytesN<128>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 128])]);
+        let proofs_c: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let nullifiers: soroban_sdk::Vec<BytesN<32>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 32])]);
 
         // Should panic instantly without interacting with state.
         client.execute_batch_payroll(
@@ -314,7 +316,7 @@ mod tests {
             &proofs_b,
             &proofs_c,
             &nullifiers,
-            &1 // Period
+            &1, // Period
         );
     }
 }
