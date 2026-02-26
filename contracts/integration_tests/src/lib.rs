@@ -204,13 +204,14 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. A `payment_executed` event was emitted for Alice's payment.
-        //    The payroll contract publishes one event per processed employee.
+        // 4. Exactly two events must have been emitted across the full flow:
+        //      - `CommitmentUpdated` from salary_commitment.store_commitment (onboarding)
+        //      - `payment_executed`  from payroll.batch_process_payroll    (execution)
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            1,
-            "Exactly one payment_executed event must be emitted for a single-employee batch"
+            2,
+            "Expected 2 events: CommitmentUpdated (onboarding) + payment_executed (execution)"
         );
     }
 

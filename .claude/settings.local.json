@@ -5,7 +5,9 @@
       "WebFetch(domain:github.com)",
       "Bash(cargo metadata --no-deps --format-version 1)",
       "Bash(/home/codespace/.cargo/bin/cargo test -p integration_tests)",
-      "Bash(/home/codespace/.cargo/bin/cargo test --workspace)"
+      "Bash(/home/codespace/.cargo/bin/cargo test --workspace)",
+      "Bash(cargo test --workspace)",
+      "Bash(cargo fmt --all)"
     ]
   }
 }
