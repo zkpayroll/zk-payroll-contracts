@@ -26,6 +26,8 @@ pub enum AuditError {
     InsufficientScope = 5,
     /// The claimed salary + blinding factor do not match the stored commitment.
     CommitmentMismatch = 6,
+    /// Supplied key material does not belong to the auditor.
+    InvalidViewKey = 7,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +208,60 @@ impl AuditModule {
         blinding_factor: BytesN<32>,
         scope: AuditScope,
     ) -> Result<bool, AuditError> {
+        let record = Self::authorize_auditor(&env, auditor.clone())?;
+        Self::verify_scope_for_commitment(scope)?;
+
+        Ok(Self::verify_commitment_and_emit(
+            &env,
+            &auditor,
+            &record.key_bytes,
+            &stored_commitment,
+            claimed_amount,
+            &blinding_factor,
+            scope,
+        ))
+    }
+
+    /// Verify a commitment when the auditor explicitly supplies their view key.
+    ///
+    /// This prevents cross-auditor key reuse: supplied key material must match
+    /// the key currently stored for `auditor`.
+    pub fn verify_commitment_with_view_key(
+        env: Env,
+        auditor: Address,
+        supplied_key: BytesN<32>,
+        stored_commitment: BytesN<32>,
+        claimed_amount: i128,
+        blinding_factor: BytesN<32>,
+        scope: AuditScope,
+    ) -> Result<bool, AuditError> {
+        let record = Self::authorize_auditor(&env, auditor.clone())?;
+        Self::verify_scope_for_commitment(scope)?;
+
+        if supplied_key != record.key_bytes {
+            return Err(AuditError::InvalidViewKey);
+        }
+
+        Ok(Self::verify_commitment_and_emit(
+            &env,
+            &auditor,
+            &supplied_key,
+            &stored_commitment,
+            claimed_amount,
+            &blinding_factor,
+            scope,
+        ))
+    }
+
+    fn verify_scope_for_commitment(scope: AuditScope) -> Result<(), AuditError> {
+        // Scope check – AggregateOnly may not inspect individual commitments
+        if scope == AuditScope::AggregateOnly {
+            return Err(AuditError::InsufficientScope);
+        }
+        Ok(())
+    }
+
+    fn authorize_auditor(env: &Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
         auditor.require_auth();
 
         let record: ViewKeyRecord = env
@@ -219,14 +275,34 @@ impl AuditModule {
             return Err(AuditError::KeyExpired);
         }
 
-        // Scope check – AggregateOnly may not inspect individual commitments
-        if scope == AuditScope::AggregateOnly {
-            return Err(AuditError::InsufficientScope);
+        Ok(record)
+    }
+
+    fn verify_commitment_and_emit(
+        env: &Env,
+        auditor: &Address,
+        view_key: &BytesN<32>,
+        stored_commitment: &BytesN<32>,
+        claimed_amount: i128,
+        blinding_factor: &BytesN<32>,
+        scope: AuditScope,
+    ) -> bool {
+        // Recompute commitment: sha256(amount_le ‖ blinding)
+        let computed = Self::compute_commitment(env, claimed_amount, blinding_factor);
+
+        // Blend view key with both commitments so verification is keyed per auditor.
+        let keyed_stored = Self::compute_keyed_commitment(env, view_key, stored_commitment);
+        let keyed_computed = Self::compute_keyed_commitment(env, view_key, &computed);
+        let matched = keyed_computed == keyed_stored;
+
+        if matched {
+            env.events().publish(
+                (Symbol::new(env, "AuditSuccessful"), auditor.clone()),
+                (scope, keyed_stored),
+            );
         }
 
-        // Recompute commitment: sha256(amount_le ‖ blinding)
-        let computed = Self::compute_commitment(&env, claimed_amount, &blinding_factor);
-        Ok(computed == stored_commitment)
+        matched
     }
 
     /// Return an aggregate audit report.
@@ -239,18 +315,7 @@ impl AuditModule {
         period_start: u64,
         period_end: u64,
     ) -> Result<AuditReport, AuditError> {
-        auditor.require_auth();
-
-        let record: ViewKeyRecord = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AuditorKey(auditor))
-            .ok_or(AuditError::KeyNotFound)?;
-
-        // Expiry check (ledger sequence)
-        if env.ledger().sequence() > record.expiration_ledger {
-            return Err(AuditError::KeyExpired);
-        }
+        Self::authorize_auditor(&env, auditor.clone())?;
 
         // TODO: cross-contract stubs – wire up once initialise() is added.
         // let executor = PaymentExecutorClient::new(&env, &executor_address);
@@ -258,14 +323,25 @@ impl AuditModule {
         // let registry = PayrollRegistryClient::new(&env, &registry_address);
         // let count   = registry.get_company(&company_id).employee_count;
 
-        Ok(AuditReport {
+        let report = AuditReport {
             company_id,
             total_employees: 0, // stub – replace with registry query
             total_paid: 0,      // stub – replace with executor query
             period_start,
             period_end,
             verified: false, // false until cross-contract calls are wired
-        })
+        };
+
+        env.events().publish(
+            (Symbol::new(&env, "AggregateAuditGenerated"), auditor),
+            (
+                report.company_id.clone(),
+                report.period_start,
+                report.period_end,
+            ),
+        );
+
+        Ok(report)
     }
 
     // -----------------------------------------------------------------------
@@ -301,6 +377,21 @@ impl AuditModule {
         preimage.extend_from_array(&amount.to_le_bytes());
         let blinding_slice: [u8; 32] = blinding.into();
         preimage.extend_from_array(&blinding_slice);
+        env.crypto().sha256(&preimage).into()
+    }
+
+    /// Compute `sha256(view_key ‖ commitment)` so each auditor verifies with
+    /// their own key material.
+    fn compute_keyed_commitment(
+        env: &Env,
+        view_key: &BytesN<32>,
+        commitment: &BytesN<32>,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        let key_slice: [u8; 32] = view_key.into();
+        preimage.extend_from_array(&key_slice);
+        let commitment_slice: [u8; 32] = commitment.into();
+        preimage.extend_from_array(&commitment_slice);
         env.crypto().sha256(&preimage).into()
     }
 }
