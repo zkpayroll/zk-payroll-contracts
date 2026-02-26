@@ -1,30 +1,37 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, BytesN, Env, Vec};
 
-/// Groth16 proof structure
+/// A generic Groth16 proof on the BN254 curve.
+/// 
+/// This structure matches the standard 3-point format used by Groth16.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Groth16Proof {
-    pub a: BytesN<64>,  // G1 point
-    pub b: BytesN<128>, // G2 point
-    pub c: BytesN<64>,  // G1 point
+    /// G1 point (x, y) coordinates
+    pub a: BytesN<64>,
+    /// G2 point (x_c0, x_c1, y_c0, y_c1) coordinates
+    pub b: BytesN<128>,
+    /// G1 point (x, y) coordinates
+    pub c: BytesN<64>,
 }
 
-/// Verification key for the payment circuit
+/// A generic Verification Key for a Groth16 circuit on BN254.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerificationKey {
     pub alpha: BytesN<64>,
     pub beta: BytesN<128>,
     pub gamma: BytesN<128>,
     pub delta: BytesN<128>,
-    pub ic: soroban_sdk::Vec<BytesN<64>>, // Input commitments
+    /// The linear combination points corresponding to public inputs.
+    pub ic: Vec<BytesN<64>>,
 }
 
-/// Storage keys
+/// Storage keys for the verifier contract.
 #[contracttype]
 pub enum DataKey {
+    /// Stores the active VerificationKey
     VerificationKey,
 }
 
@@ -33,199 +40,77 @@ pub struct ProofVerifier;
 
 #[contractimpl]
 impl ProofVerifier {
-    /// Initialize the verifier with a verification key
+    /// Initialize the verifier contract with a verification key.
+    /// 
+    /// This should be called exactly once during deployment/setup.
     pub fn initialize_verifier(env: Env, vk: VerificationKey) {
-        let key = DataKey::VerificationKey;
-        if env.storage().persistent().has(&key) {
-            panic!("Already initialized");
+        if env.storage().persistent().has(&DataKey::VerificationKey) {
+            panic!("Verifier already initialized");
         }
-        env.storage().persistent().set(&key, &vk);
+        env.storage().persistent().set(&DataKey::VerificationKey, &vk);
     }
 
-    /// Verify a Groth16 proof for a payment
+    /// Read the currently stored verification key.
+    pub fn get_verification_key(env: Env) -> VerificationKey {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VerificationKey)
+            .expect("Verifier not initialized")
+    }
+
+    /// Verify a generic Groth16 proof against the stored Verification Key.
     ///
-    /// Public inputs:
-    /// - salary_commitment: The Poseidon hash commitment of the salary
-    /// - payment_nullifier: Unique identifier to prevent double-spending
-    /// - recipient_hash: Hash of recipient address
-    pub fn verify_payment_proof(
+    /// The `payment_executor` or any other contract calls this modular
+    /// function without needing to handle BN254 mechanics directly.
+    ///
+    /// # Arguments
+    /// * `proof` - The 3 points (A, B, C) that make up the Groth16 proof.
+    /// * `public_inputs` - A list of 32-byte field elements matching the inputs
+    ///   the circuit expects.
+    ///
+    /// # Returns
+    /// `true` if the proof is valid for the given inputs under the stored VK.
+    pub fn verify_proof(
         env: Env,
         proof: Groth16Proof,
-        salary_commitment: BytesN<32>,
-        payment_nullifier: BytesN<32>,
-        recipient_hash: BytesN<32>,
+        public_inputs: Vec<BytesN<32>>,
     ) -> bool {
-        let _vk: VerificationKey = env
+        let vk: VerificationKey = env
             .storage()
             .persistent()
             .get(&DataKey::VerificationKey)
             .expect("Verifier not initialized");
 
-        // Construct public inputs
-        let _public_inputs = soroban_sdk::Vec::from_array(
-            &env,
-            [salary_commitment, payment_nullifier, recipient_hash],
-        );
-
-        // TODO: Implement actual BN254 pairing check using Soroban host functions
-        // This will use the new CAP-0074 host functions for BN254 operations:
-        // - bn254_g1_add
-        // - bn254_g1_mul
-        // - bn254_pairing_check
-        //
-        // The verification equation is:
-        // e(A, B) = e(alpha, beta) * e(IC, gamma) * e(C, delta)
-        //
-        // For now, return true to allow testing of other components
-
-        Self::verify_groth16_pairing(&env, &proof, &_vk, &_public_inputs)
-    }
-
-    /// Verify a range proof (salary within valid range)
-    pub fn verify_range_proof(
-        env: Env,
-        proof: Groth16Proof,
-        commitment: BytesN<32>,
-        min_value: u64,
-        max_value: u64,
-    ) -> bool {
-        let _vk: VerificationKey = env
-            .storage()
-            .persistent()
-            .get(&DataKey::VerificationKey)
-            .expect("Verifier not initialized");
-
-        // Verify that the committed value is within [min_value, max_value]
-        // without revealing the actual value
-
-        let _ = (commitment, min_value, max_value);
-
-        // TODO: Implement range proof verification
-        let empty_inputs = soroban_sdk::Vec::from_array(
-            &env,
-            [
-                BytesN::from_array(&env, &[0u8; 32]),
-                BytesN::from_array(&env, &[0u8; 32]),
-                BytesN::from_array(&env, &[0u8; 32]),
-            ],
-        );
-        Self::verify_groth16_pairing(&env, &proof, &_vk, &empty_inputs)
-    }
-
-    /// Internal: Groth16 pairing verification
-    ///
-    /// Uses Protocol X-Ray BN254 primitives
-    fn verify_groth16_pairing(
-        _env: &Env,
-        _proof: &Groth16Proof,
-        _vk: &VerificationKey,
-        _public_inputs: &soroban_sdk::Vec<BytesN<32>>,
-    ) -> bool {
-        // TODO: Implement using Soroban host functions
-        //
-        // Step 1: Compute linear combination of IC points
-        // let mut ic_sum = vk.ic[0];
-        // for (i, input) in public_inputs.iter().enumerate() {
-        //     ic_sum = bn254_g1_add(ic_sum, bn254_g1_mul(vk.ic[i+1], input));
-        // }
-        //
-        // Step 2: Pairing check
-        // bn254_pairing_check([
-        //     (proof.a, proof.b),
-        //     (ic_sum, vk.gamma),
-        //     (proof.c, vk.delta),
-        //     (vk.alpha, vk.beta)
-        // ])
-
-        true // Placeholder
-    }
-
-    /// Verify batch of proofs (for batch payroll)
-    pub fn verify_batch_proofs(
-        env: Env,
-        proofs: soroban_sdk::Vec<Groth16Proof>,
-        commitments: soroban_sdk::Vec<BytesN<32>>,
-        nullifiers: soroban_sdk::Vec<BytesN<32>>,
-        recipient_hashes: soroban_sdk::Vec<BytesN<32>>,
-    ) -> bool {
-        if proofs.len() != commitments.len()
-            || proofs.len() != nullifiers.len()
-            || proofs.len() != recipient_hashes.len()
-        {
+        // The number of provided public inputs must match the expected number of 
+        // VerificationKey `ic` points minus 1 (because ic[0] is the constant term).
+        if public_inputs.len() != vk.ic.len() - 1 {
             return false;
         }
 
-        for i in 0..proofs.len() {
-            let proof = proofs.get(i).unwrap();
-            let commitment = commitments.get(i).unwrap();
-            let nullifier = nullifiers.get(i).unwrap();
-            let recipient = recipient_hashes.get(i).unwrap();
+        // TODO: Wire up actual BN254 pairing check here using CAP-0074 / 0075 host functions.
+        // Once `env.crypto().verify_groth16(vk_bytes, proof_bytes, inputs)` is available,
+        // we will serialize the vk, proof, and inputs into contiguous byte arrays and pass
+        // them into the host.
+        //
+        // Specifically:
+        // 1. Compute Pi = sum(ic_i * input_i)
+        // 2. Compute pairing check: e(A, B) == e(alpha, beta) * e(ic_0 + Pi, gamma) * e(C, delta)
 
-            if !Self::verify_payment_proof(env.clone(), proof, commitment, nullifier, recipient) {
-                return false;
-            }
-        }
-
+        // For now, this is a placeholder that returns true so the rest of the
+        // application can be developed and tested while we wait for the native
+        // API or while deploying locally in a simulated environment.
+        Self::verify_groth16_pairing_stub(&env, &proof, &vk, &public_inputs)
+    }
+    
+    fn verify_groth16_pairing_stub(
+        _env: &Env,
+        _proof: &Groth16Proof,
+        _vk: &VerificationKey,
+        _inputs: &Vec<BytesN<32>>, // this acts as a placeholder
+    ) -> bool {
         true
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::Env;
-
-    fn mock_verification_key(env: &Env) -> VerificationKey {
-        VerificationKey {
-            alpha: BytesN::from_array(env, &[0u8; 64]),
-            beta: BytesN::from_array(env, &[0u8; 128]),
-            gamma: BytesN::from_array(env, &[0u8; 128]),
-            delta: BytesN::from_array(env, &[0u8; 128]),
-            ic: soroban_sdk::Vec::from_array(
-                env,
-                [
-                    BytesN::from_array(env, &[0u8; 64]),
-                    BytesN::from_array(env, &[0u8; 64]),
-                    BytesN::from_array(env, &[0u8; 64]),
-                    BytesN::from_array(env, &[0u8; 64]),
-                ],
-            ),
-        }
-    }
-
-    fn mock_proof(env: &Env) -> Groth16Proof {
-        Groth16Proof {
-            a: BytesN::from_array(env, &[0u8; 64]),
-            b: BytesN::from_array(env, &[0u8; 128]),
-            c: BytesN::from_array(env, &[0u8; 64]),
-        }
-    }
-
-    #[test]
-    fn test_initialize() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, ProofVerifier);
-        let client = ProofVerifierClient::new(&env, &contract_id);
-
-        let vk = mock_verification_key(&env);
-        client.initialize_verifier(&vk);
-    }
-
-    #[test]
-    fn test_verify_payment_proof() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, ProofVerifier);
-        let client = ProofVerifierClient::new(&env, &contract_id);
-
-        client.initialize_verifier(&mock_verification_key(&env));
-
-        let result = client.verify_payment_proof(
-            &mock_proof(&env),
-            &BytesN::from_array(&env, &[0u8; 32]),
-            &BytesN::from_array(&env, &[1u8; 32]),
-            &BytesN::from_array(&env, &[2u8; 32]),
-        );
-
-        assert!(result);
-    }
-}
+mod tests;
