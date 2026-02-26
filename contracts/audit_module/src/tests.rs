@@ -197,7 +197,13 @@ fn test_aggregate_only_scope_rejects_commitment_verification() {
 
     let dummy = BytesN::from_array(&env, &[0u8; 32]);
     assert!(client
-        .try_verify_commitment_with_key(&auditor, &dummy, &0_i128, &dummy, &AuditScope::AggregateOnly)
+        .try_verify_commitment_with_key(
+            &auditor,
+            &dummy,
+            &0_i128,
+            &dummy,
+            &AuditScope::AggregateOnly
+        )
         .is_err());
 }
 
@@ -218,8 +224,7 @@ fn test_generate_aggregate_report_valid_key() {
 
     let company_id = Symbol::new(&env, "ACME");
     let now = env.ledger().timestamp();
-    let report =
-        client.generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
+    let report = client.generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
 
     assert_eq!(report.company_id, company_id);
     assert_eq!(report.period_start, now);

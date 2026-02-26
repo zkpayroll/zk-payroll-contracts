@@ -1,6 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    Symbol,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -111,11 +114,7 @@ impl AuditModule {
     ///
     /// # Returns
     /// The 32-byte key material (also stored in Persistent storage).
-    pub fn generate_view_key(
-        env: Env,
-        auditor: Address,
-        expiration_ledger: u32,
-    ) -> BytesN<32> {
+    pub fn generate_view_key(env: Env, auditor: Address, expiration_ledger: u32) -> BytesN<32> {
         // The admin calling this function must authorise the operation.
         // We infer the admin from `env.current_contract_address()` in tests;
         // in production the invoker must sign.
@@ -156,11 +155,7 @@ impl AuditModule {
     /// Revoke the view key for `auditor` before its natural expiry.
     ///
     /// Only the admin recorded in `ViewKeyRecord.granted_by` may revoke.
-    pub fn revoke_view_key(
-        env: Env,
-        admin: Address,
-        auditor: Address,
-    ) -> Result<(), AuditError> {
+    pub fn revoke_view_key(env: Env, admin: Address, auditor: Address) -> Result<(), AuditError> {
         admin.require_auth();
 
         let record: ViewKeyRecord = env
