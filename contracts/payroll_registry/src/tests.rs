@@ -122,8 +122,8 @@ fn test_register_company_stores_company_info() {
 #[should_panic(expected = "authorized")]
 fn test_authorization_add_employee_fails_for_non_admin() {
     let env = Env::default();
-    
-    // We intentionally do NOT mock_all_auths() here, because we want to test that 
+
+    // We intentionally do NOT mock_all_auths() here, because we want to test that
     // the registry correctly enforces `require_auth` dynamically against the correct admin.
 
     let contract_id = env.register_contract(None, PayrollRegistry);
@@ -139,21 +139,19 @@ fn test_authorization_add_employee_fails_for_non_admin() {
     let mock_employee = Address::generate(&env);
     let fake_commitment = BytesN::from_array(&env, &[9u8; 32]);
 
-    // The attacker tries to authorize themselves to act on the contract. Setting mock auths globally 
+    // The attacker tries to authorize themselves to act on the contract. Setting mock auths globally
     // to mimic the attacker signing the transaction with their *own* key.
-    env.mock_auths(&[
-        soroban_sdk::testutils::MockAuth {
-            address: &attacker,
-            invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "add_employee",
-                args: (company_id, mock_employee.clone(), fake_commitment.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }
-    ]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_employee",
+            args: (company_id, mock_employee.clone(), fake_commitment.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
 
-    // Attack: call `add_employee`. The registry calls `info.admin.require_auth()`. 
+    // Attack: call `add_employee`. The registry calls `info.admin.require_auth()`.
     // The attacker's signature is in the auth list, but it does not match `info.admin` (which is `correct_admin`).
     // Expected: Panic from the Soroban host terminating the execution for a missing correct signature.
     registry.add_employee(&company_id, &mock_employee, &fake_commitment);

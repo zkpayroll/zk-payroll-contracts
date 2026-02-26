@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
+};
 
 /// Payment record
 #[contracttype]
@@ -132,7 +134,7 @@ impl PaymentExecutor {
         // Update the contract's local persistent storage state BEFORE interacting
         // with any external contracts (like token and token_client transfers).
         env.storage().persistent().set(&payment_key, &record);
-        
+
         // Save cryptographic nullifier permanently
         env.storage().persistent().set(&nullifier_key, &true);
 
@@ -266,7 +268,7 @@ mod tests {
 
         let company_id = Symbol::new(&env, "tech_corp");
         let employee = Address::generate(&env);
-        
+
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
         let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
@@ -328,7 +330,10 @@ mod tests {
             &period,
         );
 
-        assert_eq!(result.unwrap_err().unwrap(), PaymentError::ArrayLengthMismatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::ArrayLengthMismatch
+        );
     }
 
     /// Acceptance Criteria: Reentrancy
@@ -342,7 +347,7 @@ mod tests {
         // 1. CHECKS:
         //    `if env.storage().persistent().has(&nullifier_key) { return Err(PaymentError::ProofAlreadyUsed); }`
         //
-        // 2. EFFECTS: 
+        // 2. EFFECTS:
         //    `env.storage().persistent().set(&payment_key, &record);`
         //    `env.storage().persistent().set(&nullifier_key, &true);`
         //
@@ -350,7 +355,5 @@ mod tests {
         //    `token_client.transfer(...)` -> called externally *after* state locks.
         //
         // Because the `DataKey::Nullifier` is written in step 2 natively inside Soroban's persistent storage before step 3 transfers control away to `token`, an attacker attempting to loop back into `execute_payment` using a malicious fallback mechanism in `token` will hit the check in step 1, preventing cross-contract reentrancy completely.
-        
-        assert!(true);
     }
 }
