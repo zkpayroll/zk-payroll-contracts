@@ -1,5 +1,5 @@
-//! ZK Payroll CLI — off-chain commitment generation for privacy-preserving
-//! payroll on Stellar/Soroban.
+//! ZK Payroll CLI — off-chain commitment generation and payment reconciliation
+//! for privacy-preserving payroll on Stellar/Soroban.
 //!
 //! # Commands
 //!
@@ -7,6 +7,7 @@
 //! |---------|---------|
 //! | `init-company` | Create the local SQLite database at `~/.zk-payroll/company_db.sqlite` |
 //! | `add-employee <pubkey> <amount>` | Generate a BN254 blinding factor, compute `Poseidon(salary, blinding)`, persist both, and print the commitment |
+//! | `reconcile` | Fetch `PayrollProcessed` events from Soroban RPC and cross-reference against the local database |
 //!
 //! # Security model
 //!
@@ -22,6 +23,8 @@ use clap::{Parser, Subcommand};
 
 mod crypto;
 mod db;
+mod reconcile;
+mod rpc;
 
 // ── Warning banner ────────────────────────────────────────────────────────────
 
@@ -41,8 +44,8 @@ const BACKUP_WARNING: &str = "\
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
-/// ZK Payroll CLI — off-chain proof-preparation tool for privacy-preserving
-/// payroll on Stellar/Soroban.
+/// ZK Payroll CLI — off-chain proof-preparation and reconciliation tool for
+/// privacy-preserving payroll on Stellar/Soroban.
 ///
 /// This tool runs entirely on your local machine.  No salary data or blinding
 /// factors are ever transmitted over the network.
@@ -77,6 +80,44 @@ enum Commands {
         /// Gross salary amount in stroops (1 XLM = 10,000,000 stroops).
         amount: u64,
     },
+
+    /// Reconcile on-chain payments with the local employee database.
+    ///
+    /// Queries the Soroban RPC for `PayrollProcessed` events emitted by the
+    /// payment_executor contract, filters by company ID, and cross-references
+    /// each employee address against the local SQLite blinding-factor database.
+    ///
+    /// Results are displayed as a structured table showing the employee,
+    /// amount paid, payroll period, ledger timestamp, and whether the employee
+    /// is known in the local database.
+    Reconcile {
+        /// Soroban RPC URL.
+        #[arg(
+            long,
+            default_value = reconcile::DEFAULT_RPC_URL,
+            help = "Soroban JSON-RPC endpoint (e.g. https://soroban-testnet.stellar.org)"
+        )]
+        rpc_url: String,
+
+        /// Payment executor contract address (C... Strkey address).
+        #[arg(
+            long,
+            help = "Strkey contract address of the payment_executor contract"
+        )]
+        contract_id: String,
+
+        /// Company identifier as registered on-chain.
+        #[arg(long, help = "Company symbol used as the second event topic")]
+        company_id: String,
+
+        /// Ledger sequence number to start scanning from.
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "First ledger to include in the scan"
+        )]
+        start_ledger: u32,
+    },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -86,6 +127,17 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::InitCompany => cmd_init_company(),
         Commands::AddEmployee { pubkey, amount } => cmd_add_employee(&pubkey, amount),
+        Commands::Reconcile {
+            rpc_url,
+            contract_id,
+            company_id,
+            start_ledger,
+        } => reconcile::run(reconcile::ReconcileArgs {
+            rpc_url: &rpc_url,
+            contract_id: &contract_id,
+            company_id: &company_id,
+            start_ledger,
+        }),
     }
 }
 

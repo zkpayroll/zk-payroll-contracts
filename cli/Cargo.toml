@@ -34,3 +34,24 @@ dirs = "5"
 
 # Ergonomic error propagation for CLI binaries
 anyhow = "1"
+
+# ── Reconcile command ──────────────────────────────────────────────────────────
+
+# Blocking HTTP client for Soroban JSON-RPC calls
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# JSON serialisation / deserialisation for RPC request-response types
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# XDR decoding for Soroban event topics and data blobs
+stellar-xdr = "21"
+
+# Base64 decoding of XDR blobs returned by the RPC
+base64 = "0.22"
+
+# Stellar StrKey encoding (G... addresses) from raw ed25519 public-key bytes
+stellar-strkey = "0.0.8"
+
+# Terminal table rendering for the reconcile output
+comfy-table = "7"

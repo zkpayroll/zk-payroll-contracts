@@ -118,11 +118,19 @@ impl PaymentExecutor {
         env.storage().persistent().set(&payment_key, &record);
 
         // Update total paid
-        let total_key = DataKey::TotalPaid(company_id);
+        let total_key = DataKey::TotalPaid(company_id.clone());
         let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
         env.storage()
             .persistent()
             .set(&total_key, &(current_total + amount));
+
+        // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
+        // topics : ("PayrollProcessed", company_id)
+        // data   : (employee, amount, period)
+        env.events().publish(
+            (Symbol::new(&env, "PayrollProcessed"), company_id),
+            (employee, amount, period),
+        );
 
         // For now, use placeholder
         let _ = (proof_a, proof_b, proof_c, nullifier.clone(), amount);
