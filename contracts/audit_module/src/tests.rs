@@ -1,5 +1,5 @@
 use super::*;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::{Env, Symbol};
 
 // ---------------------------------------------------------------------------
@@ -185,6 +185,95 @@ fn test_verify_commitment_with_key_matches() {
     ));
 }
 
+#[test]
+fn test_verify_commitment_with_supplied_key_matches() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let key = client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let amount: i128 = 120_000;
+    let blinding = BytesN::from_array(&env, &[0xCD; 32]);
+
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    assert!(client.verify_commitment_with_view_key(
+        &auditor,
+        &key,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList
+    ));
+}
+
+#[test]
+fn test_verify_commitment_with_supplied_key_rejects_wrong_key() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+    let wrong_key = BytesN::from_array(&env, &[0xEE; 32]);
+
+    let amount: i128 = 120_000;
+    let blinding = BytesN::from_array(&env, &[0xCD; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    assert!(client
+        .try_verify_commitment_with_view_key(
+            &auditor,
+            &wrong_key,
+            &stored,
+            &amount,
+            &blinding,
+            &AuditScope::EmployeeList
+        )
+        .is_err());
+}
+
+#[test]
+fn test_cross_auditor_key_contamination_is_rejected() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor_a = soroban_sdk::Address::generate(&env);
+    let auditor_b = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let key_a = client.generate_view_key(&auditor_a, &(seq + 1_000));
+    client.generate_view_key(&auditor_b, &(seq + 1_000));
+
+    let amount: i128 = 77_000;
+    let blinding = BytesN::from_array(&env, &[0x11; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    assert!(client
+        .try_verify_commitment_with_view_key(
+            &auditor_b,
+            &key_a,
+            &stored,
+            &amount,
+            &blinding,
+            &AuditScope::EmployeeList
+        )
+        .is_err());
+}
+
 /// AggregateOnly scope must be rejected by verify_commitment_with_key.
 #[test]
 fn test_aggregate_only_scope_rejects_commitment_verification() {
@@ -207,6 +296,35 @@ fn test_aggregate_only_scope_rejects_commitment_verification() {
         .is_err());
 }
 
+#[test]
+fn test_successful_commitment_audit_emits_event() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let amount: i128 = 42_000;
+    let blinding = BytesN::from_array(&env, &[0x99; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    let before = env.events().all().len();
+    assert!(client.verify_commitment_with_key(
+        &auditor,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList
+    ));
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+}
+
 // ---------------------------------------------------------------------------
 // Aggregate report
 // ---------------------------------------------------------------------------
@@ -224,10 +342,13 @@ fn test_generate_aggregate_report_valid_key() {
 
     let company_id = Symbol::new(&env, "ACME");
     let now = env.ledger().timestamp();
+    let before = env.events().all().len();
     let report = client.generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
+    let after = env.events().all().len();
 
     assert_eq!(report.company_id, company_id);
     assert_eq!(report.period_start, now);
+    assert_eq!(after, before + 1);
 
     // An unknown auditor must fail.
     let stranger = soroban_sdk::Address::generate(&env);
