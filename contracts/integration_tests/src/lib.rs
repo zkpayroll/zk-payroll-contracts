@@ -1,5 +1,11 @@
 #![no_std]
 
+// Proof generation helper — only compiled in test mode.
+// Provides `try_generate_proof` which spawns `node generate_proof.js` and
+// parses the output into Soroban-compatible byte arrays.
+#[cfg(test)]
+mod proof_helper;
+
 /// End-to-end integration tests for the ZK Payroll protocol.
 ///
 /// These tests validate the full protocol flow across all smart contracts:
@@ -314,5 +320,101 @@ mod e2e {
 
         ctx.payroll_client
             .batch_process_payroll(&proofs, &amounts, &employees);
+    }
+
+    // ── Dynamic proof generation test ─────────────────────────────────────────
+
+    /// Tests the full proof-generation pipeline using a dynamically generated proof.
+    ///
+    /// This test bridges Circom/SnarkJS with the Soroban test framework by:
+    ///
+    /// 1. Invoking `node circuits/generate_proof.js 5000 123` as a subprocess.
+    /// 2. Reading and parsing the resulting `proof_bytes.json` into Rust byte
+    ///    arrays via [`crate::proof_helper::try_generate_proof`].
+    /// 3. Constructing Soroban `BytesN` types from those bytes.
+    /// 4. Running the full payroll flow — commitment storage, employee
+    ///    registration, treasury funding, and batch payroll execution.
+    /// 5. Asserting that treasury and employee balances change correctly and
+    ///    that the payment nullifier is recorded on-chain.
+    ///
+    /// **Graceful skip**: if Node.js is not installed or
+    /// `circuits/generate_proof.js` is not found the test logs a warning to
+    /// stderr and returns without failing, so Rust-only CI pipelines continue
+    /// to pass.
+    ///
+    /// When SnarkJS and compiled circuit artefacts are present, `generate_proof.js`
+    /// produces a real Groth16 proof; otherwise it produces a deterministic
+    /// mock proof in identical format.  The Soroban verifier currently returns
+    /// `true` for all proofs (placeholder pending CAP-0074 BN254 host
+    /// functions), so both paths exercise the complete deserialization and
+    /// execution pipeline.
+    #[test]
+    fn test_dynamic_proof_integration() {
+        use crate::proof_helper::try_generate_proof;
+
+        // ── Step 1: Generate proof via Node.js ────────────────────────────────
+        let proof_data = match try_generate_proof(5000, 123) {
+            Some(p) => p,
+            None => {
+                // Node.js not available — skip gracefully without failing.
+                return;
+            }
+        };
+
+        // ── Step 2: Full contract environment ─────────────────────────────────
+        let ctx = setup();
+        let env = &ctx.env;
+
+        // ── Step 3: Convert parsed bytes to Soroban types ─────────────────────
+        let proof = Groth16Proof {
+            a: BytesN::from_array(env, &proof_data.pi_a),
+            b: BytesN::from_array(env, &proof_data.pi_b),
+            c: BytesN::from_array(env, &proof_data.pi_c),
+        };
+        let salary_commitment = BytesN::from_array(env, &proof_data.salary_commitment);
+
+        // ── Step 4: Register company and employee; store the dynamically ───────
+        //           generated commitment on-chain.
+        ctx.registry_client
+            .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &salary_commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &ctx.alice, &salary_commitment);
+
+        // ── Step 5: Fund treasury and run batch payroll ───────────────────────
+        let initial_treasury: i128 = 10_000;
+        let payment_amount:   i128 = 5_000;
+        ctx.token_client.mint(&ctx.treasury, &initial_treasury);
+
+        let mut proofs    = Vec::new(env);
+        let mut amounts   = Vec::new(env);
+        let mut employees = Vec::new(env);
+        proofs    .push_back(proof);
+        amounts   .push_back(payment_amount);
+        employees .push_back(ctx.alice.clone());
+
+        ctx.payroll_client
+            .batch_process_payroll(&proofs, &amounts, &employees);
+
+        // ── Step 6: Assertions ────────────────────────────────────────────────
+        assert_eq!(
+            ctx.token_client.balance(&ctx.treasury),
+            initial_treasury - payment_amount,
+            "Treasury must decrease by the payment amount after dynamic-proof payroll"
+        );
+        assert_eq!(
+            ctx.token_client.balance(&ctx.alice),
+            payment_amount,
+            "Employee balance must increase by the payment amount"
+        );
+
+        // The payroll contract derives the nullifier from the batch index (0),
+        // so the recorded nullifier is `[0u8; 32]`.
+        let expected_nullifier = BytesN::from_array(env, &[0u8; 32]);
+        assert!(
+            ctx.commitment_client.is_nullifier_used(&expected_nullifier),
+            "Payment nullifier must be recorded after dynamic-proof payroll execution"
+        );
     }
 }
