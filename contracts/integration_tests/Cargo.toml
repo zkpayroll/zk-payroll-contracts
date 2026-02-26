@@ -1,0 +1,17 @@
+[package]
+name = "integration_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+payroll = { path = "../payroll" }
+payroll_registry = { path = "../payroll_registry" }
+salary_commitment = { path = "../salary_commitment" }
+proof_verifier = { path = "../proof_verifier" }
+token = { path = "../token" }

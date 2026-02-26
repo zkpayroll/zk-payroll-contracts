@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, BytesN, Env};
 
 /// Groth16 proof structure
 #[contracttype]
@@ -34,7 +34,7 @@ pub struct ProofVerifier;
 #[contractimpl]
 impl ProofVerifier {
     /// Initialize the verifier with a verification key
-    pub fn initialize(env: Env, vk: VerificationKey) {
+    pub fn initialize_verifier(env: Env, vk: VerificationKey) {
         let key = DataKey::VerificationKey;
         if env.storage().persistent().has(&key) {
             panic!("Already initialized");
@@ -208,7 +208,7 @@ mod tests {
         let client = ProofVerifierClient::new(&env, &contract_id);
 
         let vk = mock_verification_key(&env);
-        client.initialize(&vk);
+        client.initialize_verifier(&vk);
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         let contract_id = env.register_contract(None, ProofVerifier);
         let client = ProofVerifierClient::new(&env, &contract_id);
 
-        client.initialize(&mock_verification_key(&env));
+        client.initialize_verifier(&mock_verification_key(&env));
 
         let result = client.verify_payment_proof(
             &mock_proof(&env),

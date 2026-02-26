@@ -37,12 +37,7 @@ pub trait PayrollRegistryTrait {
 
     /// Add an employee commitment under a company.
     /// Requires authorisation from the company admin.
-    fn add_employee(
-        env: Env,
-        company_id: u64,
-        employee: Address,
-        commitment: BytesN<32>,
-    );
+    fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>);
 
     /// Permanently remove an employee record from storage.
     /// Requires authorisation from the company admin.
@@ -50,12 +45,7 @@ pub trait PayrollRegistryTrait {
 
     /// Replace an employee's active Poseidon commitment.
     /// Requires authorisation from the company admin.
-    fn update_commitment(
-        env: Env,
-        company_id: u64,
-        employee: Address,
-        new_commitment: BytesN<32>,
-    );
+    fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>);
 }
 
 // ---------------------------------------------------------------------------
@@ -80,19 +70,12 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .set(&DataKey::NextCompanyId, &next);
 
         let info = CompanyInfo { admin, treasury };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Company(id), &info);
+        env.storage().persistent().set(&DataKey::Company(id), &info);
 
         id
     }
 
-    fn add_employee(
-        env: Env,
-        company_id: u64,
-        employee: Address,
-        commitment: BytesN<32>,
-    ) {
+    fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>) {
         let info: CompanyInfo = env
             .storage()
             .persistent()
@@ -120,12 +103,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .remove(&DataKey::Employee(company_id, employee));
     }
 
-    fn update_commitment(
-        env: Env,
-        company_id: u64,
-        employee: Address,
-        new_commitment: BytesN<32>,
-    ) {
+    fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>) {
         let info: CompanyInfo = env
             .storage()
             .persistent()
