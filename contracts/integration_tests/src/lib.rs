@@ -384,15 +384,15 @@ mod e2e {
 
         // ── Step 5: Fund treasury and run batch payroll ───────────────────────
         let initial_treasury: i128 = 10_000;
-        let payment_amount:   i128 = 5_000;
+        let payment_amount: i128 = 5_000;
         ctx.token_client.mint(&ctx.treasury, &initial_treasury);
 
-        let mut proofs    = Vec::new(env);
-        let mut amounts   = Vec::new(env);
+        let mut proofs = Vec::new(env);
+        let mut amounts = Vec::new(env);
         let mut employees = Vec::new(env);
-        proofs    .push_back(proof);
-        amounts   .push_back(payment_amount);
-        employees .push_back(ctx.alice.clone());
+        proofs.push_back(proof);
+        amounts.push_back(payment_amount);
+        employees.push_back(ctx.alice.clone());
 
         ctx.payroll_client
             .batch_process_payroll(&proofs, &amounts, &employees);
