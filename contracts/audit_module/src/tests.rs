@@ -157,7 +157,7 @@ fn test_verify_commitment_with_key_matches() {
     let seq = env.ledger().sequence();
     client.generate_view_key(&auditor, &(seq + 1_000));
 
-    let amount: i128 = 5_000_00;
+    let amount: i128 = 500_000;
     let blinding = BytesN::from_array(&env, &[0xAB; 32]);
 
     // Build stored_commitment the same way the contract does.
