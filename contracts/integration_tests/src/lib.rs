@@ -138,9 +138,9 @@ mod e2e {
 
         // ── PHASE 1: SETUP ────────────────────────────────────────────────────
         // Register company with admin privileges and a treasury account.
-        let company = ctx
-            .registry_client
-            .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
+        let company =
+            ctx.registry_client
+                .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
 
         assert_eq!(company.id, ctx.company_id);
         assert_eq!(company.admin, ctx.admin);

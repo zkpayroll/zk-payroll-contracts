@@ -119,7 +119,10 @@ impl Payroll {
 
             // Emit payment event for indexers
             e.events().publish(
-                (symbol_short!("payroll"), Symbol::new(&e, "payment_executed")),
+                (
+                    symbol_short!("payroll"),
+                    Symbol::new(&e, "payment_executed"),
+                ),
                 (employee.clone(), amount),
             );
         }

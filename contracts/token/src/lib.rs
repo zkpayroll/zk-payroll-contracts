@@ -44,10 +44,14 @@ impl Token {
         if from_balance < amount {
             panic!("Insufficient balance");
         }
-        e.storage().persistent().set(&from_key, &(from_balance - amount));
+        e.storage()
+            .persistent()
+            .set(&from_key, &(from_balance - amount));
 
         let to_key = DataKey::Balance(to);
         let to_balance: i128 = e.storage().persistent().get(&to_key).unwrap_or(0);
-        e.storage().persistent().set(&to_key, &(to_balance + amount));
+        e.storage()
+            .persistent()
+            .set(&to_key, &(to_balance + amount));
     }
 }
