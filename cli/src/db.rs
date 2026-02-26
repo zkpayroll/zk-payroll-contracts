@@ -18,7 +18,7 @@
 //! encoding the 32-byte little-endian BN254 scalar produced by
 //! [`crate::crypto::gen_blinding_factor`].
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 
@@ -135,35 +135,6 @@ pub fn employee_exists(conn: &Connection, pubkey: &str) -> Result<bool> {
     Ok(get_employee(conn, pubkey)?.is_some())
 }
 
-/// Update the salary amount for an existing employee.
-///
-/// Does **not** regenerate the blinding factor — only the salary figure changes.
-/// Call this when an employee receives a raise; generate a new commitment
-/// after updating.
-///
-/// # Errors
-/// Returns an error if the employee does not exist.
-pub fn update_employee_salary(conn: &Connection, pubkey: &str, new_salary: u64) -> Result<()> {
-    if !employee_exists(conn, pubkey)? {
-        bail!(
-            "Employee '{}' not found in the database. \
-             Run `zk-payroll add-employee` first.",
-            pubkey
-        );
-    }
-
-    let rows = conn
-        .execute(
-            "UPDATE blinding_factors SET current_salary_amount = ?1 \
-             WHERE employee_pubkey = ?2",
-            params![new_salary as i64, pubkey],
-        )
-        .context("Failed to update employee salary")?;
-
-    debug_assert_eq!(rows, 1, "UPDATE must affect exactly one row");
-    Ok(())
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -214,26 +185,6 @@ mod tests {
         let conn = in_memory_conn();
         let result = get_employee(&conn, "GNOBODY").unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn update_salary_changes_stored_value() {
-        let conn = in_memory_conn();
-        let pubkey = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-        let blinding = "c".repeat(64);
-
-        insert_employee(&conn, pubkey, &blinding, 5_000_000).unwrap();
-        update_employee_salary(&conn, pubkey, 6_000_000).unwrap();
-
-        let (_, salary) = get_employee(&conn, pubkey).unwrap().unwrap();
-        assert_eq!(salary, 6_000_000);
-    }
-
-    #[test]
-    fn update_salary_errors_for_unknown_employee() {
-        let conn = in_memory_conn();
-        let result = update_employee_salary(&conn, "GNOBODY", 1_000);
-        assert!(result.is_err(), "update on non-existent employee must fail");
     }
 
     #[test]
