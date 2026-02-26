@@ -90,6 +90,29 @@ impl SalaryCommitmentContract {
         existing
     }
 
+    /// Batch update existing salary commitments
+    pub fn batch_update_commitments(
+        env: Env,
+        updates: soroban_sdk::Vec<(Address, BytesN<32>)>,
+    ) {
+        let timestamp = env.ledger().timestamp();
+        
+        for (employee, new_commitment) in updates.into_iter() {
+            let key = DataKey::Commitment(employee);
+            let mut existing: SalaryCommitment = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .expect("Commitment not found");
+
+            existing.commitment = new_commitment;
+            existing.updated_at = timestamp;
+            existing.version += 1;
+
+            env.storage().persistent().set(&key, &existing);
+        }
+    }
+
     /// Get commitment for an employee
     pub fn get_commitment(env: Env, employee: Address) -> SalaryCommitment {
         let key = DataKey::Commitment(employee);
@@ -189,6 +212,66 @@ mod tests {
 
         assert_eq!(result.commitment, updated);
         assert_eq!(result.version, 2);
+    }
+
+    #[test]
+    fn test_batch_update_commitments() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let emp1 = Address::generate(&env);
+        let emp2 = Address::generate(&env);
+
+        let initial1 = BytesN::from_array(&env, &[1u8; 32]);
+        let initial2 = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.store_commitment(&emp1, &initial1);
+        client.store_commitment(&emp2, &initial2);
+
+        let updated1 = BytesN::from_array(&env, &[10u8; 32]);
+        let updated2 = BytesN::from_array(&env, &[20u8; 32]);
+
+        let updates = soroban_sdk::Vec::from_array(
+            &env,
+            [
+                (emp1.clone(), updated1.clone()),
+                (emp2.clone(), updated2.clone()),
+            ]
+        );
+
+        client.batch_update_commitments(&updates);
+
+        let res1 = client.get_commitment(&emp1);
+        assert_eq!(res1.commitment, updated1);
+        assert_eq!(res1.version, 2);
+
+        let res2 = client.get_commitment(&emp2);
+        assert_eq!(res2.commitment, updated2);
+        assert_eq!(res2.version, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Commitment not found")]
+    fn test_batch_update_fails_if_missing() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let emp_valid = Address::generate(&env);
+        let emp_missing = Address::generate(&env);
+
+        client.store_commitment(&emp_valid, &BytesN::from_array(&env, &[1u8; 32]));
+
+        let updates = soroban_sdk::Vec::from_array(
+            &env,
+            [
+                (emp_valid.clone(), BytesN::from_array(&env, &[10u8; 32])),
+                (emp_missing.clone(), BytesN::from_array(&env, &[20u8; 32])),
+            ]
+        );
+
+        client.batch_update_commitments(&updates);
     }
 
     #[test]
