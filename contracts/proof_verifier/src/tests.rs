@@ -18,12 +18,9 @@ fn mock_verification_key(env: &Env) -> VerificationKey {
     }
 }
 
-fn mock_proof(env: &Env) -> Groth16Proof {
-    Groth16Proof {
-        a: BytesN::from_array(env, &[8u8; 64]),
-        b: BytesN::from_array(env, &[9u8; 128]),
-        c: BytesN::from_array(env, &[10u8; 64]),
-    }
+// A mock 256 byte payload mimicking A (64), B (128), and C (64) concatenated
+fn mock_snarkjs_proof(env: &Env) -> BytesN<256> {
+    BytesN::from_array(env, &[8u8; 256])
 }
 
 #[test]
@@ -72,7 +69,7 @@ fn test_get_vk_uninitialized_panics() {
 }
 
 #[test]
-fn test_verify_proof_interface() {
+fn test_verify_payment_proof_interface() {
     let env = Env::default();
     let contract_id = env.register_contract(None, ProofVerifier);
     let client = ProofVerifierClient::new(&env, &contract_id);
@@ -80,7 +77,7 @@ fn test_verify_proof_interface() {
     let vk = mock_verification_key(&env);
     client.initialize_verifier(&vk);
 
-    let proof = mock_proof(&env);
+    let proof = mock_snarkjs_proof(&env);
     
     // Create matching length of public inputs. Our mock VK has 3 `ic` points. 
     // The number of public inputs must be exactly `ic.len() - 1` = 2.
@@ -92,13 +89,13 @@ fn test_verify_proof_interface() {
         ],
     );
 
-    let is_valid = client.verify_proof(&proof, &public_inputs);
+    let is_valid = client.verify_payment_proof(&proof, &public_inputs);
     // Our stub implementation always returns true for valid input structure
     assert!(is_valid);
 }
 
 #[test]
-fn test_verify_proof_rejects_wrong_input_length() {
+fn test_verify_payment_proof_rejects_wrong_input_length() {
     let env = Env::default();
     let contract_id = env.register_contract(None, ProofVerifier);
     let client = ProofVerifierClient::new(&env, &contract_id);
@@ -106,7 +103,7 @@ fn test_verify_proof_rejects_wrong_input_length() {
     let vk = mock_verification_key(&env);
     client.initialize_verifier(&vk);
 
-    let proof = mock_proof(&env);
+    let proof = mock_snarkjs_proof(&env);
     
     // Provide 1 input instead of the expected 2
     let short_inputs = Vec::from_array(
@@ -117,6 +114,6 @@ fn test_verify_proof_rejects_wrong_input_length() {
     );
 
     // The interface must reject it
-    let is_valid = client.verify_proof(&proof, &short_inputs);
+    let is_valid = client.verify_payment_proof(&proof, &short_inputs);
     assert!(!is_valid);
 }
