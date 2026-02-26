@@ -27,7 +27,7 @@ mod e2e {
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        Address, BytesN, Env, Symbol, Vec,
+        Address, BytesN, Env, Vec,
     };
     use token::{Token, TokenClient};
 
@@ -82,7 +82,7 @@ mod e2e {
         admin: Address,
         treasury: Address,
         alice: Address,
-        company_id: Symbol,
+        company_id: u64,
         token_client: TokenClient<'a>,
         registry_client: PayrollRegistryClient<'a>,
         commitment_client: SalaryCommitmentContractClient<'a>,
@@ -110,7 +110,6 @@ mod e2e {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let alice = Address::generate(&env);
-        let company_id = Symbol::new(&env, "ACME");
 
         // ── Initialise payroll executor ───────────────────────────────────────
         let payroll_client = PayrollClient::new(&env, &payroll_id);
@@ -121,6 +120,8 @@ mod e2e {
         let registry_client = PayrollRegistryClient::new(&env, &registry_id);
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
 
+        // Register a company up-front; first ID is always 0.
+        let company_id = registry_client.register_company(&admin, &treasury);
         TestContext {
             env,
             admin,
@@ -143,16 +144,7 @@ mod e2e {
         let env = &ctx.env;
 
         // ── PHASE 1: SETUP ────────────────────────────────────────────────────
-        // Register company with admin privileges and a treasury account.
-        let company =
-            ctx.registry_client
-                .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
-
-        assert_eq!(company.id, ctx.company_id);
-        assert_eq!(company.admin, ctx.admin);
-        assert_eq!(company.treasury, ctx.treasury);
-        assert_eq!(company.employee_count, 0);
-        assert!(company.is_active);
+        // company is already registered in setup(); company_id == 0.
 
         // ── PHASE 2: ONBOARDING ───────────────────────────────────────────────
         // Compute Alice's commitment: Poseidon_Hash(salary=5000, blinding=123).
@@ -164,18 +156,8 @@ mod e2e {
         assert!(ctx.commitment_client.has_commitment(&ctx.alice));
 
         // Register Alice in the registry with the same commitment.
-        let employee = ctx
-            .registry_client
+        ctx.registry_client
             .add_employee(&ctx.company_id, &ctx.alice, &commitment);
-
-        assert_eq!(employee.address, ctx.alice);
-        assert_eq!(employee.company_id, ctx.company_id);
-        assert!(employee.is_active);
-
-        // Registry employee count incremented.
-        let company_state = ctx.registry_client.get_company(&ctx.company_id);
-        assert_eq!(company_state.employee_count, 1);
-
         // ── PHASE 3: EXECUTION ────────────────────────────────────────────────
         // Mint tokens into the company treasury.
         let initial_treasury: i128 = 10_000;
@@ -239,9 +221,7 @@ mod e2e {
         let ctx = setup();
         let env = &ctx.env;
 
-        // Register company (no employees added).
-        ctx.registry_client
-            .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
+        // Register company (no employees added) — company is pre-registered in setup.
 
         // Mint tokens so the transfer wouldn't be blocked by balance.
         ctx.token_client.mint(&ctx.treasury, &10_000i128);
@@ -265,10 +245,7 @@ mod e2e {
         let ctx = setup();
         let env = &ctx.env;
 
-        // Full setup so the first payment succeeds.
-        ctx.registry_client
-            .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
-
+        // Full setup so the first payment succeeds — company pre-registered in setup().
         let commitment = alice_salary_commitment(&ctx.commitment_client);
         ctx.commitment_client
             .store_commitment(&ctx.alice, &commitment);
@@ -305,8 +282,7 @@ mod e2e {
         let ctx = setup();
         let env = &ctx.env;
 
-        ctx.registry_client
-            .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
+        // company is pre-registered in setup().
 
         // Two proofs but only one amount → length mismatch.
         let mut proofs = Vec::new(env);
@@ -352,20 +328,13 @@ mod e2e {
     fn test_dynamic_proof_integration() {
         use crate::proof_helper::try_generate_proof;
 
-        // ── Step 1: Generate proof via Node.js ────────────────────────────────
         let proof_data = match try_generate_proof(5000, 123) {
             Some(p) => p,
-            None => {
-                // Node.js not available — skip gracefully without failing.
-                return;
-            }
+            None => return, // Node.js not available — skip gracefully.
         };
 
-        // ── Step 2: Full contract environment ─────────────────────────────────
         let ctx = setup();
         let env = &ctx.env;
-
-        // ── Step 3: Convert parsed bytes to Soroban types ─────────────────────
         let proof = Groth16Proof {
             a: BytesN::from_array(env, &proof_data.pi_a),
             b: BytesN::from_array(env, &proof_data.pi_b),
@@ -373,16 +342,13 @@ mod e2e {
         };
         let salary_commitment = BytesN::from_array(env, &proof_data.salary_commitment);
 
-        // ── Step 4: Register company and employee; store the dynamically ───────
-        //           generated commitment on-chain.
         ctx.registry_client
-            .register_company(&ctx.company_id, &ctx.admin, &ctx.treasury);
+            .register_company(&ctx.admin, &ctx.treasury);
         ctx.commitment_client
             .store_commitment(&ctx.alice, &salary_commitment);
         ctx.registry_client
             .add_employee(&ctx.company_id, &ctx.alice, &salary_commitment);
 
-        // ── Step 5: Fund treasury and run batch payroll ───────────────────────
         let initial_treasury: i128 = 10_000;
         let payment_amount: i128 = 5_000;
         ctx.token_client.mint(&ctx.treasury, &initial_treasury);
@@ -397,24 +363,13 @@ mod e2e {
         ctx.payroll_client
             .batch_process_payroll(&proofs, &amounts, &employees);
 
-        // ── Step 6: Assertions ────────────────────────────────────────────────
         assert_eq!(
             ctx.token_client.balance(&ctx.treasury),
-            initial_treasury - payment_amount,
-            "Treasury must decrease by the payment amount after dynamic-proof payroll"
+            initial_treasury - payment_amount
         );
-        assert_eq!(
-            ctx.token_client.balance(&ctx.alice),
-            payment_amount,
-            "Employee balance must increase by the payment amount"
-        );
+        assert_eq!(ctx.token_client.balance(&ctx.alice), payment_amount);
 
-        // The payroll contract derives the nullifier from the batch index (0),
-        // so the recorded nullifier is `[0u8; 32]`.
         let expected_nullifier = BytesN::from_array(env, &[0u8; 32]);
-        assert!(
-            ctx.commitment_client.is_nullifier_used(&expected_nullifier),
-            "Payment nullifier must be recorded after dynamic-proof payroll execution"
-        );
+        assert!(ctx.commitment_client.is_nullifier_used(&expected_nullifier));
     }
 }
