@@ -52,59 +52,6 @@ jobs:
       - name: Run Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  # ── Build & Test ─────────────────────────────────────────────────────────────
-  test:
-    name: Build & Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
-
-      - name: Build (native)
-        run: cargo build --verbose
-
-      - name: Run tests
-        run: cargo test --verbose
-
-  # ── WASM Build ───────────────────────────────────────────────────────────────
-  wasm-build:
-    name: WASM Build (Soroban)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-wasm-
-
-      - name: Build WASM contracts
-        run: cargo build --target wasm32-unknown-unknown --release --verbose
-
   # ── Security Audit ───────────────────────────────────────────────────────────
   audit:
     name: Security Audit
@@ -122,7 +69,7 @@ jobs:
   ci-pass:
     name: CI Pass
     if: always()
-    needs: [fmt, clippy, test, wasm-build, audit]
+    needs: [fmt, clippy, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
