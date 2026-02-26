@@ -32,11 +32,13 @@ jobs:
           key: ${{ runner.os }}-cargo-build-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-build-test-
 
-      - name: Install Soroban CLI dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Install Soroban CLI
-        run: cargo install --locked soroban-cli
+      - name: Install Soroban CLI (Precompiled)
+        run: |
+          curl -sSL -o stellar-cli.tar.gz https://github.com/stellar/stellar-cli/releases/download/v25.1.0/stellar-cli-25.1.0-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf stellar-cli.tar.gz
+          sudo mv stellar /usr/local/bin/soroban-cli
+          sudo chmod +x /usr/local/bin/soroban-cli
+          soroban-cli version
 
       - name: Run unit tests
         run: cargo test --workspace
