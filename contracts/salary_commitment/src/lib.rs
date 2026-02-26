@@ -77,12 +77,9 @@ impl SalaryCommitmentContract {
     }
 
     /// Batch update existing salary commitments
-    pub fn batch_update_commitments(
-        env: Env,
-        updates: soroban_sdk::Vec<(Address, BytesN<32>)>,
-    ) {
+    pub fn batch_update_commitments(env: Env, updates: soroban_sdk::Vec<(Address, BytesN<32>)>) {
         let timestamp = env.ledger().timestamp();
-        
+
         for (employee, new_commitment) in updates.into_iter() {
             let key = DataKey::Commitment(employee);
             let mut existing: SalaryCommitment = env
@@ -223,7 +220,7 @@ mod tests {
             [
                 (emp1.clone(), updated1.clone()),
                 (emp2.clone(), updated2.clone()),
-            ]
+            ],
         );
 
         client.batch_update_commitments(&updates);
@@ -254,7 +251,7 @@ mod tests {
             [
                 (emp_valid.clone(), BytesN::from_array(&env, &[10u8; 32])),
                 (emp_missing.clone(), BytesN::from_array(&env, &[20u8; 32])),
-            ]
+            ],
         );
 
         client.batch_update_commitments(&updates);
