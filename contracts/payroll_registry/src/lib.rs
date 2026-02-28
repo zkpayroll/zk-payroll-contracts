@@ -18,12 +18,12 @@ pub struct CompanyInfo {
 ///
 /// - `Company(u64)`         → `CompanyInfo`   (Persistent)
 /// - `Employee(u64, Address)` → `BytesN<32>`  (Persistent, Poseidon commitment)
-/// - `NextCompanyId`        → `u64`           (Persistent, auto-increment counter)
+/// - `CompanySequence`      → `u64`           (Persistent, auto-increment counter)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
     Employee(u64, Address),
-    NextCompanyId,
+    CompanySequence,
 }
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ pub enum DataKey {
 
 pub trait PayrollRegistryTrait {
     /// Register a new company. Returns the newly assigned company ID.
-    /// No access control — any caller may register a company.
+    /// Requires authorisation from the provided admin address.
     fn register_company(env: Env, admin: Address, treasury: Address) -> u64;
 
     /// Add an employee commitment under a company.
@@ -58,16 +58,18 @@ pub struct PayrollRegistry;
 #[contractimpl]
 impl PayrollRegistryTrait for PayrollRegistry {
     fn register_company(env: Env, admin: Address, treasury: Address) -> u64 {
+        admin.require_auth();
+
         let id: u64 = env
             .storage()
             .persistent()
-            .get(&DataKey::NextCompanyId)
+            .get(&DataKey::CompanySequence)
             .unwrap_or(0u64);
 
         let next = id + 1;
         env.storage()
             .persistent()
-            .set(&DataKey::NextCompanyId, &next);
+            .set(&DataKey::CompanySequence, &next);
 
         let info = CompanyInfo { admin, treasury };
         env.storage().persistent().set(&DataKey::Company(id), &info);

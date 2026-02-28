@@ -42,14 +42,22 @@ impl SalaryCommitmentContract {
         let timestamp = env.ledger().timestamp();
 
         let salary_commitment = SalaryCommitment {
-            commitment,
+            commitment: commitment.clone(),
             created_at: timestamp,
             updated_at: timestamp,
             version: 1,
         };
 
-        let key = DataKey::Commitment(employee);
+        let key = DataKey::Commitment(employee.clone());
         env.storage().persistent().set(&key, &salary_commitment);
+
+        // Emit CommitmentUpdated event so off-chain indexers track commitment history.
+        // topics : ("CommitmentUpdated", employee)
+        // data   : (commitment,)
+        env.events().publish(
+            (Symbol::new(&env, "CommitmentUpdated"), employee),
+            (commitment,),
+        );
 
         salary_commitment
     }
@@ -60,18 +68,24 @@ impl SalaryCommitmentContract {
         employee: Address,
         new_commitment: BytesN<32>,
     ) -> SalaryCommitment {
-        let key = DataKey::Commitment(employee);
+        let key = DataKey::Commitment(employee.clone());
         let mut existing: SalaryCommitment = env
             .storage()
             .persistent()
             .get(&key)
             .expect("Commitment not found");
 
-        existing.commitment = new_commitment;
+        existing.commitment = new_commitment.clone();
         existing.updated_at = env.ledger().timestamp();
         existing.version += 1;
 
         env.storage().persistent().set(&key, &existing);
+
+        // Emit CommitmentUpdated event for the salary change.
+        env.events().publish(
+            (Symbol::new(&env, "CommitmentUpdated"), employee),
+            (new_commitment,),
+        );
 
         existing
     }

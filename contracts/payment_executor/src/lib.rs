@@ -137,17 +137,26 @@ impl PaymentExecutor {
         env.storage().persistent().set(&nullifier_key, &true);
 
         // Update total paid
-        let total_key = DataKey::TotalPaid(company_id);
+        let total_key = DataKey::TotalPaid(company_id.clone());
         let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
         env.storage()
             .persistent()
             .set(&total_key, &(current_total + amount));
+
+        // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
+        // topics : ("PayrollProcessed", company_id)
+        // data   : (employee, amount, period)
+        env.events().publish(
+            (Symbol::new(&env, "PayrollProcessed"), company_id),
+            (employee, amount, period),
+        );
 
         // For now, use placeholder
         let _ = (proof_a, proof_b, proof_c, nullifier.clone(), amount);
         let _ = token_client;
 
         Ok(record)
+        record
     }
 
     /// Execute batch payroll for multiple employees
@@ -256,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Payment already made for this period")]
     fn test_double_spend_proof_reuse_fails() {
         let env = Env::default();
         let contract_id = env.register_contract(None, PaymentExecutor);
@@ -267,6 +277,7 @@ mod tests {
         let company_id = Symbol::new(&env, "tech_corp");
         let employee = Address::generate(&env);
         
+
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
         let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
@@ -287,6 +298,8 @@ mod tests {
         // Attacker attempts to replay the exact same valid proof for the same period.
         // It must fail before any transfer occurs.
         let result = client.try_execute_payment(
+        // It must panic before any transfer occurs.
+        client.execute_payment(
             &company_id,
             &employee,
             &1000,
@@ -300,6 +313,10 @@ mod tests {
     }
 
     #[test]
+    }
+
+    #[test]
+    #[should_panic(expected = "Array length mismatch")]
     fn test_batch_array_length_mismatch_fails() {
         let env = Env::default();
         let contract_id = env.register_contract(None, PaymentExecutor);
@@ -318,6 +335,25 @@ mod tests {
         let period = 1;
 
         let result = client.try_execute_batch_payroll(
+        let company_id = Symbol::new(&env, "tech_corp");
+
+        // Admin provides 2 employees
+        let employees =
+            soroban_sdk::Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+
+        // But maliciously only provides 1 amount to try and break out-of-bounds bounds.
+        let amounts: soroban_sdk::Vec<i128> = soroban_sdk::Vec::from_array(&env, [1000]);
+        let proofs_a: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let proofs_b: soroban_sdk::Vec<BytesN<128>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 128])]);
+        let proofs_c: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let nullifiers: soroban_sdk::Vec<BytesN<32>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 32])]);
+
+        // Should panic instantly without interacting with state.
+        client.execute_batch_payroll(
             &company_id,
             &employees,
             &amounts,
@@ -352,5 +388,7 @@ mod tests {
         // Because the `DataKey::Nullifier` is written in step 2 natively inside Soroban's persistent storage before step 3 transfers control away to `token`, an attacker attempting to loop back into `execute_payment` using a malicious fallback mechanism in `token` will hit the check in step 1, preventing cross-contract reentrancy completely.
         
         assert!(true);
+            &1, // Period
+        );
     }
 }

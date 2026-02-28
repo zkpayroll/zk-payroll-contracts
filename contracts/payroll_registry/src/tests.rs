@@ -9,6 +9,12 @@ fn setup() -> (Env, Address) {
     (env, contract_id)
 }
 
+fn setup_no_auth_mock() -> (Env, Address) {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, PayrollRegistry);
+    (env, contract_id)
+}
+
 #[test]
 fn test_register_company_returns_sequential_ids() {
     let (env, contract_id) = setup();
@@ -21,6 +27,36 @@ fn test_register_company_returns_sequential_ids() {
 
     assert_eq!(id0, 0u64);
     assert_eq!(id1, 1u64);
+}
+
+#[test]
+fn test_register_company_requires_admin_auth() {
+    let (env, contract_id) = setup_no_auth_mock();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let result = client.try_register_company(&admin, &treasury);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_register_company_updates_company_sequence() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.register_company(&admin, &treasury);
+    client.register_company(&admin, &treasury);
+
+    let seq: u64 = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompanySequence)
+            .expect("company sequence should be stored")
+    });
+    assert_eq!(seq, 2u64);
 }
 
 #[test]

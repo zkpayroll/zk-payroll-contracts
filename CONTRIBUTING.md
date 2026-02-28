@@ -12,6 +12,7 @@ verifying keys) are load-bearing — please follow this guide carefully.
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Environment Setup](#environment-setup)
+  - [Pre-commit Hooks](#pre-commit-hooks)
   - [ZK Trusted Setup (ptau)](#zk-trusted-setup-ptau)
 - [How to Contribute](#how-to-contribute)
   - [Finding an Issue](#finding-an-issue)
@@ -71,6 +72,43 @@ cargo test
 # Build for Soroban (WASM)
 stellar contract build
 ```
+
+---
+
+### Pre-commit Hooks
+
+Local hooks catch formatting and compilation errors in seconds — far faster
+than waiting 3–5 minutes for CI to run.  Installation is a one-time copy:
+
+```bash
+cp scripts/pre-commit.sh .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
+After installation the hook runs automatically on every `git commit` and:
+
+1. **Rust formatting** — if any `.rs` files are staged, runs
+   `cargo fmt -- --check`.  If the check fails it prints the command to fix
+   the issue (`cargo fmt`) and aborts the commit.
+2. **Circom compilation** — if any `.circom` files are staged, compiles all
+   circuits under `circuits/` using:
+   ```
+   circom circuits/*.circom --r1cs --wasm --sym --c -o <tmpdir> --O0
+   ```
+   Compiled artefacts are written to a temporary directory and cleaned up
+   automatically — nothing is staged or left in the working tree.
+
+**Skipping gracefully:** if `circom` is not installed the hook emits a warning
+and lets the commit proceed.  This keeps a Rust-only setup fully functional.
+
+**Bypassing (emergency only):**
+
+```bash
+git commit --no-verify -m "your message"
+```
+
+Use `--no-verify` only when absolutely necessary; all CI checks still run on
+the remote.
 
 ---
 
