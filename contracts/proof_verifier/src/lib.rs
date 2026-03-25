@@ -55,17 +55,21 @@ impl ProofVerifier {
         payment_nullifier: BytesN<32>,
         recipient_hash: BytesN<32>,
     ) -> bool {
+        let public_inputs = soroban_sdk::Vec::from_array(
+            &env,
+            [salary_commitment, payment_nullifier, recipient_hash],
+        );
+
+        Self::verify(env, proof, public_inputs)
+    }
+
+    /// Generic verifier entrypoint used by execution wrappers.
+    pub fn verify(env: Env, proof: Groth16Proof, public_inputs: soroban_sdk::Vec<BytesN<32>>) -> bool {
         let _vk: VerificationKey = env
             .storage()
             .persistent()
             .get(&DataKey::VerificationKey)
             .expect("Verifier not initialized");
-
-        // Construct public inputs
-        let _public_inputs = soroban_sdk::Vec::from_array(
-            &env,
-            [salary_commitment, payment_nullifier, recipient_hash],
-        );
 
         // TODO: Implement actual BN254 pairing check using Soroban host functions
         // This will use the new CAP-0074 host functions for BN254 operations:
@@ -78,7 +82,7 @@ impl ProofVerifier {
         //
         // For now, return true to allow testing of other components
 
-        Self::verify_groth16_pairing(&env, &proof, &_vk, &_public_inputs)
+        Self::verify_groth16_pairing(&env, &proof, &_vk, &public_inputs)
     }
 
     /// Verify a range proof (salary within valid range)

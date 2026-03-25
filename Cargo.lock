@@ -1762,8 +1762,11 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "payment_executor"
 version = "0.1.0"
 dependencies = [
+ "payroll_registry",
+ "proof_verifier",
  "soroban-sdk",
  "soroban-token-sdk",
+ "token",
 ]
 
 [[package]]
