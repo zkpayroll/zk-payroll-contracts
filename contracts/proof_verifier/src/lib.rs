@@ -64,7 +64,11 @@ impl ProofVerifier {
     }
 
     /// Generic verifier entrypoint used by execution wrappers.
-    pub fn verify(env: Env, proof: Groth16Proof, public_inputs: soroban_sdk::Vec<BytesN<32>>) -> bool {
+    pub fn verify(
+        env: Env,
+        proof: Groth16Proof,
+        public_inputs: soroban_sdk::Vec<BytesN<32>>,
+    ) -> bool {
         let _vk: VerificationKey = env
             .storage()
             .persistent()

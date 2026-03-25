@@ -119,7 +119,7 @@ impl PaymentExecutor {
 
         // Record payment
         let record = PaymentRecord {
-            company_id: company_id.clone(),
+            company_id,
             employee: employee.clone(),
             proof_hash: nullifier.clone(), // Use nullifier as unique identifier
             timestamp: env.ledger().timestamp(),
@@ -142,7 +142,10 @@ impl PaymentExecutor {
         // topics : ("PayrollProcessed", company_id)
         // data   : (employee, amount, period)
         env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "PayrollProcessed"), company_id),
+            (
+                soroban_sdk::Symbol::new(&env, "PayrollProcessed"),
+                company_id,
+            ),
             (employee, amount, period),
         );
 
@@ -180,7 +183,7 @@ impl PaymentExecutor {
         for i in 0..count {
             let record = Self::execute_payment(
                 env.clone(),
-                company_id.clone(),
+                company_id,
                 employees.get(i).unwrap(),
                 amounts.get(i).unwrap(),
                 proofs_a.get(i).unwrap(),
