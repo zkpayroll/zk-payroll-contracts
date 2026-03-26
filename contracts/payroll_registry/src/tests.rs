@@ -150,3 +150,33 @@ fn test_register_company_stores_company_info() {
     assert_eq!(stored.admin, admin);
     assert_eq!(stored.treasury, treasury);
 }
+
+#[test]
+fn test_get_company_returns_company_info() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let company = client.get_company(&company_id);
+
+    assert_eq!(company.admin, admin);
+    assert_eq!(company.treasury, treasury);
+}
+
+#[test]
+fn test_get_commitment_returns_employee_commitment() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    let got = client.get_commitment(&company_id, &employee);
+    assert_eq!(got, commitment);
+}

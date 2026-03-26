@@ -46,6 +46,12 @@ pub trait PayrollRegistryTrait {
     /// Replace an employee's active Poseidon commitment.
     /// Requires authorisation from the company admin.
     fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>);
+
+    /// Read company metadata by company ID.
+    fn get_company(env: Env, company_id: u64) -> CompanyInfo;
+
+    /// Read an employee's active commitment under a company.
+    fn get_commitment(env: Env, company_id: u64, employee: Address) -> BytesN<32>;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +126,20 @@ impl PayrollRegistryTrait for PayrollRegistry {
         }
 
         env.storage().persistent().set(&key, &new_commitment);
+    }
+
+    fn get_company(env: Env, company_id: u64) -> CompanyInfo {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found")
+    }
+
+    fn get_commitment(env: Env, company_id: u64, employee: Address) -> BytesN<32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Employee(company_id, employee))
+            .expect("Employee not found")
     }
 }
 

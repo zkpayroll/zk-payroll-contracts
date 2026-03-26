@@ -7,7 +7,14 @@
       "Bash(/home/codespace/.cargo/bin/cargo test -p integration_tests)",
       "Bash(/home/codespace/.cargo/bin/cargo test --workspace)",
       "Bash(cargo test --workspace)",
-      "Bash(cargo fmt --all)"
+      "Bash(cargo fmt --all)",
+      "WebFetch(domain:www.drips.network)",
+      "Bash(gh issue:*)",
+      "Bash(cargo test:*)",
+      "Bash(gh run:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo audit:*)",
+      "Bash(cargo update:*)"
     ]
   }
 }
