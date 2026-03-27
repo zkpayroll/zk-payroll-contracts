@@ -1,11 +1,10 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env,
 };
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env};
 
 /// Payment record
 #[contracttype]
@@ -42,7 +41,6 @@ pub struct ContractAddresses {
 pub enum DataKey {
     Addresses,
     Payment(Address, u32), // (employee, period)
-    TotalPaid(Symbol),     // Total paid by company
     Nullifier(BytesN<32>), // Cryptographic nullifier tracking
     TotalPaid(u64),        // Total paid by company
 }
