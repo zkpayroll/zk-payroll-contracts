@@ -313,7 +313,7 @@ fn test_successful_commitment_audit_emits_event() {
     preimage.extend_from_array(&blinding_slice);
     let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
 
-    let before = env.events().all().len();
+    let before = env.events().all().events().len();
     assert!(client.verify_commitment_with_key(
         &auditor,
         &stored,
@@ -321,7 +321,7 @@ fn test_successful_commitment_audit_emits_event() {
         &blinding,
         &AuditScope::EmployeeList
     ));
-    let after = env.events().all().len();
+    let after = env.events().all().events().len();
     assert_eq!(after, before + 1);
 }
 
@@ -342,9 +342,9 @@ fn test_generate_aggregate_report_valid_key() {
 
     let company_id = Symbol::new(&env, "ACME");
     let now = env.ledger().timestamp();
-    let before = env.events().all().len();
+    let before = env.events().all().events().len();
     let report = client.generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
-    let after = env.events().all().len();
+    let after = env.events().all().events().len();
 
     assert_eq!(report.company_id, company_id);
     assert_eq!(report.period_start, now);

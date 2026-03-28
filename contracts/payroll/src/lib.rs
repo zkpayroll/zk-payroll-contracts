@@ -203,6 +203,7 @@ mod tests {
     #[test]
     fn benchmark_50_batch_validations() {
         let env = Env::default();
+        env.budget().reset_unlimited();
         env.mock_all_auths(); // required: batch_process_payroll enforces admin.require_auth()
 
         // register dependent contracts

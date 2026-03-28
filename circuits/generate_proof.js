@@ -113,13 +113,13 @@ function generateMockProof(salary, blinding) {
   const c_y = (nullifier  * 11n + 4n) % BN254_R;
 
   const proof = {
-    pi_a:     [a_x.toString(),  a_y.toString(),  '1'],
+    pi_a:     ['0', '0', '0'],
     pi_b:     [
-      [b_x0.toString(), b_x1.toString()],
-      [b_y0.toString(), b_y1.toString()],
-      ['1', '0'],
+      ['0', '0'],
+      ['0', '0'],
+      ['0', '0'],
     ],
-    pi_c:     [c_x.toString(), c_y.toString(), '1'],
+    pi_c:     ['0', '0', '0'],
     protocol: 'groth16',
     curve:    'bn128',
   };

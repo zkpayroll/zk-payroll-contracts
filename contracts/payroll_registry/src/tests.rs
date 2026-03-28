@@ -191,6 +191,8 @@ fn test_authorization_add_employee_fails_for_non_admin() {
     // The attacker's signature is in the auth list, but it does not match `info.admin` (which is `correct_admin`).
     // Expected: Panic from the Soroban host terminating the execution for a missing correct signature.
     registry.add_employee(&company_id, &mock_employee, &fake_commitment);
+}
+
 #[test]
 fn test_get_company_returns_company_info() {
     let (env, contract_id) = setup();
