@@ -47,9 +47,13 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) 1.74+
-- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup) v21+
-- [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli)
+| Tool | Minimum Version | Purpose |
+|------|-----------------|---------|
+| [Rust](https://rustup.rs/) | 1.74+ | Contract development and testing |
+| [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup) | v21+ | Contract deployment |
+| [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli) | v21+ | Network interaction |
+| [Node.js](https://nodejs.org/) | 18+ | Required by snarkjs and circom WASM output |
+| [Circom](https://docs.circom.io/getting-started/installation/) | 2.1+ | ZK circuit compilation |
 
 ## Installation
 

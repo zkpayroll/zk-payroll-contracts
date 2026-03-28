@@ -11,6 +11,12 @@ doctest = false
 [dependencies]
 soroban-sdk = { workspace = true }
 soroban-token-sdk = { workspace = true }
+payroll_registry = { path = "../payroll_registry" }
+proof_verifier = { path = "../proof_verifier" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+token = { path = "../token" }
+
+[features]
+testutils = ["soroban-sdk/testutils"]

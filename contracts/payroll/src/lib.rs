@@ -59,11 +59,26 @@ impl Payroll {
     /// Batch process payroll: verify each proof and execute token transfers.
     ///
     /// Only the registered admin may trigger payroll execution.
+    ///
+    /// # Parameters
+    /// - `expected_total_spend`: The total amount the HR Admin authorises for this batch.
+    ///   Must equal the sum of all individual `amounts`. This makes the admin's spending
+    ///   intent explicit and prevents a malicious or accidental amount substitution attack
+    ///   where individual line items are altered after admin approval.
+    ///
+    /// # Atomicity & Nullifier Safety (AC-1)
+    /// The nullifier for each employee is recorded **before** the token transfer is
+    /// attempted.  Soroban executes the entire transaction atomically: if the token
+    /// transfer panics (e.g. insufficient treasury balance), the runtime rolls back
+    /// every state change made in that invocation — including the nullifier recording.
+    /// The nullifier is therefore never durably saved unless the corresponding transfer
+    /// succeeds.
     pub fn batch_process_payroll(
         e: Env,
         proofs: Vec<BytesN<256>>,
         amounts: Vec<i128>,
         employees: Vec<Address>,
+        expected_total_spend: i128,
     ) {
         let count = proofs.len();
 
@@ -73,6 +88,21 @@ impl Payroll {
 
         // Enforce conservative max batch size to avoid hitting Soroban instruction limit
         assert!(count <= MAX_BATCH, "Batch too large");
+
+        // ── AC-2: Explicit spend authorisation ───────────────────────────────
+        // Sum up every individual payment and verify it matches the amount the
+        // admin declared upfront.  This check happens before any state changes so
+        // a mismatch is caught instantly at no cost.
+        let mut total: i128 = 0;
+        for i in 0..count {
+            total += amounts.get(i).unwrap();
+        }
+        if total != expected_total_spend {
+            panic!(
+                "Expected spend mismatch: authorised {} but batch totals {}",
+                expected_total_spend, total
+            );
+        }
 
         let addrs: ContractAddresses = e
             .storage()
@@ -92,7 +122,8 @@ impl Payroll {
             let amount = amounts.get(i).unwrap();
             let employee = employees.get(i).unwrap();
 
-            // Retrieve stored commitment for employee
+            // ── FLOW STEP 1: Retrieve commitment ─────────────────────────────
+            // Panics with "Commitment not found" if the employee is not enrolled.
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
 
@@ -111,17 +142,25 @@ impl Payroll {
             public_inputs.push_back(recipient_hash.clone());
 
             let ok = verifier.verify_payment_proof(&proof, &public_inputs);
+            // ── FLOW STEP 2: Groth16 proof verification ───────────────────────
+            let ok =
+                verifier.verify_payment_proof(&proof, &commitment, &nullifier, &recipient_hash);
             if !ok {
                 panic!("Invalid payment proof for employee {}", i);
             }
 
-            // Record nullifier to prevent double payment
+            // ── FLOW STEP 3: Record nullifier (effect before interaction) ─────
+            // Panics with "Nullifier already used" on a replay attempt.
+            // Because this comes before the token transfer, Soroban's atomic
+            // rollback guarantees the nullifier is discarded if the transfer fails.
             commitment_client.record_nullifier(&nullifier);
 
-            // Execute token transfer from treasury → employee
+            // ── FLOW STEP 4: Token transfer ───────────────────────────────────
+            // A panic here (e.g. insufficient treasury balance) causes Soroban to
+            // roll back the entire transaction, including the nullifier recorded above.
             token_client.transfer(&addrs.treasury, &employee, &amount);
 
-            // Emit payment event for indexers
+            // ── FLOW STEP 5: Emit event for off-chain indexers ────────────────
             e.events().publish(
                 (
                     symbol_short!("payroll"),
@@ -207,7 +246,10 @@ mod tests {
             employees.push_back(emp);
         }
 
+        // amounts are 100..149; total = sum(100..=149) = 5000 + (49*50/2) = 6225
+        let expected_total_spend: i128 = 6225;
+
         // Execute batch - should succeed with MAX_BATCH == 50
-        payroll_client.batch_process_payroll(&proofs, &amounts, &employees);
+        payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &expected_total_spend);
     }
 }

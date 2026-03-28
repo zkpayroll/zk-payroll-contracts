@@ -175,7 +175,7 @@ mod e2e {
         // Execute batch payroll: verifier checks proof, commitment is retrieved,
         // nullifier is recorded, and the token transfer is executed.
         ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees);
+            .batch_process_payroll(&proofs, &amounts, &employees, &payment_amount);
 
         // ── ASSERTIONS ────────────────────────────────────────────────────────
 
@@ -200,13 +200,14 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. A `payment_executed` event was emitted for Alice's payment.
-        //    The payroll contract publishes one event per processed employee.
+        // 4. Exactly two events must have been emitted across the full flow:
+        //      - `CommitmentUpdated` from salary_commitment.store_commitment (onboarding)
+        //      - `payment_executed`  from payroll.batch_process_payroll    (execution)
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            1,
-            "Exactly one payment_executed event must be emitted for a single-employee batch"
+            2,
+            "Expected 2 events: CommitmentUpdated (onboarding) + payment_executed (execution)"
         );
     }
 
@@ -231,7 +232,7 @@ mod e2e {
         employees.push_back(ctx.alice.clone());
 
         ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees);
+            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
     }
 
     /// Running payroll twice for the same employee reuses the nullifier and must panic.
@@ -263,12 +264,12 @@ mod e2e {
         // First payroll run succeeds.
         let (proofs, amounts, employees) = make_batch(env, &ctx.alice);
         ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees);
+            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
 
         // Second payroll run with the same nullifier (batch index 0) must panic.
         let (proofs2, amounts2, employees2) = make_batch(env, &ctx.alice);
         ctx.payroll_client
-            .batch_process_payroll(&proofs2, &amounts2, &employees2);
+            .batch_process_payroll(&proofs2, &amounts2, &employees2, &5_000i128);
     }
 
     /// Array length mismatches must be rejected immediately.
@@ -291,7 +292,7 @@ mod e2e {
         employees.push_back(ctx.alice.clone());
 
         ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees);
+            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
     }
 
     // ── Dynamic proof generation test ─────────────────────────────────────────
@@ -357,7 +358,7 @@ mod e2e {
         employees.push_back(ctx.alice.clone());
 
         ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees);
+            .batch_process_payroll(&proofs, &amounts, &employees, &payment_amount);
 
         assert_eq!(
             ctx.token_client.balance(&ctx.treasury),

@@ -50,6 +50,51 @@ impl ProofVerifier {
             .persistent()
             .get(&DataKey::VerificationKey)
             .expect("Verifier not initialized")
+    /// Verify a Groth16 proof for a payment
+    ///
+    /// Public inputs:
+    /// - salary_commitment: The Poseidon hash commitment of the salary
+    /// - payment_nullifier: Unique identifier to prevent double-spending
+    /// - recipient_hash: Hash of recipient address
+    pub fn verify_payment_proof(
+        env: Env,
+        proof: Groth16Proof,
+        salary_commitment: BytesN<32>,
+        payment_nullifier: BytesN<32>,
+        recipient_hash: BytesN<32>,
+    ) -> bool {
+        let public_inputs = soroban_sdk::Vec::from_array(
+            &env,
+            [salary_commitment, payment_nullifier, recipient_hash],
+        );
+
+        Self::verify(env, proof, public_inputs)
+    }
+
+    /// Generic verifier entrypoint used by execution wrappers.
+    pub fn verify(
+        env: Env,
+        proof: Groth16Proof,
+        public_inputs: soroban_sdk::Vec<BytesN<32>>,
+    ) -> bool {
+        let _vk: VerificationKey = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerificationKey)
+            .expect("Verifier not initialized");
+
+        // TODO: Implement actual BN254 pairing check using Soroban host functions
+        // This will use the new CAP-0074 host functions for BN254 operations:
+        // - bn254_g1_add
+        // - bn254_g1_mul
+        // - bn254_pairing_check
+        //
+        // The verification equation is:
+        // e(A, B) = e(alpha, beta) * e(IC, gamma) * e(C, delta)
+        //
+        // For now, return true to allow testing of other components
+
+        Self::verify_groth16_pairing(&env, &proof, &_vk, &public_inputs)
     }
 
     /// Verify a BN254 Groth16 proof against the stored Verification Key.

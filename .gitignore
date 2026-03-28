@@ -1,7 +1,6 @@
 target/
 .DS_Store
 **/*.rs.bk
-scripts/
 *.diff
 **/test_snapshots/
 

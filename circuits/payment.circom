@@ -1,5 +1,7 @@
 pragma circom 2.0.0;
 
+include "range_proof.circom";
+
 /*
  * ZK Payroll – Payment Circuit (placeholder)
  *
@@ -39,10 +41,13 @@ pragma circom 2.0.0;
  *   snarkjs zkey export verificationkey payment_final.zkey verification_key.json
  */
 
-template PaymentCircuit() {
+template PaymentProof() {
     // ── Private inputs ────────────────────────────────────────────────────────
     signal input salary;
     signal input blinding;
+
+    component salary_range = SalaryRangeProof();
+    salary_range.salary <== salary;
 
     // ── Public outputs ────────────────────────────────────────────────────────
     signal output salary_commitment;
@@ -58,4 +63,4 @@ template PaymentCircuit() {
 
 component main {
     public [salary_commitment, payment_nullifier, recipient_hash]
-} = PaymentCircuit();
+} = PaymentProof();
