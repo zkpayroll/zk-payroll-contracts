@@ -55,7 +55,12 @@ fn integration_verify_rejects_invalid_proof() {
     let recipient_hash = BytesN::from_array(&env, &[7u8; 32]);
 
     // This should panic because mock bytes are not valid BN254 points
-    client.verify_payment_proof(&proof, &salary_commitment, &payment_nullifier, &recipient_hash);
+    client.verify_payment_proof(
+        &proof,
+        &salary_commitment,
+        &payment_nullifier,
+        &recipient_hash,
+    );
 }
 
 /// Test: calling verify without initialization panics.
@@ -71,5 +76,10 @@ fn integration_verify_without_init_panics() {
     let payment_nullifier = BytesN::from_array(&env, &[8u8; 32]);
     let recipient_hash = BytesN::from_array(&env, &[7u8; 32]);
 
-    client.verify_payment_proof(&proof, &salary_commitment, &payment_nullifier, &recipient_hash);
+    client.verify_payment_proof(
+        &proof,
+        &salary_commitment,
+        &payment_nullifier,
+        &recipient_hash,
+    );
 }

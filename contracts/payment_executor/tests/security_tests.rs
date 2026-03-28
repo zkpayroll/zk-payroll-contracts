@@ -1,9 +1,9 @@
+use ::token::{Token, TokenClient};
 use payment_executor::{ContractAddresses, PaymentError, PaymentExecutor, PaymentExecutorClient};
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{Address, BytesN, Env, IntoVal, Vec};
-use ::token::{Token, TokenClient};
 
 fn mock_vk(env: &Env) -> VerificationKey {
     VerificationKey {
@@ -57,9 +57,9 @@ fn setup_system<'a>(
 
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
-    
+
     let company_id = registry.register_company(&admin, &treasury);
-    
+
     token.mint(&treasury, &100_000);
 
     (executor, registry, token, company_id, admin, treasury)

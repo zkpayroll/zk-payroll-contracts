@@ -74,10 +74,8 @@ impl ProofVerifier {
         payment_nullifier: BytesN<32>,
         recipient_hash: BytesN<32>,
     ) -> bool {
-        let public_inputs = Vec::from_array(
-            &env,
-            [salary_commitment, payment_nullifier, recipient_hash],
-        );
+        let public_inputs =
+            Vec::from_array(&env, [salary_commitment, payment_nullifier, recipient_hash]);
 
         Self::verify(env, proof, public_inputs)
     }
@@ -86,11 +84,7 @@ impl ProofVerifier {
     ///
     /// Accepts any number of 32-byte public inputs and verifies the
     /// Groth16 proof against the stored verification key.
-    pub fn verify(
-        env: Env,
-        proof: Groth16Proof,
-        public_inputs: Vec<BytesN<32>>,
-    ) -> bool {
+    pub fn verify(env: Env, proof: Groth16Proof, public_inputs: Vec<BytesN<32>>) -> bool {
         let vk: VerificationKey = env
             .storage()
             .persistent()
@@ -152,7 +146,11 @@ impl ProofVerifier {
         let num_inputs = public_inputs.len();
         let ic_len = vk.ic.len();
         if ic_len != num_inputs + 1 {
-            panic!("IC length mismatch: expected {} but got {}", num_inputs + 1, ic_len);
+            panic!(
+                "IC length mismatch: expected {} but got {}",
+                num_inputs + 1,
+                ic_len
+            );
         }
 
         // --- Compute the linear combination of IC with public inputs ---
@@ -175,19 +173,25 @@ impl ProofVerifier {
 
         // --- Construct the 4-pairing check ---
         // e(-A, B) · e(α, β) · e(IC_combined, γ) · e(C, δ) == 1
-        let g1_points: Vec<Bn254G1Affine> = Vec::from_array(env, [
-            neg_a,
-            Bn254G1Affine::from_bytes(vk.alpha.clone()),
-            ic_combined,
-            Bn254G1Affine::from_bytes(proof.c.clone()),
-        ]);
+        let g1_points: Vec<Bn254G1Affine> = Vec::from_array(
+            env,
+            [
+                neg_a,
+                Bn254G1Affine::from_bytes(vk.alpha.clone()),
+                ic_combined,
+                Bn254G1Affine::from_bytes(proof.c.clone()),
+            ],
+        );
 
-        let g2_points: Vec<Bn254G2Affine> = Vec::from_array(env, [
-            Bn254G2Affine::from_bytes(proof.b.clone()),
-            Bn254G2Affine::from_bytes(vk.beta.clone()),
-            Bn254G2Affine::from_bytes(vk.gamma.clone()),
-            Bn254G2Affine::from_bytes(vk.delta.clone()),
-        ]);
+        let g2_points: Vec<Bn254G2Affine> = Vec::from_array(
+            env,
+            [
+                Bn254G2Affine::from_bytes(proof.b.clone()),
+                Bn254G2Affine::from_bytes(vk.beta.clone()),
+                Bn254G2Affine::from_bytes(vk.gamma.clone()),
+                Bn254G2Affine::from_bytes(vk.delta.clone()),
+            ],
+        );
 
         bn254.pairing_check(g1_points, g2_points)
     }
