@@ -4,7 +4,7 @@ use soroban_sdk::{
     Env, Symbol, Vec,
 };
 
-use proof_verifier::{Groth16Proof, ProofVerifierClient};
+use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
 
 const MAX_BATCH: u32 = 50; // Conservative default; adjust if benchmarking shows higher safe limit
@@ -75,7 +75,7 @@ impl Payroll {
     /// succeeds.
     pub fn batch_process_payroll(
         e: Env,
-        proofs: Vec<Groth16Proof>,
+        proofs: Vec<BytesN<256>>,
         amounts: Vec<i128>,
         employees: Vec<Address>,
         expected_total_spend: i128,
@@ -135,9 +135,14 @@ impl Payroll {
             let nullifier = BytesN::from_array(&e, &nullifier_arr);
             let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
 
+            // Verify the Groth16 proof for this payment
+            let mut public_inputs = Vec::new(&e);
+            public_inputs.push_back(commitment.clone());
+            public_inputs.push_back(nullifier.clone());
+            public_inputs.push_back(recipient_hash.clone());
+
             // ── FLOW STEP 2: Groth16 proof verification ───────────────────────
-            let ok =
-                verifier.verify_payment_proof(&proof, &commitment, &nullifier, &recipient_hash);
+            let ok = verifier.verify_payment_proof(&proof, &public_inputs);
             if !ok {
                 panic!("Invalid payment proof for employee {}", i);
             }
@@ -169,17 +174,13 @@ impl Payroll {
 mod tests {
     use super::*;
     use ::token::{Token, TokenClient};
-    use proof_verifier::{Groth16Proof, ProofVerifier, VerificationKey};
+    use proof_verifier::{ProofVerifier, VerificationKey};
     use salary_commitment::SalaryCommitmentContract;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
-    fn mock_proof(env: &Env) -> Groth16Proof {
-        Groth16Proof {
-            a: BytesN::from_array(env, &[0u8; 64]),
-            b: BytesN::from_array(env, &[0u8; 128]),
-            c: BytesN::from_array(env, &[0u8; 64]),
-        }
+    fn mock_proof(env: &Env) -> BytesN<256> {
+        BytesN::from_array(env, &[0u8; 256])
     }
 
     fn mock_vk(env: &Env) -> VerificationKey {

@@ -23,7 +23,7 @@ mod proof_helper;
 mod e2e {
     use payroll::{Payroll, PayrollClient};
     use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
-    use proof_verifier::{Groth16Proof, ProofVerifier, ProofVerifierClient, VerificationKey};
+    use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
@@ -52,13 +52,9 @@ mod e2e {
         }
     }
 
-    /// Build a mock Groth16 proof (distinguishable byte patterns per point).
-    fn mock_proof(env: &Env) -> Groth16Proof {
-        Groth16Proof {
-            a: BytesN::from_array(env, &[1u8; 64]),
-            b: BytesN::from_array(env, &[2u8; 128]),
-            c: BytesN::from_array(env, &[3u8; 64]),
-        }
+    /// Build a mock Groth16 proof (256-byte payload).
+    fn mock_proof(env: &Env) -> BytesN<256> {
+        BytesN::from_array(env, &[0u8; 256])
     }
 
     /// Compute the salary commitment used across tests.
@@ -336,11 +332,11 @@ mod e2e {
 
         let ctx = setup();
         let env = &ctx.env;
-        let proof = Groth16Proof {
-            a: BytesN::from_array(env, &proof_data.pi_a),
-            b: BytesN::from_array(env, &proof_data.pi_b),
-            c: BytesN::from_array(env, &proof_data.pi_c),
-        };
+        let mut proof_bytes = [0u8; 256];
+        proof_bytes[..64].copy_from_slice(&proof_data.pi_a);
+        proof_bytes[64..192].copy_from_slice(&proof_data.pi_b);
+        proof_bytes[192..].copy_from_slice(&proof_data.pi_c);
+        let proof = BytesN::from_array(env, &proof_bytes);
         let salary_commitment = BytesN::from_array(env, &proof_data.salary_commitment);
 
         ctx.registry_client
