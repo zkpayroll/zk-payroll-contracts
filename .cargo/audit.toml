@@ -1,5 +1,8 @@
 [advisories]
-ignore = ["RUSTSEC-2024-0436"]
+ignore = [
+  "RUSTSEC-2024-0388",
+  "RUSTSEC-2024-0436",
+]
 informational_warnings = []
 
 [output]
