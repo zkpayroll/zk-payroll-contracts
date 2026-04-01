@@ -455,21 +455,64 @@ mod tests {
     /// - However, verify the token spend logic happens AFTER state updates (Checks-Effects-Interactions).
     #[test]
     fn test_reentrancy_cei_pattern() {
-        // This test serves as programmatic confirmation of the CEI pattern documented in the source `payment_executor` execution path.
-        // In `execute_payment(...)`:
-        //
-        // 1. CHECKS:
-        //    `if env.storage().persistent().has(&nullifier_key) { return Err(PaymentError::ProofAlreadyUsed); }`
-        //
-        // 2. EFFECTS:
-        //    `env.storage().persistent().set(&payment_key, &record);`
-        //    `env.storage().persistent().set(&nullifier_key, &true);`
-        //
-        // 3. INTERACTIONS:
-        //    `token_client.transfer(...)` -> called externally *after* state locks.
-        //
-        // Because the `DataKey::Nullifier` is written in step 2 natively inside Soroban's persistent storage before step 3 transfers control away to `token`, an attacker attempting to loop back into `execute_payment` using a malicious fallback mechanism in `token` will hit the check in step 1, preventing cross-contract reentrancy completely.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        // No-op: test validates CEI pattern via comments only.
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let verifier_client = ProofVerifierClient::new(&env, &addresses.verifier);
+        verifier_client.initialize_verifier(&mock_vk(&env));
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[8u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let proof_a = BytesN::from_array(&env, &[5u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[6u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[7u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &2_500,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &42,
+        );
+
+        assert_eq!(token_client.balance(&treasury), 7_500);
+        assert_eq!(token_client.balance(&employee), 2_500);
+        assert!(client.is_paid(&employee, &42));
+        assert_eq!(client.get_total_paid(&company_id), 2_500);
+
+        let replay = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &2_500,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &43,
+        );
+
+        assert_eq!(replay.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+        assert_eq!(token_client.balance(&treasury), 7_500);
+        assert_eq!(token_client.balance(&employee), 2_500);
+        assert_eq!(client.get_total_paid(&company_id), 2_500);
     }
 }

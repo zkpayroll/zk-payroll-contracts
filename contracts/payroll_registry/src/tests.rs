@@ -168,6 +168,15 @@ fn test_authorization_add_employee_fails_for_non_admin() {
     // Register a company with a specific admin address
     let correct_admin = Address::generate(&env);
     let treasury = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &correct_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "register_company",
+            args: (correct_admin.clone(), treasury.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
     let company_id = registry.register_company(&correct_admin, &treasury);
 
     // Provide a random rogue address representing the non-registered user
