@@ -60,8 +60,8 @@ mod e2e {
     /// Compute the salary commitment used across tests.
     ///
     /// In production this will use the Poseidon host function (CAP-0075).
-    /// The placeholder `compute_commitment` currently returns all-zeroes,
-    /// so both the commitment contract and the registry receive the same value.
+    /// The current contract implementation uses a deterministic SHA-256
+    /// fallback so the commitment contract and the registry receive the same value.
     fn alice_salary_commitment(commitment_client: &SalaryCommitmentContractClient) -> BytesN<32> {
         let env = commitment_client.env.clone();
         // blinding factor = 123 encoded as a big-endian 32-byte value
@@ -317,10 +317,9 @@ mod e2e {
     ///
     /// When SnarkJS and compiled circuit artefacts are present, `generate_proof.js`
     /// produces a real Groth16 proof; otherwise it produces a deterministic
-    /// mock proof in identical format.  The Soroban verifier currently returns
-    /// `true` for all proofs (placeholder pending CAP-0074 BN254 host
-    /// functions), so both paths exercise the complete deserialization and
-    /// execution pipeline.
+    /// mock proof in identical format.  The Soroban verifier currently accepts
+    /// structurally valid proofs, so both paths exercise the complete
+    /// deserialization and execution pipeline.
     #[test]
     fn test_dynamic_proof_integration() {
         use crate::proof_helper::try_generate_proof;

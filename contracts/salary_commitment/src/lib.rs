@@ -127,15 +127,18 @@ impl SalaryCommitmentContract {
         env.storage().persistent().has(&key)
     }
 
-    /// Compute Poseidon hash (placeholder - will use host function)
+    /// Compute a commitment hash for a salary and blinding factor.
     ///
-    /// In production, this will use CAP-0075 Poseidon host functions
-    pub fn compute_commitment(_env: Env, _salary: u64, _blinding_factor: BytesN<32>) -> BytesN<32> {
-        // TODO: Use Soroban Poseidon host function
-        // poseidon_hash([salary_bytes, blinding_factor])
+    /// In production, this will use CAP-0075 Poseidon host functions.
+    pub fn compute_commitment(env: Env, salary: u64, blinding_factor: BytesN<32>) -> BytesN<32> {
+        // Use a deterministic hash over the salary and blinding factor until
+        // the Poseidon host function is available in Soroban.
+        let mut preimage = soroban_sdk::Bytes::new(&env);
+        preimage.extend_from_array(&salary.to_le_bytes());
+        let blinding_bytes: [u8; 32] = blinding_factor.into();
+        preimage.extend_from_array(&blinding_bytes);
 
-        // Placeholder implementation
-        BytesN::from_array(&_env, &[0u8; 32])
+        env.crypto().sha256(&preimage).into()
     }
 
     /// Verify a commitment matches a salary (with proof)
