@@ -561,8 +561,14 @@ mod tests {
 
     fn setup_executor_with_pause_manager(
         env: &Env,
-    ) -> (PaymentExecutorClient<'_>, PauseManagerClient<'_>, u64, Address, Address, Address)
-    {
+    ) -> (
+        PaymentExecutorClient<'_>,
+        PauseManagerClient<'_>,
+        u64,
+        Address,
+        Address,
+        Address,
+    ) {
         env.mock_all_auths();
 
         let contract_id = env.register_contract(None, PaymentExecutor);

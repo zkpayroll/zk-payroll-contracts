@@ -335,8 +335,7 @@ mod tests {
 
         // Verify it's stored by checking that a paused state blocks execution
         pm_client.pause();
-        let (proofs, amounts, employees) =
-            single_payment_batch(&env, &_employee, 1000);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &_employee, 1000);
         let result = payroll_client.try_batch_process_payroll(&proofs, &amounts, &employees, &1000);
         assert!(result.is_err());
     }
@@ -417,7 +416,14 @@ mod tests {
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &payroll_id,
                 fn_name: "initialize",
-                args: (admin.clone(), token_id.clone(), verifier_id.clone(), commitment_id.clone(), treasury.clone()).into_val(&env),
+                args: (
+                    admin.clone(),
+                    token_id.clone(),
+                    verifier_id.clone(),
+                    commitment_id.clone(),
+                    treasury.clone(),
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
