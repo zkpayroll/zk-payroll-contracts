@@ -25,7 +25,7 @@ We adopt a **selective disclosure architecture** that balances these concerns:
 - Public inputs to ZK proofs include only the commitment hash and payment amount, not the salary directly
 - No salary data is ever emitted in events or stored in plaintext on-chain
 
-**Implementation**: `payroll_registry/src/lib.rs:94-104` stores commitments, `salary_commitment/src/lib.rs:96-102` retrieves them.
+**Implementation**: `payroll_registry/src/lib.rs:add_employee` stores commitments, `salary_commitment/src/lib.rs:96-102` retrieves them.
 
 ### Audit Model
 

@@ -162,7 +162,7 @@ impl SalaryCommitmentContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
-    use soroban_sdk::Env;
+    use soroban_sdk::{Env, Symbol};
 
     #[test]
     fn test_store_commitment() {
@@ -181,12 +181,12 @@ mod tests {
         let events = env.events().all();
         assert_eq!(events.len(), 1);
         let event = events.get(0).unwrap();
-        assert_eq!(event.topics().len(), 2);
+        assert_eq!(event.1.len(), 2);
         assert_eq!(
-            event.topics().get(0).unwrap().unwrap(),
-            Symbol::new(&env, "CommitmentUpdated").to_val()
+            event.1.get(0).unwrap().unwrap(),
+            Symbol::new(&env, "CommitmentUpdated").into_val(&env)
         );
-        assert_eq!(event.topics().get(1).unwrap().unwrap(), employee.to_val());
+        assert_eq!(event.1.get(1).unwrap().unwrap(), employee.into_val(&env));
     }
 
     #[test]

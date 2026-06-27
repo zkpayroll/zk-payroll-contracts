@@ -27,7 +27,7 @@ mod e2e {
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        Address, BytesN, Env, Vec,
+        Address, BytesN, Env, Symbol, Vec,
     };
     use token::{Token, TokenClient};
 
@@ -69,6 +69,13 @@ mod e2e {
         blinding_bytes[31] = 123u8;
         let blinding_factor = BytesN::from_array(&env, &blinding_bytes);
         commitment_client.compute_commitment(&5000u64, &blinding_factor)
+    }
+
+    // Extract topics from event tuple (contract, topics, data)
+    fn get_event_topics(
+        event: &(Address, Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    ) -> &Vec<soroban_sdk::Val> {
+        &event.1
     }
 
     // ── Helper: register & initialise all five contracts ─────────────────────
@@ -212,21 +219,22 @@ mod e2e {
             "Expected 4 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + payment_executed"
         );
 
+        // Event tuple is (contract, topics, data) - access topics via .1
         assert_eq!(
-            events.get(0).unwrap().topics().get(0).unwrap().unwrap(),
-            Symbol::new(env, "CompanyRegistered").to_val()
+            events.get(0).unwrap().1.get(0).unwrap().unwrap(),
+            Symbol::new(env, "CompanyRegistered").into_val(env)
         );
         assert_eq!(
-            events.get(1).unwrap().topics().get(0).unwrap().unwrap(),
-            Symbol::new(env, "CommitmentUpdated").to_val()
+            events.get(1).unwrap().1.get(0).unwrap().unwrap(),
+            Symbol::new(env, "CommitmentUpdated").into_val(env)
         );
         assert_eq!(
-            events.get(2).unwrap().topics().get(0).unwrap().unwrap(),
-            Symbol::new(env, "EmployeeAdded").to_val()
+            events.get(2).unwrap().1.get(0).unwrap().unwrap(),
+            Symbol::new(env, "EmployeeAdded").into_val(env)
         );
         assert_eq!(
-            events.get(3).unwrap().topics().get(0).unwrap().unwrap(),
-            Symbol::new(env, "payment_executed").to_val()
+            events.get(3).unwrap().1.get(0).unwrap().unwrap(),
+            Symbol::new(env, "payment_executed").into_val(env)
         );
     }
 

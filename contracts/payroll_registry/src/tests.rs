@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events};
-use soroban_sdk::{Env, IntoVal};
+use soroban_sdk::{Env, IntoVal, Symbol};
 
 fn setup() -> (Env, Address) {
     let env = Env::default();
@@ -249,12 +249,12 @@ fn test_register_company_emits_event() {
     assert_eq!(after, before + 1);
 
     let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.topics().len(), 2);
+    assert_eq!(event.1.len(), 2);
     assert_eq!(
-        event.topics().get(0).unwrap().unwrap(),
-        Symbol::new(&env, "CompanyRegistered").to_val()
+        event.1.get(0).unwrap().unwrap(),
+        Symbol::new(&env, "CompanyRegistered").into_val(&env)
     );
-    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
+    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
 }
 
 #[test]
@@ -273,13 +273,13 @@ fn test_add_employee_emits_event() {
     assert_eq!(after, before + 1);
 
     let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.topics().len(), 3);
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
-        event.topics().get(0).unwrap().unwrap(),
-        Symbol::new(&env, "EmployeeAdded").to_val()
+        event.1.get(0).unwrap().unwrap(),
+        Symbol::new(&env, "EmployeeAdded").into_val(&env)
     );
-    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
-    assert_eq!(event.topics().get(2).unwrap().unwrap(), employee.to_val());
+    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
+    assert_eq!(event.1.get(2).unwrap().unwrap(), employee.into_val(&env));
 }
 
 #[test]
@@ -299,13 +299,13 @@ fn test_remove_employee_emits_event() {
     assert_eq!(after, before + 1);
 
     let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.topics().len(), 3);
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
-        event.topics().get(0).unwrap().unwrap(),
-        Symbol::new(&env, "EmployeeRemoved").to_val()
+        event.1.get(0).unwrap().unwrap(),
+        Symbol::new(&env, "EmployeeRemoved").into_val(&env)
     );
-    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
-    assert_eq!(event.topics().get(2).unwrap().unwrap(), employee.to_val());
+    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
+    assert_eq!(event.1.get(2).unwrap().unwrap(), employee.into_val(&env));
 }
 
 #[test]
@@ -326,11 +326,11 @@ fn test_update_commitment_emits_event() {
     assert_eq!(after, before + 1);
 
     let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.topics().len(), 3);
+    assert_eq!(event.1.len(), 3);
     assert_eq!(
-        event.topics().get(0).unwrap().unwrap(),
-        Symbol::new(&env, "CommitmentUpdated").to_val()
+        event.1.get(0).unwrap().unwrap(),
+        Symbol::new(&env, "CommitmentUpdated").into_val(&env)
     );
-    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
-    assert_eq!(event.topics().get(2).unwrap().unwrap(), employee.to_val());
+    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
+    assert_eq!(event.1.get(2).unwrap().unwrap(), employee.into_val(&env));
 }
