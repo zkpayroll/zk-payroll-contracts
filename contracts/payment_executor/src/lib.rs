@@ -71,17 +71,12 @@ pub struct ContractAddresses {
 #[contracttype]
 pub enum DataKey {
     Addresses,
-    Payment(Address, u32), // (employee, period)
-    Nullifier(BytesN<32>), // Cryptographic nullifier tracking
-    TotalPaid(u64),        // Total paid by company
-    ExecutorAdmin,         // Executor-level admin for pause management
-    PauseManager,          // Pause manager contract address
     Payment(Address, u32),
     Nullifier(BytesN<32>),
     TotalPaid(u64),
-    /// Payroll period keyed by (company_id, period_id).
+    ExecutorAdmin,
+    PauseManager,
     Period(u64, u32),
-    /// Next period ID for a company (auto-increment).
     PeriodSequence(u64),
 }
 
@@ -134,7 +129,6 @@ impl PaymentExecutor {
             .set(&DataKey::PauseManager, &pause_manager);
     }
 
-    /// Execute a private payment with ZK proof
     // -----------------------------------------------------------------------
     // Payroll period lifecycle
     // -----------------------------------------------------------------------
@@ -263,6 +257,8 @@ impl PaymentExecutor {
             if pm_client.is_paused() {
                 panic!("Payroll is paused");
             }
+        }
+
         // Validate the period exists and is open
         let period_key = DataKey::Period(company_id, period);
         let mut period_record: PayrollPeriod = env
@@ -846,9 +842,6 @@ mod tests {
         let addresses = setup_addresses(env);
         client.initialize(&addresses);
 
-        let verifier_client = ProofVerifierClient::new(env, &addresses.verifier);
-        verifier_client.initialize_verifier(&mock_vk(env));
-
         let registry_client = PayrollRegistryClient::new(env, &addresses.registry);
         let token_client = TokenClient::new(env, &addresses.token);
 
@@ -912,6 +905,8 @@ mod tests {
         let proof_c = BytesN::from_array(&env, &[3u8; 64]);
         let nullifier = BytesN::from_array(&env, &[4u8; 32]);
 
+        client.create_period(&company_id);
+
         pm_client.pause();
 
         // Verify paused
@@ -955,9 +950,6 @@ mod tests {
         let addresses = setup_addresses(&env);
         client.initialize(&addresses);
 
-        let verifier_client = ProofVerifierClient::new(&env, &addresses.verifier);
-        verifier_client.initialize_verifier(&mock_vk(&env));
-
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
         let token_client = TokenClient::new(&env, &addresses.token);
 
@@ -968,6 +960,7 @@ mod tests {
 
         let company_id = registry_client.register_company(&admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
+        client.create_period(&company_id);
         token_client.mint(&treasury, &10_000);
 
         let proof_a = BytesN::from_array(&env, &[1u8; 64]);
