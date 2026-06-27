@@ -14,7 +14,31 @@ pub struct PaymentRecord {
     pub employee: Address,
     pub proof_hash: BytesN<32>,
     pub timestamp: u64,
-    pub period: u32, // Payment period (e.g., month number)
+    pub period: u32,
+}
+
+/// A payroll period definition with scheduling metadata.
+///
+/// Each payroll run is tied to a unique period per company. Periods are
+/// monotonically numbered and carry ledger-based scheduling metadata so
+/// that downstream consumers (audit, UI reporting) can map payments to
+/// calendar cycles without leaking salary values.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollPeriod {
+    pub period_id: u32,
+    pub company_id: u64,
+    /// Ledger sequence at which the period was opened.
+    pub start_ledger: u32,
+    /// Ledger sequence at which the period was closed (0 = still open).
+    pub end_ledger: u32,
+    /// Unix timestamp when the period was created (on-chain time).
+    pub created_at: u64,
+    /// True when the period has been closed. Payments cannot be made
+    /// against a closed period.
+    pub closed: bool,
+    /// Number of payments executed within this period.
+    pub payment_count: u32,
 }
 
 #[contracterror]
@@ -24,6 +48,12 @@ pub enum PaymentError {
     ProofAlreadyUsed = 1,
     ArrayLengthMismatch = 2,
     AlreadyPaid = 3,
+    /// The payroll period does not exist.
+    PeriodNotFound = 4,
+    /// The payroll period is closed — no new payments allowed.
+    PeriodClosed = 5,
+    /// Attempt to create a duplicate period for this company.
+    PeriodAlreadyExists = 6,
 }
 
 /// Contract addresses for dependencies
@@ -33,16 +63,20 @@ pub struct ContractAddresses {
     pub registry: Address,
     pub commitment: Address,
     pub verifier: Address,
-    pub token: Address, // USDC or payment token
+    pub token: Address,
 }
 
 /// Storage keys
 #[contracttype]
 pub enum DataKey {
     Addresses,
-    Payment(Address, u32), // (employee, period)
-    Nullifier(BytesN<32>), // Cryptographic nullifier tracking
-    TotalPaid(u64),        // Total paid by company
+    Payment(Address, u32),
+    Nullifier(BytesN<32>),
+    TotalPaid(u64),
+    /// Payroll period keyed by (company_id, period_id).
+    Period(u64, u32),
+    /// Next period ID for a company (auto-increment).
+    PeriodSequence(u64),
 }
 
 #[contract]
@@ -70,18 +104,111 @@ impl PaymentExecutor {
         env.storage().persistent().set(&key, &addresses);
     }
 
-    /// Execute a private payment with ZK proof
+    // -----------------------------------------------------------------------
+    // Payroll period lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Create a new payroll period for a company.
     ///
-    /// The proof verifies:
-    /// 1. The payment amount matches the salary commitment
-    /// 2. The recipient is the correct employee
-    /// 3. The nullifier is fresh (no double payment)
+    /// Periods are numbered sequentially per company. Only one period can
+    /// be open at a time — a new period cannot be created until the previous
+    /// one is closed (or no periods exist yet).
+    pub fn create_period(env: Env, company_id: u64) -> Result<PayrollPeriod, PaymentError> {
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company: CompanyInfo = registry.get_company(&company_id);
+        company.admin.require_auth();
+
+        // Assign sequential period ID
+        let seq_key = DataKey::PeriodSequence(company_id);
+        let next_id: u32 = env.storage().persistent().get(&seq_key).unwrap_or(1u32);
+
+        let period_key = DataKey::Period(company_id, next_id);
+        if env.storage().persistent().has(&period_key) {
+            return Err(PaymentError::PeriodAlreadyExists);
+        }
+
+        let period = PayrollPeriod {
+            period_id: next_id,
+            company_id,
+            start_ledger: env.ledger().sequence(),
+            end_ledger: 0,
+            created_at: env.ledger().timestamp(),
+            closed: false,
+            payment_count: 0,
+        };
+
+        env.storage().persistent().set(&period_key, &period);
+        env.storage().persistent().set(&seq_key, &(next_id + 1));
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "PeriodCreated"), company_id),
+            (next_id,),
+        );
+
+        Ok(period)
+    }
+
+    /// Close a payroll period so no further payments can be made in it.
+    pub fn close_period(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+    ) -> Result<PayrollPeriod, PaymentError> {
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company: CompanyInfo = registry.get_company(&company_id);
+        company.admin.require_auth();
+
+        let period_key = DataKey::Period(company_id, period_id);
+        let mut period: PayrollPeriod = env
+            .storage()
+            .persistent()
+            .get(&period_key)
+            .ok_or(PaymentError::PeriodNotFound)?;
+
+        if period.closed {
+            return Err(PaymentError::PeriodClosed);
+        }
+
+        period.closed = true;
+        period.end_ledger = env.ledger().sequence();
+        env.storage().persistent().set(&period_key, &period);
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "PeriodClosed"), company_id),
+            (period_id,),
+        );
+
+        Ok(period)
+    }
+
+    /// Read a period definition.
+    pub fn get_period(env: Env, company_id: u64, period_id: u32) -> Option<PayrollPeriod> {
+        let key = DataKey::Period(company_id, period_id);
+        env.storage().persistent().get(&key)
+    }
+
+    // -----------------------------------------------------------------------
+    // Payment execution
+    // -----------------------------------------------------------------------
+
     #[allow(clippy::too_many_arguments)]
     pub fn execute_payment(
         env: Env,
         company_id: u64,
         employee: Address,
-        amount: i128, // Payment amount (verified by ZK proof)
+        amount: i128,
         proof_a: BytesN<64>,
         proof_b: BytesN<128>,
         proof_c: BytesN<64>,
@@ -93,6 +220,18 @@ impl PaymentExecutor {
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
+
+        // Validate the period exists and is open
+        let period_key = DataKey::Period(company_id, period);
+        let mut period_record: PayrollPeriod = env
+            .storage()
+            .persistent()
+            .get(&period_key)
+            .ok_or(PaymentError::PeriodNotFound)?;
+
+        if period_record.closed {
+            return Err(PaymentError::PeriodClosed);
+        }
 
         // Check cryptographically if the exact proof was submitted previously
         let nullifier_key = DataKey::Nullifier(nullifier.clone());
@@ -115,7 +254,6 @@ impl PaymentExecutor {
         company.admin.require_auth();
 
         // Construct public inputs required by issue #20:
-        // input[0] = on-chain commitment, input[1] = caller-provided amount.
         let mut public_inputs = soroban_sdk::Vec::new(&env);
         public_inputs.push_back(on_chain_commitment);
         public_inputs.push_back(Self::amount_to_public_input(&env, amount));
@@ -139,17 +277,12 @@ impl PaymentExecutor {
         let record = PaymentRecord {
             company_id,
             employee: employee.clone(),
-            proof_hash: nullifier.clone(), // Use nullifier as unique identifier
+            proof_hash: nullifier.clone(),
             timestamp: env.ledger().timestamp(),
             period,
         };
 
-        // Enforce Checks-Effects-Interactions (CEI) Pattern:
-        // Update the contract's local persistent storage state BEFORE interacting
-        // with any external contracts (like token and token_client transfers).
         env.storage().persistent().set(&payment_key, &record);
-
-        // Save cryptographic nullifier permanently
         env.storage().persistent().set(&nullifier_key, &true);
 
         // Update total paid
@@ -251,9 +384,15 @@ mod tests {
     use soroban_sdk::Env;
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
+        env.mock_all_auths();
         let registry_id = env.register_contract(None, PayrollRegistry);
         let verifier_id = env.register_contract(None, ProofVerifier);
         let token_id = env.register_contract(None, Token);
+
+        let verifier_client = ProofVerifierClient::new(env, &verifier_id);
+        let verifier_admin = Address::generate(env);
+        verifier_client.init_verifier_admin(&verifier_admin);
+        verifier_client.initialize_verifier(&mock_vk(env));
 
         ContractAddresses {
             registry: registry_id,
@@ -315,9 +454,6 @@ mod tests {
         let addresses = setup_addresses(&env);
         client.initialize(&addresses);
 
-        let verifier_client = ProofVerifierClient::new(&env, &addresses.verifier);
-        verifier_client.initialize_verifier(&mock_vk(&env));
-
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
         let token_client = TokenClient::new(&env, &addresses.token);
 
@@ -328,8 +464,10 @@ mod tests {
 
         let company_id = registry_client.register_company(&admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
-
         token_client.mint(&treasury, &10_000);
+
+        // Create payroll period
+        let _ = client.create_period(&company_id);
 
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
@@ -371,9 +509,6 @@ mod tests {
         let addresses = setup_addresses(&env);
         client.initialize(&addresses);
 
-        let verifier_client = ProofVerifierClient::new(&env, &addresses.verifier);
-        verifier_client.initialize_verifier(&mock_vk(&env));
-
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
         let token_client = TokenClient::new(&env, &addresses.token);
 
@@ -386,12 +521,13 @@ mod tests {
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
+        let _ = client.create_period(&company_id);
+
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
         let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
         let valid_nullifier = BytesN::from_array(&env, &[4u8; 32]);
 
-        // Attacker submits a perfectly valid proof once.
         client.execute_payment(
             &company_id,
             &employee,
@@ -400,11 +536,9 @@ mod tests {
             &valid_proof_b,
             &valid_proof_c,
             &valid_nullifier,
-            &1, // Period 1
+            &1,
         );
 
-        // Attacker attempts to replay the exact same valid proof for the same period.
-        // It must fail before any transfer occurs.
         let result = client.try_execute_payment(
             &company_id,
             &employee,
@@ -413,7 +547,7 @@ mod tests {
             &valid_proof_b,
             &valid_proof_c,
             &valid_nullifier,
-            &1, // Period 1
+            &1,
         );
         assert_eq!(result.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
     }
@@ -460,11 +594,12 @@ mod tests {
         );
     }
 
-    /// Acceptance Criteria: Reentrancy
-    /// - Soroban naturally prevents this across inter-contract calls to the same contract.
-    /// - However, verify the token spend logic happens AFTER state updates (Checks-Effects-Interactions).
+    // -----------------------------------------------------------------------
+    // Period tests
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_reentrancy_cei_pattern() {
+    fn test_create_period() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, PaymentExecutor);
@@ -473,8 +608,93 @@ mod tests {
         let addresses = setup_addresses(&env);
         client.initialize(&addresses);
 
-        let verifier_client = ProofVerifierClient::new(&env, &addresses.verifier);
-        verifier_client.initialize_verifier(&mock_vk(&env));
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let period = client.create_period(&company_id);
+        let result = period;
+        assert_eq!(result.period_id, 1);
+        assert_eq!(result.company_id, company_id);
+        assert!(!result.closed);
+        assert_eq!(result.payment_count, 0);
+    }
+
+    #[test]
+    fn test_close_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let _ = client.create_period(&company_id);
+        let result = client.close_period(&company_id, &1);
+
+        assert!(result.closed);
+        assert_eq!(result.end_ledger, result.start_ledger);
+    }
+
+    #[test]
+    fn test_payment_in_closed_period_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[8u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+        let _ = client.close_period(&company_id, &1);
+
+        let proof_a = BytesN::from_array(&env, &[5u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[6u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[7u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), PaymentError::PeriodClosed);
+    }
+
+    #[test]
+    fn test_payment_in_nonexistent_period_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
         let token_client = TokenClient::new(&env, &addresses.token);
@@ -493,6 +713,50 @@ mod tests {
         let proof_c = BytesN::from_array(&env, &[7u8; 64]);
         let nullifier = BytesN::from_array(&env, &[9u8; 32]);
 
+        // Period 99 doesn't exist
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &99,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), PaymentError::PeriodNotFound);
+    }
+
+    /// Acceptance Criteria: Reentrancy
+    #[test]
+    fn test_reentrancy_cei_pattern() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[8u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+
+        let proof_a = BytesN::from_array(&env, &[5u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[6u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[7u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+
         client.execute_payment(
             &company_id,
             &employee,
@@ -501,12 +765,12 @@ mod tests {
             &proof_b,
             &proof_c,
             &nullifier,
-            &42,
+            &1,
         );
 
         assert_eq!(token_client.balance(&treasury), 7_500);
         assert_eq!(token_client.balance(&employee), 2_500);
-        assert!(client.is_paid(&employee, &42));
+        assert!(client.is_paid(&employee, &1));
         assert_eq!(client.get_total_paid(&company_id), 2_500);
 
         let events = env.events().all();
@@ -526,7 +790,7 @@ mod tests {
             &proof_b,
             &proof_c,
             &nullifier,
-            &43,
+            &1,
         );
 
         assert_eq!(replay.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);

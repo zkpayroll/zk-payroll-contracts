@@ -211,22 +211,27 @@ mod tests {
         // register dependent contracts
         let verifier_id = env.register_contract(None, ProofVerifier);
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+        let verifier_admin = Address::generate(&env);
+        verifier_client.init_verifier_admin(&verifier_admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
 
         let commitment_id = env.register_contract(None, SalaryCommitmentContract);
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
+        let commitment_admin = Address::generate(&env);
+        commitment_client.init_commitment_admin(&commitment_admin);
 
         let token_id = env.register_contract(None, Token);
         let token_client = TokenClient::new(&env, &token_id);
 
-        // register payroll contract
+        let treasury = Address::generate(&env);
+        let admin = Address::generate(&env);
+
         let payroll_id = env.register_contract(None, Payroll);
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
-        // initialize payroll with addresses and a dummy treasury
-        let treasury = Address::generate(&env);
-        let admin = Address::generate(&env);
         payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+
+        commitment_client.set_payroll_operator(&payroll_id);
 
         // amounts are 100..149; total = sum(100..=149) = 6225
         token_client.mint(&treasury, &10_000i128);

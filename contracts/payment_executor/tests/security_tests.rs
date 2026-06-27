@@ -52,12 +52,15 @@ fn setup_system<'a>(
     };
 
     executor.initialize(&addresses);
+    verifier.init_verifier_admin(&Address::generate(env));
     verifier.initialize_verifier(&mock_vk(env));
 
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
 
     let company_id = registry.register_company(&admin, &treasury);
+
+    executor.create_period(&company_id);
 
     token.mint(&treasury, &100_000);
 
@@ -92,6 +95,8 @@ fn test_proof_replay_protection() {
         &nullifier,
         &1,
     );
+
+    executor.create_period(&company_id);
 
     let result = executor.try_execute_payment(
         &company_id,
@@ -167,6 +172,9 @@ fn test_reentrancy_state_updates_before_external_calls() {
     let proof_c = BytesN::from_array(&env, &[7u8; 64]);
     let nullifier = BytesN::from_array(&env, &[8u8; 32]);
 
+    executor.create_period(&company_id);
+    executor.create_period(&company_id);
+
     executor.execute_payment(
         &company_id,
         &employee,
@@ -175,10 +183,10 @@ fn test_reentrancy_state_updates_before_external_calls() {
         &proof_b,
         &proof_c,
         &nullifier,
-        &42,
+        &2,
     );
 
-    assert!(executor.is_paid(&employee, &42));
+    assert!(executor.is_paid(&employee, &2));
     assert_eq!(executor.get_total_paid(&company_id), 2500);
 
     let replay = executor.try_execute_payment(
@@ -189,7 +197,7 @@ fn test_reentrancy_state_updates_before_external_calls() {
         &proof_b,
         &proof_c,
         &nullifier,
-        &42,
+        &2,
     );
 
     // ProofAlreadyUsed error would happen first because nullifier checks precede AlreadyPaid checks and token transfers.
