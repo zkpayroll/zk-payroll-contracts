@@ -223,7 +223,7 @@ impl PaymentExecutor {
 
         // Validate the period exists and is open
         let period_key = DataKey::Period(company_id, period);
-        let mut period_record: PayrollPeriod = env
+        let period_record: PayrollPeriod = env
             .storage()
             .persistent()
             .get(&period_key)
@@ -380,8 +380,8 @@ mod tests {
     use payroll_registry::PayrollRegistry;
     use proof_verifier::{ProofVerifier, VerificationKey};
     use soroban_sdk::testutils::{Address as _, Events};
-    use soroban_sdk::{Env, Symbol};
-    use token::{Token, TokenClient};
+    use soroban_sdk::{Env, Symbol, TryIntoVal};
+    use ::token::{Token, TokenClient};
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
@@ -492,11 +492,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         let event = events.get(0).unwrap();
         assert_eq!(event.1.len(), 2);
-        assert_eq!(
-            event.1.get(0).unwrap().unwrap(),
-            Symbol::new(&env, "PayrollProcessed").into_val(&env)
-        );
-        assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
+        let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
+        let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(comp_id, company_id);
     }
 
     #[test]
@@ -777,10 +776,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         let event = events.get(0).unwrap();
         assert_eq!(event.1.len(), 2);
-        assert_eq!(
-            event.1.get(0).unwrap().unwrap(),
-            Symbol::new(&env, "PayrollProcessed").into_val(&env)
-        );
+        let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));
 
         let replay = client.try_execute_payment(
             &company_id,

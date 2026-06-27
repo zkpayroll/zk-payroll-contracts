@@ -27,9 +27,10 @@ mod e2e {
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
+        TryIntoVal,
         Address, BytesN, Env, Symbol, Vec,
     };
-    use token::{Token, TokenClient};
+    use ::token::{Token, TokenClient};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -71,15 +72,7 @@ mod e2e {
         commitment_client.compute_commitment(&5000u64, &blinding_factor)
     }
 
-    // Extract topics from event tuple (contract, topics, data)
-    fn get_event_topics(
-        event: &(Address, Vec<soroban_sdk::Val>, soroban_sdk::Val),
-    ) -> &Vec<soroban_sdk::Val> {
-        &event.1
-    }
-
-    // ── Helper: register & initialise all five contracts ─────────────────────
-
+// ── Helper: register & initialise all five contracts ─────────────────────
     struct TestContext<'a> {
         env: Env,
         admin: Address,
@@ -225,22 +218,22 @@ mod e2e {
         );
 
         // Event tuple is (contract, topics, data) - access topics via .1
-        assert_eq!(
-            events.get(0).unwrap().1.get(0).unwrap().unwrap(),
-            Symbol::new(env, "CompanyRegistered").into_val(env)
-        );
-        assert_eq!(
-            events.get(1).unwrap().1.get(0).unwrap().unwrap(),
-            Symbol::new(env, "CommitmentUpdated").into_val(env)
-        );
-        assert_eq!(
-            events.get(2).unwrap().1.get(0).unwrap().unwrap(),
-            Symbol::new(env, "EmployeeAdded").into_val(env)
-        );
-        assert_eq!(
-            events.get(3).unwrap().1.get(0).unwrap().unwrap(),
-            Symbol::new(env, "payment_executed").into_val(env)
-        );
+        let topics0 = events.get(0).unwrap().1;
+        let val0 = topics0.get(0).unwrap();
+        let sym0: Symbol = val0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(env, "CompanyRegistered"));
+        let topics1 = events.get(1).unwrap().1;
+        let val1 = topics1.get(0).unwrap();
+        let sym1: Symbol = val1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym1, Symbol::new(env, "CommitmentUpdated"));
+        let topics2 = events.get(2).unwrap().1;
+        let val2 = topics2.get(0).unwrap();
+        let sym2: Symbol = val2.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym2, Symbol::new(env, "EmployeeAdded"));
+        let topics3 = events.get(3).unwrap().1;
+        let val3 = topics3.get(0).unwrap();
+        let sym3: Symbol = val3.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3, Symbol::new(env, "payment_executed"));
     }
 
     /// Paying an employee who has no commitment on-chain must panic.
