@@ -8,9 +8,11 @@ pub enum DataKey {
     Operator,
 }
 
+#[cfg(feature = "contract")]
 #[contract]
 pub struct PauseManager;
 
+#[cfg(feature = "contract")]
 #[contractimpl]
 impl PauseManager {
     pub fn initialize(e: Env, operator: Address) {
@@ -66,6 +68,47 @@ impl PauseManager {
         e.storage()
             .persistent()
             .set(&DataKey::Operator, &new_operator);
+    }
+}
+
+#[cfg(not(feature = "contract"))]
+pub struct PauseManagerClient<'a>(pub &'a Env, pub &'a Address);
+
+#[cfg(not(feature = "contract"))]
+impl<'a> PauseManagerClient<'a> {
+    pub fn new(env: &'a Env, contract_id: &'a Address) -> Self {
+        Self(env, contract_id)
+    }
+
+    pub fn initialize(&self, operator: &Address) {
+        self.0.invoke_contract(
+            &self.1,
+            &Symbol::new(self.0, "initialize"),
+            (operator.clone(),),
+        );
+    }
+
+    pub fn pause(&self) {
+        self.0
+            .invoke_contract(&self.1, &Symbol::new(self.0, "pause"), ());
+    }
+
+    pub fn unpause(&self) {
+        self.0
+            .invoke_contract(&self.1, &Symbol::new(self.0, "unpause"), ());
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.0
+            .invoke_contract(&self.1, &Symbol::new(self.0, "is_paused"), ())
+    }
+
+    pub fn set_operator(&self, new_operator: &Address) {
+        self.0.invoke_contract(
+            &self.1,
+            &Symbol::new(self.0, "set_operator"),
+            (new_operator.clone(),),
+        );
     }
 }
 
