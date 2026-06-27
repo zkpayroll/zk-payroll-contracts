@@ -13,10 +13,12 @@ soroban-sdk = { workspace = true }
 soroban-token-sdk = { workspace = true }
 payroll_registry = { path = "../payroll_registry" }
 proof_verifier = { path = "../proof_verifier" }
+salary_commitment = { path = "../salary_commitment" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 payroll_registry = { path = "../payroll_registry" }
+salary_commitment = { path = "../salary_commitment" }
 token = { path = "../token" }
 
 [features]

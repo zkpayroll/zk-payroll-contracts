@@ -2,6 +2,7 @@
 
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
+use salary_commitment::SalaryCommitmentContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env,
 };
@@ -106,9 +107,11 @@ impl PaymentExecutor {
             return Err(PaymentError::AlreadyPaid);
         }
 
-        // Read on-chain commitment and company metadata from payroll_registry.
+        // Read the employee commitment from the dedicated commitment contract
+        // and company metadata from payroll_registry.
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let commitment = commitment_client.get_commitment(&employee).commitment;
         let registry = PayrollRegistryClient::new(&env, &addresses.registry);
-        let on_chain_commitment = registry.get_commitment(&company_id, &employee);
         let company: CompanyInfo = registry.get_company(&company_id);
 
         // Ensure only HR admin for this company can trigger payroll.
@@ -117,7 +120,7 @@ impl PaymentExecutor {
         // Construct public inputs required by issue #20:
         // input[0] = on-chain commitment, input[1] = caller-provided amount.
         let mut public_inputs = soroban_sdk::Vec::new(&env);
-        public_inputs.push_back(on_chain_commitment);
+        public_inputs.push_back(commitment);
         public_inputs.push_back(Self::amount_to_public_input(&env, amount));
 
         // Validate Groth16 proof via proof_verifier contract.
