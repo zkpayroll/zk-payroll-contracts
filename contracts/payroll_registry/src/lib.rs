@@ -77,12 +77,15 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::CompanySequence, &next);
 
-        let info = CompanyInfo { admin, treasury };
+        let info = CompanyInfo {
+            admin: admin.clone(),
+            treasury: treasury.clone(),
+        };
         env.storage().persistent().set(&DataKey::Company(id), &info);
 
         env.events().publish(
             (Symbol::new(&env, "CompanyRegistered"), id),
-            (admin.clone(), treasury.clone()),
+            (admin, treasury),
         );
         // topics : ("CompanyRegistered", company_id)
         // data   : (admin, treasury)
@@ -99,16 +102,13 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
+        let emp = employee.clone();
         env.storage()
             .persistent()
-            .set(&DataKey::Employee(company_id, employee), &commitment);
+            .set(&DataKey::Employee(company_id, emp), &commitment);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "EmployeeAdded"),
-                company_id,
-                employee.clone(),
-            ),
+            (Symbol::new(&env, "EmployeeAdded"), company_id, employee),
             (commitment,),
         );
         // topics : ("EmployeeAdded", company_id, employee)
@@ -124,16 +124,13 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
+        let emp = employee.clone();
         env.storage()
             .persistent()
-            .remove(&DataKey::Employee(company_id, employee));
+            .remove(&DataKey::Employee(company_id, emp));
 
         env.events().publish(
-            (
-                Symbol::new(&env, "EmployeeRemoved"),
-                company_id,
-                employee.clone(),
-            ),
+            (Symbol::new(&env, "EmployeeRemoved"), company_id, employee),
             (),
         );
         // topics : ("EmployeeRemoved", company_id, employee)
@@ -149,7 +146,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
-        let key = DataKey::Employee(company_id, employee);
+        let emp = employee.clone();
+        let key = DataKey::Employee(company_id, emp);
         if !env.storage().persistent().has(&key) {
             panic!("Employee not found");
         }
@@ -157,11 +155,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage().persistent().set(&key, &new_commitment);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "CommitmentUpdated"),
-                company_id,
-                employee.clone(),
-            ),
+            (Symbol::new(&env, "CommitmentUpdated"), company_id, employee),
             (new_commitment,),
         );
         // topics : ("CommitmentUpdated", company_id, employee)
