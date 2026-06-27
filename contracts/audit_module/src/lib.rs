@@ -136,6 +136,13 @@ impl AuditModule {
             .persistent()
             .set(&DataKey::AuditorKey(auditor), &record);
 
+        env.events().publish(
+            (Symbol::new(&env, "ViewKeyGenerated"), auditor.clone()),
+            (key_bytes.clone(), expiration_ledger),
+        );
+        // topics : ("ViewKeyGenerated", auditor)
+        // data   : (key_bytes, expiration_ledger)
+
         key_bytes
     }
 
@@ -173,6 +180,12 @@ impl AuditModule {
         env.storage()
             .persistent()
             .remove(&DataKey::AuditorKey(auditor));
+
+        env.events()
+            .publish((Symbol::new(&env, "ViewKeyRevoked"), auditor.clone()), ());
+        // topics : ("ViewKeyRevoked", auditor)
+        // data   : ()
+
         Ok(())
     }
 
@@ -300,6 +313,8 @@ impl AuditModule {
                 (Symbol::new(env, "AuditSuccessful"), auditor.clone()),
                 (scope, keyed_stored),
             );
+            // topics : ("AuditSuccessful", auditor)
+            // data   : (scope, keyed_stored)
         }
 
         matched
@@ -335,6 +350,8 @@ impl AuditModule {
                 report.period_end,
             ),
         );
+        // topics : ("AggregateAuditGenerated", auditor)
+        // data   : (company_id, period_start, period_end)
 
         Ok(report)
     }

@@ -1,5 +1,5 @@
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events};
 use soroban_sdk::{Env, IntoVal};
 
 fn setup() -> (Env, Address) {
@@ -230,4 +230,107 @@ fn test_get_commitment_returns_employee_commitment() {
 
     let got = client.get_commitment(&company_id, &employee);
     assert_eq!(got, commitment);
+}
+
+// ---------------------------------------------------------------------------
+// Event emission tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_register_company_emits_event() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let before = env.events().all().len();
+    let company_id = client.register_company(&admin, &treasury);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.topics().len(), 2);
+    assert_eq!(
+        event.topics().get(0).unwrap().unwrap(),
+        Symbol::new(&env, "CompanyRegistered").to_val()
+    );
+    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
+}
+
+#[test]
+fn test_add_employee_emits_event() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let before = env.events().all().len();
+    client.add_employee(&company_id, &employee, &commitment);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.topics().len(), 3);
+    assert_eq!(
+        event.topics().get(0).unwrap().unwrap(),
+        Symbol::new(&env, "EmployeeAdded").to_val()
+    );
+    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
+    assert_eq!(event.topics().get(2).unwrap().unwrap(), employee.to_val());
+}
+
+#[test]
+fn test_remove_employee_emits_event() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[2u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    let before = env.events().all().len();
+    client.remove_employee(&company_id, &employee);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.topics().len(), 3);
+    assert_eq!(
+        event.topics().get(0).unwrap().unwrap(),
+        Symbol::new(&env, "EmployeeRemoved").to_val()
+    );
+    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
+    assert_eq!(event.topics().get(2).unwrap().unwrap(), employee.to_val());
+}
+
+#[test]
+fn test_update_commitment_emits_event() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let old_commitment = BytesN::from_array(&env, &[1u8; 32]);
+    let new_commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &old_commitment);
+    let before = env.events().all().len();
+    client.update_commitment(&company_id, &employee, &new_commitment);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.topics().len(), 3);
+    assert_eq!(
+        event.topics().get(0).unwrap().unwrap(),
+        Symbol::new(&env, "CommitmentUpdated").to_val()
+    );
+    assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
+    assert_eq!(event.topics().get(2).unwrap().unwrap(), employee.to_val());
 }

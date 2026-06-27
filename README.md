@@ -210,6 +210,12 @@ This project leverages Stellar's Protocol X-Ray (Protocol 25) primitives:
 - [ ] Batch payment optimization
 - [ ] Multi-currency support
 
+## Events
+
+See [docs/events.md](docs/events.md) for the full event schema reference and
+consumption expectations.
+
+
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

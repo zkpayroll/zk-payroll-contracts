@@ -52,12 +52,12 @@ impl SalaryCommitmentContract {
         env.storage().persistent().set(&key, &salary_commitment);
 
         // Emit CommitmentUpdated event so off-chain indexers track commitment history.
-        // topics : ("CommitmentUpdated", employee)
-        // data   : (commitment,)
         env.events().publish(
             (Symbol::new(&env, "CommitmentUpdated"), employee),
             (commitment,),
         );
+        // topics : ("CommitmentUpdated", employee)
+        // data   : (commitment,)
 
         salary_commitment
     }
@@ -86,6 +86,8 @@ impl SalaryCommitmentContract {
             (Symbol::new(&env, "CommitmentUpdated"), employee),
             (new_commitment,),
         );
+        // topics : ("CommitmentUpdated", employee)
+        // data   : (new_commitment,)
 
         existing
     }
@@ -159,7 +161,7 @@ impl SalaryCommitmentContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::Env;
 
     #[test]
@@ -175,6 +177,16 @@ mod tests {
 
         assert_eq!(result.commitment, commitment);
         assert_eq!(result.version, 1);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let event = events.get(0).unwrap();
+        assert_eq!(event.topics().len(), 2);
+        assert_eq!(
+            event.topics().get(0).unwrap().unwrap(),
+            Symbol::new(&env, "CommitmentUpdated").to_val()
+        );
+        assert_eq!(event.topics().get(1).unwrap().unwrap(), employee.to_val());
     }
 
     #[test]
@@ -188,7 +200,10 @@ mod tests {
         let updated = BytesN::from_array(&env, &[2u8; 32]);
 
         client.store_commitment(&employee, &initial);
+        let before = env.events().all().len();
         let result = client.update_commitment(&employee, &updated);
+        let after = env.events().all().len();
+        assert_eq!(after, before + 1);
 
         assert_eq!(result.commitment, updated);
         assert_eq!(result.version, 2);

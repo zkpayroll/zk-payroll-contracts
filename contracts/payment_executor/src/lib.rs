@@ -160,8 +160,6 @@ impl PaymentExecutor {
             .set(&total_key, &(current_total + amount));
 
         // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
-        // topics : ("PayrollProcessed", company_id)
-        // data   : (employee, amount, period)
         env.events().publish(
             (
                 soroban_sdk::Symbol::new(&env, "PayrollProcessed"),
@@ -169,6 +167,8 @@ impl PaymentExecutor {
             ),
             (employee, amount, period),
         );
+        // topics : ("PayrollProcessed", company_id)
+        // data   : (employee, amount, period)
 
         let _ = nullifier;
 
@@ -247,7 +247,7 @@ mod tests {
     use ::token::{Token, TokenClient};
     use payroll_registry::PayrollRegistry;
     use proof_verifier::{ProofVerifier, VerificationKey};
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::Env;
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
@@ -349,6 +349,16 @@ mod tests {
 
         assert_eq!(token_client.balance(&treasury), 9_000);
         assert_eq!(token_client.balance(&employee), 1_000);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let event = events.get(0).unwrap();
+        assert_eq!(event.topics().len(), 2);
+        assert_eq!(
+            event.topics().get(0).unwrap().unwrap(),
+            Symbol::new(&env, "PayrollProcessed").to_val()
+        );
+        assert_eq!(event.topics().get(1).unwrap().unwrap(), company_id.to_val());
     }
 
     #[test]
@@ -498,6 +508,15 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 2_500);
         assert!(client.is_paid(&employee, &42));
         assert_eq!(client.get_total_paid(&company_id), 2_500);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let event = events.get(0).unwrap();
+        assert_eq!(event.topics().len(), 2);
+        assert_eq!(
+            event.topics().get(0).unwrap().unwrap(),
+            Symbol::new(&env, "PayrollProcessed").to_val()
+        );
 
         let replay = client.try_execute_payment(
             &company_id,

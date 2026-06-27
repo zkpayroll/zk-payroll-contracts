@@ -33,6 +33,17 @@ fn test_generate_view_key_stores_and_verify_access_succeeds() {
     // Key material must be 32 bytes and non-zero
     assert_eq!(key_bytes.len(), 32);
 
+    let after = env.events().all().len();
+    assert_eq!(after, 1);
+
+    let event = env.events().all().get(0).unwrap();
+    assert_eq!(event.topics().len(), 2);
+    assert_eq!(
+        event.topics().get(0).unwrap().unwrap(),
+        Symbol::new(&env, "ViewKeyGenerated").to_val()
+    );
+    assert_eq!(event.topics().get(1).unwrap().unwrap(), auditor.to_val());
+
     // verify_access: auditor holds a valid key
     assert!(client.verify_access(&auditor));
 
@@ -120,7 +131,18 @@ fn test_revoke_removes_key() {
 
     // The contract address is used as `granted_by` in generate_view_key.
     let admin = contract_id.clone();
+    let before = env.events().all().len();
     client.revoke_view_key(&admin, &auditor);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.topics().len(), 2);
+    assert_eq!(
+        event.topics().get(0).unwrap().unwrap(),
+        Symbol::new(&env, "ViewKeyRevoked").to_val()
+    );
+    assert_eq!(event.topics().get(1).unwrap().unwrap(), auditor.to_val());
 
     assert!(!client.verify_access(&auditor));
 

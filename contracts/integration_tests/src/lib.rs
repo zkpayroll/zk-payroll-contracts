@@ -200,14 +200,33 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. Exactly two events must have been emitted across the full flow:
-        //      - `CommitmentUpdated` from salary_commitment.store_commitment (onboarding)
-        //      - `payment_executed`  from payroll.batch_process_payroll    (execution)
+        // 4. Events must have been emitted across the full flow:
+        //      - `CompanyRegistered`  from payroll_registry.register_company (setup)
+        //      - `CommitmentUpdated`  from salary_commitment.store_commitment (onboarding)
+        //      - `EmployeeAdded`      from payroll_registry.add_employee    (onboarding)
+        //      - `payment_executed`   from payroll.batch_process_payroll     (execution)
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            2,
-            "Expected 2 events: CommitmentUpdated (onboarding) + payment_executed (execution)"
+            4,
+            "Expected 4 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + payment_executed"
+        );
+
+        assert_eq!(
+            events.get(0).unwrap().topics().get(0).unwrap().unwrap(),
+            Symbol::new(env, "CompanyRegistered").to_val()
+        );
+        assert_eq!(
+            events.get(1).unwrap().topics().get(0).unwrap().unwrap(),
+            Symbol::new(env, "CommitmentUpdated").to_val()
+        );
+        assert_eq!(
+            events.get(2).unwrap().topics().get(0).unwrap().unwrap(),
+            Symbol::new(env, "EmployeeAdded").to_val()
+        );
+        assert_eq!(
+            events.get(3).unwrap().topics().get(0).unwrap().unwrap(),
+            Symbol::new(env, "payment_executed").to_val()
         );
     }
 
