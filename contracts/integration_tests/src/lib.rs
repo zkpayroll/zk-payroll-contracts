@@ -90,11 +90,18 @@ mod e2e {
         env.mock_all_auths();
 
         // ── Register contracts ───────────────────────────────────────────────
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let alice = Address::generate(&env);
+
         let verifier_id = env.register_contract(None, ProofVerifier);
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+        verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
 
         let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+        commitment_client_init.init_commitment_admin(&admin);
 
         let token_id = env.register_contract(None, Token);
 
@@ -102,14 +109,12 @@ mod e2e {
 
         let payroll_id = env.register_contract(None, Payroll);
 
-        // ── Actors ────────────────────────────────────────────────────────────
-        let admin = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let alice = Address::generate(&env);
-
         // ── Initialise payroll executor ───────────────────────────────────────
         let payroll_client = PayrollClient::new(&env, &payroll_id);
         payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+
+        let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+        commitment_client_init.set_payroll_operator(&payroll_id);
 
         // ── Build typed clients ───────────────────────────────────────────────
         let token_client = TokenClient::new(&env, &token_id);
