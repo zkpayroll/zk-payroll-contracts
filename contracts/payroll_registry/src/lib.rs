@@ -18,12 +18,10 @@ pub struct CompanyInfo {
 ///
 /// - `Company(u64)`         → `CompanyInfo`   (Persistent)
 /// - `Employee(u64, Address)` → `BytesN<32>`  (Persistent, Poseidon commitment)
-/// - `CompanySequence`      → `u64`           (Persistent, auto-increment counter)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
     Employee(u64, Address),
-    CompanySequence,
 }
 
 // ---------------------------------------------------------------------------
@@ -31,9 +29,13 @@ pub enum DataKey {
 // ---------------------------------------------------------------------------
 
 pub trait PayrollRegistryTrait {
-    /// Register a new company. Returns the newly assigned company ID.
+    /// Register a new company. Returns the assigned company ID.
     /// Requires authorisation from the provided admin address.
-    fn register_company(env: Env, admin: Address, treasury: Address) -> u64;
+    fn register_company(env: Env, company_id: u64, admin: Address, treasury: Address) -> u64;
+
+    /// Update the admin of a company.
+    /// Requires authorisation from the current admin.
+    fn update_admin(env: Env, company_id: u64, new_admin: Address);
 
     /// Add an employee commitment under a company.
     /// Requires authorisation from the company admin.
@@ -63,24 +65,37 @@ pub struct PayrollRegistry;
 
 #[contractimpl]
 impl PayrollRegistryTrait for PayrollRegistry {
-    fn register_company(env: Env, admin: Address, treasury: Address) -> u64 {
+    fn register_company(env: Env, company_id: u64, admin: Address, treasury: Address) -> u64 {
         admin.require_auth();
 
-        let id: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::CompanySequence)
-            .unwrap_or(0u64);
+        let key = DataKey::Company(company_id);
+        if env.storage().persistent().has(&key) {
+            panic!("Company already registered");
+        }
 
-        let next = id + 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::CompanySequence, &next);
+        let info = CompanyInfo { admin: admin.clone(), treasury: treasury.clone() };
+        env.storage().persistent().set(&key, &info);
 
-        let info = CompanyInfo { admin, treasury };
-        env.storage().persistent().set(&DataKey::Company(id), &info);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "CompanyRegistered"), company_id),
+            (admin, treasury),
+        );
+        
+        company_id
+    }
 
-        id
+    fn update_admin(env: Env, company_id: u64, new_admin: Address) {
+        let key = DataKey::Company(company_id);
+        let mut info: CompanyInfo = env.storage().persistent().get(&key).expect("Company not found");
+        info.admin.require_auth();
+
+        info.admin = new_admin.clone();
+        env.storage().persistent().set(&key, &info);
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "AdminUpdated"), company_id),
+            new_admin,
+        );
     }
 
     fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>) {

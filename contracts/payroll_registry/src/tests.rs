@@ -22,8 +22,8 @@ fn test_register_company_returns_sequential_ids() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let id0 = client.register_company(&admin, &treasury);
-    let id1 = client.register_company(&admin, &treasury);
+    let id0 = client.register_company(&123, &admin, &treasury);
+    let id1 = client.register_company(&123, &admin, &treasury);
 
     assert_eq!(id0, 0u64);
     assert_eq!(id1, 1u64);
@@ -36,28 +36,10 @@ fn test_register_company_requires_admin_auth() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let result = client.try_register_company(&admin, &treasury);
+    let result = client.try_register_company(&123, &admin, &treasury);
     assert!(result.is_err());
 }
 
-#[test]
-fn test_register_company_updates_company_sequence() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    client.register_company(&admin, &treasury);
-    client.register_company(&admin, &treasury);
-
-    let seq: u64 = env.as_contract(&contract_id, || {
-        env.storage()
-            .persistent()
-            .get(&DataKey::CompanySequence)
-            .expect("company sequence should be stored")
-    });
-    assert_eq!(seq, 2u64);
-}
 
 #[test]
 fn test_add_employee_stores_commitment() {
@@ -68,7 +50,7 @@ fn test_add_employee_stores_commitment() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
 
-    let company_id = client.register_company(&admin, &treasury);
+    let company_id = client.register_company(&123, &admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
 
     let stored: BytesN<32> = env.as_contract(&contract_id, || {
@@ -89,7 +71,7 @@ fn test_remove_employee_hard_deletes() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[2u8; 32]);
 
-    let company_id = client.register_company(&admin, &treasury);
+    let company_id = client.register_company(&123, &admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
     client.remove_employee(&company_id, &employee);
 
@@ -108,7 +90,7 @@ fn test_update_commitment_replaces_value() {
     let old_commitment = BytesN::from_array(&env, &[1u8; 32]);
     let new_commitment = BytesN::from_array(&env, &[9u8; 32]);
 
-    let company_id = client.register_company(&admin, &treasury);
+    let company_id = client.register_company(&123, &admin, &treasury);
     client.add_employee(&company_id, &employee, &old_commitment);
     client.update_commitment(&company_id, &employee, &new_commitment);
 
@@ -139,7 +121,7 @@ fn test_register_company_stores_company_info() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let company_id = client.register_company(&admin, &treasury);
+    let company_id = client.register_company(&123, &admin, &treasury);
 
     let stored: CompanyInfo = env.as_contract(&contract_id, || {
         env.storage()
@@ -173,11 +155,11 @@ fn test_authorization_add_employee_fails_for_non_admin() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &contract_id,
             fn_name: "register_company",
-            args: (correct_admin.clone(), treasury.clone()).into_val(&env),
+            args: (123u64, correct_admin.clone(), treasury.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    let company_id = registry.register_company(&correct_admin, &treasury);
+    let company_id = registry.register_company(&123, &correct_admin, &treasury);
 
     // Provide a random rogue address representing the non-registered user
     let attacker = Address::generate(&env);
@@ -209,7 +191,7 @@ fn test_get_company_returns_company_info() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let company_id = client.register_company(&admin, &treasury);
+    let company_id = client.register_company(&123, &admin, &treasury);
     let company = client.get_company(&company_id);
 
     assert_eq!(company.admin, admin);
@@ -225,7 +207,7 @@ fn test_get_commitment_returns_employee_commitment() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[7u8; 32]);
 
-    let company_id = client.register_company(&admin, &treasury);
+    let company_id = client.register_company(&123, &admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
 
     let got = client.get_commitment(&company_id, &employee);

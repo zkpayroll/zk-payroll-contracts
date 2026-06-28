@@ -465,7 +465,7 @@ mod tests {
         let employee = Address::generate(&env);
         let commitment = BytesN::from_array(&env, &[9u8; 32]);
 
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -510,7 +510,7 @@ mod tests {
         let employee = Address::generate(&env);
         let commitment = BytesN::from_array(&env, &[7u8; 32]);
 
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -604,7 +604,7 @@ mod tests {
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
 
         let period = client.create_period(&company_id);
         let result = period;
@@ -627,7 +627,7 @@ mod tests {
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
 
         let _ = client.create_period(&company_id);
         let result = client.close_period(&company_id, &1);
@@ -654,7 +654,7 @@ mod tests {
         let employee = Address::generate(&env);
         let commitment = BytesN::from_array(&env, &[8u8; 32]);
 
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -697,7 +697,7 @@ mod tests {
         let employee = Address::generate(&env);
         let commitment = BytesN::from_array(&env, &[8u8; 32]);
 
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -739,7 +739,7 @@ mod tests {
         let employee = Address::generate(&env);
         let commitment = BytesN::from_array(&env, &[8u8; 32]);
 
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 

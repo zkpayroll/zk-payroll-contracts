@@ -58,7 +58,7 @@ fn setup_system<'a>(
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
 
-    let company_id = registry.register_company(&admin, &treasury);
+    let company_id = registry.register_company(&123, &admin, &treasury);
 
     executor.create_period(&company_id);
 
@@ -131,12 +131,12 @@ fn test_authorization_add_employee_fails_for_non_admin() {
         invoke: &MockAuthInvoke {
             contract: &registry_id,
             fn_name: "register_company",
-            args: (correct_admin.clone(), treasury.clone()).into_val(&env),
+            args: (123u64, correct_admin.clone(), treasury.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let company_id = registry.register_company(&correct_admin, &treasury);
+    let company_id = registry.register_company(&123, &correct_admin, &treasury);
 
     let attacker = Address::generate(&env);
     let employee = Address::generate(&env);

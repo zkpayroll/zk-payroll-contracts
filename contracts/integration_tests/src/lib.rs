@@ -122,7 +122,7 @@ mod e2e {
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
 
         // Register a company up-front; first ID is always 0.
-        let company_id = registry_client.register_company(&admin, &treasury);
+        let company_id = registry_client.register_company(&123, &admin, &treasury);
         TestContext {
             env,
             admin,
@@ -344,7 +344,7 @@ mod e2e {
         let salary_commitment = BytesN::from_array(env, &proof_data.salary_commitment);
 
         ctx.registry_client
-            .register_company(&ctx.admin, &ctx.treasury);
+            .register_company(&123, &ctx.admin, &ctx.treasury);
         ctx.commitment_client
             .store_commitment(&ctx.alice, &salary_commitment);
         ctx.registry_client
