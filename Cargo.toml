@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["contracts/*", "cli"]
+exclude = ["fuzz"]
+
 
 [workspace.package]
 version = "0.1.0"
