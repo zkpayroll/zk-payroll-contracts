@@ -59,6 +59,10 @@ pub enum DataKey {
     Admin,
     /// A delegated payroll operator that can record nullifiers.
     PayrollOperator,
+    /// External reference ID mapping for HR system integration (employee -> ref_id).
+    EmployeeReferenceId(Address),
+    /// Reverse mapping to detect collisions (ref_id -> employee).
+    ReferenceIdIndex(soroban_sdk::String),
 }
 
 #[contract]
@@ -253,6 +257,71 @@ impl SalaryCommitmentContract {
     pub fn has_commitment(env: Env, employee: Address) -> bool {
         let key = DataKey::Commitment(employee);
         env.storage().persistent().has(&key)
+    }
+
+    /// Set an external reference ID (e.g., HR system employee ID) for an employee.
+    /// Only the HR admin may call. Reference IDs must be unique (no collisions).
+    /// Non-sensitive IDs only (e.g., "EMP12345", not salary or bank account).
+    pub fn set_employee_reference_id(env: Env, employee: Address, reference_id: soroban_sdk::String) {
+        Self::require_admin(&env);
+
+        // Validate reference ID is not empty and reasonable length (< 256 chars)
+        if reference_id.len() == 0 || reference_id.len() > 256 {
+            panic!("Reference ID must be 1-256 characters");
+        }
+
+        // Check if this reference ID is already assigned to a different employee
+        let index_key = DataKey::ReferenceIdIndex(reference_id.clone());
+        if let Some(existing_employee) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&index_key)
+        {
+            if existing_employee != employee {
+                panic!("Reference ID already assigned to another employee");
+            }
+        }
+
+        // Check if this employee already has a different reference ID
+        let employee_key = DataKey::EmployeeReferenceId(employee.clone());
+        if let Some(old_ref_id) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, soroban_sdk::String>(&employee_key)
+        {
+            if old_ref_id != reference_id {
+                // Remove old reverse mapping
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::ReferenceIdIndex(old_ref_id));
+            }
+        }
+
+        // Store both forward and reverse mappings
+        env.storage()
+            .persistent()
+            .set(&employee_key, &reference_id);
+        env.storage()
+            .persistent()
+            .set(&index_key, &employee);
+
+        env.events().publish(
+            (Symbol::new(&env, "ReferenceIdSet"), employee.clone()),
+            (reference_id,),
+        );
+    }
+
+    /// Get the external reference ID for an employee (if set).
+    pub fn get_employee_reference_id(env: Env, employee: Address) -> Option<soroban_sdk::String> {
+        let key = DataKey::EmployeeReferenceId(employee);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Get the employee address associated with a reference ID (for lookups).
+    /// Returns None if no employee is associated with this ID.
+    pub fn get_employee_by_reference_id(env: Env, reference_id: soroban_sdk::String) -> Option<Address> {
+        let key = DataKey::ReferenceIdIndex(reference_id);
+        env.storage().persistent().get(&key)
     }
 
     /// Record a payment nullifier (prevents double payment).
