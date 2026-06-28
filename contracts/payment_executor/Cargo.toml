@@ -18,6 +18,7 @@ pause_manager = { path = "../pause_manager", default-features = false }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 payroll_registry = { path = "../payroll_registry" }
+salary_commitment = { path = "../salary_commitment" }
 token = { path = "../token" }
 pause_manager = { path = "../pause_manager", features = ["contract"] }
 
