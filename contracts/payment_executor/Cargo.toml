@@ -13,11 +13,13 @@ soroban-sdk = { workspace = true }
 soroban-token-sdk = { workspace = true }
 payroll_registry = { path = "../payroll_registry" }
 proof_verifier = { path = "../proof_verifier" }
+pause_manager = { path = "../pause_manager", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 payroll_registry = { path = "../payroll_registry" }
 token = { path = "../token" }
+pause_manager = { path = "../pause_manager", features = ["contract"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

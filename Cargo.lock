@@ -1759,9 +1759,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "pause_manager"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "payment_executor"
 version = "0.1.0"
 dependencies = [
+ "pause_manager",
  "payroll_registry",
  "proof_verifier",
  "soroban-sdk",
@@ -1773,6 +1781,7 @@ dependencies = [
 name = "payroll"
 version = "0.1.0"
 dependencies = [
+ "pause_manager",
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",

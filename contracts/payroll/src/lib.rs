@@ -4,6 +4,7 @@ use soroban_sdk::{
     Env, Symbol, Vec,
 };
 
+use pause_manager::PauseManagerClient;
 use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
 
@@ -25,6 +26,7 @@ pub struct ContractAddresses {
 #[contracttype]
 pub enum DataKey {
     Addresses,
+    PauseManager,
 }
 
 #[contractimpl]
@@ -50,6 +52,18 @@ impl Payroll {
             treasury,
         };
         e.storage().persistent().set(&key, &addrs);
+    }
+
+    pub fn set_pause_manager(e: Env, pause_manager: Address) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        addrs.admin.require_auth();
+        e.storage()
+            .persistent()
+            .set(&DataKey::PauseManager, &pause_manager);
     }
 
     pub fn deposit(_e: Env, _from: Address, _amount: i128) {
@@ -109,6 +123,19 @@ impl Payroll {
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
+
+        // Check if a pause manager has been configured
+        if e.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = e
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(&e, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
+        }
 
         // Only the registered admin may trigger payroll execution
         addrs.admin.require_auth();
@@ -176,10 +203,11 @@ impl Payroll {
 mod tests {
     use super::*;
     use ::token::{Token, TokenClient};
+    use pause_manager::{PauseManager, PauseManagerClient};
     use proof_verifier::{ProofVerifier, VerificationKey};
     use salary_commitment::SalaryCommitmentContract;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Env;
+    use soroban_sdk::{Env, IntoVal};
 
     fn mock_proof(env: &Env) -> BytesN<256> {
         BytesN::from_array(env, &[0u8; 256])
@@ -256,5 +284,177 @@ mod tests {
 
         // Execute batch - should succeed with MAX_BATCH == 50
         payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &expected_total_spend);
+    }
+
+    fn setup_simple_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address) {
+        env.mock_all_auths();
+
+        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_client = ProofVerifierClient::new(env, &verifier_id);
+        let verifier_admin = Address::generate(env);
+        verifier_client.init_verifier_admin(&verifier_admin);
+        verifier_client.initialize_verifier(&mock_vk(env));
+
+        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
+        let commitment_admin = Address::generate(env);
+        commitment_client.init_commitment_admin(&commitment_admin);
+
+        let token_id = env.register_contract(None, Token);
+        let token_client = TokenClient::new(env, &token_id);
+
+        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_client = PayrollClient::new(env, &payroll_id);
+
+        let treasury = Address::generate(env);
+        let admin = Address::generate(env);
+        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+
+        commitment_client.set_payroll_operator(&payroll_id);
+
+        token_client.mint(&treasury, &10_000i128);
+
+        let employee = Address::generate(env);
+        commitment_client.store_commitment(&employee, &BytesN::from_array(env, &[0u8; 32]));
+
+        (payroll_client, admin, treasury, employee)
+    }
+
+    fn single_payment_batch(
+        env: &Env,
+        employee: &Address,
+        amount: i128,
+    ) -> (Vec<BytesN<256>>, Vec<i128>, Vec<Address>) {
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        let mut amounts = Vec::new(env);
+        amounts.push_back(amount);
+        let mut employees = Vec::new(env);
+        employees.push_back(employee.clone());
+        (proofs, amounts, employees)
+    }
+
+    #[test]
+    fn test_set_pause_manager_stores_address() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _employee) = setup_simple_payroll(&env);
+
+        let pm_id = env.register_contract(None, PauseManager);
+        let pm_client = PauseManagerClient::new(&env, &pm_id);
+        let operator = Address::generate(&env);
+        pm_client.initialize(&operator);
+
+        payroll_client.set_pause_manager(&pm_id);
+
+        // Verify it's stored by checking that a paused state blocks execution
+        pm_client.pause();
+        let (proofs, amounts, employees) = single_payment_batch(&env, &_employee, 1000);
+        let result = payroll_client.try_batch_process_payroll(&proofs, &amounts, &employees, &1000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_paused_payroll_rejects_batch_processing() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, employee) = setup_simple_payroll(&env);
+
+        let pm_id = env.register_contract(None, PauseManager);
+        let pm_client = PauseManagerClient::new(&env, &pm_id);
+        let operator = Address::generate(&env);
+        pm_client.initialize(&operator);
+
+        payroll_client.set_pause_manager(&pm_id);
+        pm_client.pause();
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let result = payroll_client.try_batch_process_payroll(&proofs, &amounts, &employees, &1000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unpaused_payroll_resumes_processing() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, employee) = setup_simple_payroll(&env);
+
+        let pm_id = env.register_contract(None, PauseManager);
+        let pm_client = PauseManagerClient::new(&env, &pm_id);
+        let operator = Address::generate(&env);
+        pm_client.initialize(&operator);
+
+        payroll_client.set_pause_manager(&pm_id);
+        pm_client.pause();
+
+        // Verify paused
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let result = payroll_client.try_batch_process_payroll(&proofs, &amounts, &employees, &1000);
+        assert!(result.is_err());
+
+        // Unpause
+        pm_client.unpause();
+
+        let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 1000);
+        payroll_client.batch_process_payroll(&proofs2, &amounts2, &employees2, &1000);
+    }
+
+    #[test]
+    fn test_payroll_works_without_pause_manager() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, employee) = setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_set_pause_manager_rejects_unauthorized() {
+        let env = Env::default();
+        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+        // Initialize with a specific admin
+        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+        let verifier_admin = Address::generate(&env);
+        verifier_client.init_verifier_admin(&verifier_admin);
+        verifier_client.initialize_verifier(&mock_vk(&env));
+
+        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let token_id = env.register_contract(None, Token);
+        let treasury = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        // Only mock auth for admin during initialize
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &payroll_id,
+                fn_name: "initialize",
+                args: (
+                    admin.clone(),
+                    token_id.clone(),
+                    verifier_id.clone(),
+                    commitment_id.clone(),
+                    treasury.clone(),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+
+        // Attacker tries to set pause manager
+        let pm_id = env.register_contract(None, PauseManager);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &payroll_id,
+                fn_name: "set_pause_manager",
+                args: (pm_id.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        payroll_client.set_pause_manager(&pm_id);
     }
 }
