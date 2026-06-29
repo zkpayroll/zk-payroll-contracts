@@ -14,15 +14,29 @@ pub struct CompanyInfo {
     pub treasury: Address,
 }
 
+/// Privacy-preserving employee metadata.
+///
+/// The registry stores only opaque 32-byte hashes for mutable business metadata.
+/// Employee identity (`Address`) and payroll eligibility (`commitment`) remain in
+/// their dedicated registry keys and cannot be changed through metadata updates.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmployeeMetadata {
+    pub profile_hash: BytesN<32>,
+    pub role_hash: BytesN<32>,
+}
+
 /// Storage key space for the payroll registry.
 ///
 /// - `Company(u64)`         → `CompanyInfo`   (Persistent)
 /// - `Employee(u64, Address)` → `BytesN<32>`  (Persistent, Poseidon commitment)
+/// - `EmployeeMetadata(u64, Address)` → `EmployeeMetadata` (Persistent, mutable opaque hashes)
 /// - `CompanySequence`      → `u64`           (Persistent, auto-increment counter)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
     Employee(u64, Address),
+    EmployeeMetadata(u64, Address),
     CompanySequence,
 }
 
@@ -47,6 +61,27 @@ pub trait PayrollRegistryTrait {
     /// Requires authorisation from the company admin.
     fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>);
 
+    /// Update the mutable profile metadata hash for an existing employee.
+    /// Requires authorisation from the company admin.
+    fn update_employee_profile_hash(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        profile_hash: BytesN<32>,
+    );
+
+    /// Update the mutable role metadata hash for an existing employee.
+    /// Requires authorisation from the company admin.
+    fn update_employee_role_hash(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        role_hash: BytesN<32>,
+    );
+
+    /// Read mutable employee metadata hashes.
+    fn get_employee_metadata(env: Env, company_id: u64, employee: Address) -> EmployeeMetadata;
+
     /// Read company metadata by company ID.
     fn get_company(env: Env, company_id: u64) -> CompanyInfo;
 
@@ -60,6 +95,35 @@ pub trait PayrollRegistryTrait {
 
 #[contract]
 pub struct PayrollRegistry;
+
+impl PayrollRegistry {
+    fn empty_metadata(env: &Env) -> EmployeeMetadata {
+        EmployeeMetadata {
+            profile_hash: BytesN::from_array(env, &[0u8; 32]),
+            role_hash: BytesN::from_array(env, &[0u8; 32]),
+        }
+    }
+
+    fn require_company_admin(env: &Env, company_id: u64) {
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        info.admin.require_auth();
+    }
+
+    fn require_employee_exists(env: &Env, company_id: u64, employee: &Address) {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+    }
+}
 
 #[contractimpl]
 impl PayrollRegistryTrait for PayrollRegistry {
@@ -92,9 +156,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Employee(company_id, employee), &commitment);
+        env.storage().persistent().set(
+            &DataKey::Employee(company_id, employee.clone()),
+            &commitment,
+        );
+        env.storage().persistent().set(
+            &DataKey::EmployeeMetadata(company_id, employee),
+            &Self::empty_metadata(&env),
+        );
     }
 
     fn remove_employee(env: Env, company_id: u64, employee: Address) {
@@ -108,7 +177,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         env.storage()
             .persistent()
-            .remove(&DataKey::Employee(company_id, employee));
+            .remove(&DataKey::Employee(company_id, employee.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::EmployeeMetadata(company_id, employee));
     }
 
     fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>) {
@@ -126,6 +198,53 @@ impl PayrollRegistryTrait for PayrollRegistry {
         }
 
         env.storage().persistent().set(&key, &new_commitment);
+    }
+
+    fn update_employee_profile_hash(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        profile_hash: BytesN<32>,
+    ) {
+        Self::require_company_admin(&env, company_id);
+        Self::require_employee_exists(&env, company_id, &employee);
+
+        let key = DataKey::EmployeeMetadata(company_id, employee);
+        let mut metadata: EmployeeMetadata = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Self::empty_metadata(&env));
+        metadata.profile_hash = profile_hash;
+        env.storage().persistent().set(&key, &metadata);
+    }
+
+    fn update_employee_role_hash(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        role_hash: BytesN<32>,
+    ) {
+        Self::require_company_admin(&env, company_id);
+        Self::require_employee_exists(&env, company_id, &employee);
+
+        let key = DataKey::EmployeeMetadata(company_id, employee);
+        let mut metadata: EmployeeMetadata = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Self::empty_metadata(&env));
+        metadata.role_hash = role_hash;
+        env.storage().persistent().set(&key, &metadata);
+    }
+
+    fn get_employee_metadata(env: Env, company_id: u64, employee: Address) -> EmployeeMetadata {
+        Self::require_employee_exists(&env, company_id, &employee);
+
+        env.storage()
+            .persistent()
+            .get(&DataKey::EmployeeMetadata(company_id, employee))
+            .unwrap_or_else(|| Self::empty_metadata(&env))
     }
 
     fn get_company(env: Env, company_id: u64) -> CompanyInfo {
