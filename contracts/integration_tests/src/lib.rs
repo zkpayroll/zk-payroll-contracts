@@ -1,5 +1,9 @@
 #![no_std]
 
+// Upgrade simulation tests — Issue #108.
+#[cfg(test)]
+mod upgrade_simulation;
+
 // Proof generation helper — only compiled in test mode.
 // Provides `try_generate_proof` which spawns `node generate_proof.js` and
 // parses the output into Soroban-compatible byte arrays.
