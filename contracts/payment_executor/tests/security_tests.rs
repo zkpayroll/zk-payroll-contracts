@@ -44,7 +44,8 @@ fn setup_system<'a>(
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
-    let commitment_client = salary_commitment::SalaryCommitmentContractClient::new(env, &commitment_id);
+    let commitment_client =
+        salary_commitment::SalaryCommitmentContractClient::new(env, &commitment_id);
     let verifier = ProofVerifierClient::new(env, &verifier_id);
     let token = TokenClient::new(env, &token_id);
 
@@ -68,7 +69,15 @@ fn setup_system<'a>(
 
     token.mint(&treasury, &100_000);
 
-    (executor, registry, commitment_client, token, company_id, admin, treasury)
+    (
+        executor,
+        registry,
+        commitment_client,
+        token,
+        company_id,
+        admin,
+        treasury,
+    )
 }
 
 /// Acceptance Criteria: Proof Replay Protection (Double Spend)
@@ -78,7 +87,8 @@ fn setup_system<'a>(
 #[test]
 fn test_proof_replay_protection() {
     let env = Env::default();
-    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) = setup_system(&env);
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[9u8; 32]);
@@ -166,7 +176,8 @@ fn test_authorization_add_employee_fails_for_non_admin() {
 #[test]
 fn test_reentrancy_state_updates_before_external_calls() {
     let env = Env::default();
-    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) = setup_system(&env);
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[9u8; 32]);
