@@ -262,11 +262,15 @@ impl SalaryCommitmentContract {
     /// Set an external reference ID (e.g., HR system employee ID) for an employee.
     /// Only the HR admin may call. Reference IDs must be unique (no collisions).
     /// Non-sensitive IDs only (e.g., "EMP12345", not salary or bank account).
-    pub fn set_employee_reference_id(env: Env, employee: Address, reference_id: soroban_sdk::String) {
+    pub fn set_employee_reference_id(
+        env: Env,
+        employee: Address,
+        reference_id: soroban_sdk::String,
+    ) {
         Self::require_admin(&env);
 
         // Validate reference ID is not empty and reasonable length (< 256 chars)
-        if reference_id.len() == 0 || reference_id.len() > 256 {
+        if reference_id.is_empty() || reference_id.len() > 256 {
             panic!("Reference ID must be 1-256 characters");
         }
 
@@ -298,12 +302,8 @@ impl SalaryCommitmentContract {
         }
 
         // Store both forward and reverse mappings
-        env.storage()
-            .persistent()
-            .set(&employee_key, &reference_id);
-        env.storage()
-            .persistent()
-            .set(&index_key, &employee);
+        env.storage().persistent().set(&employee_key, &reference_id);
+        env.storage().persistent().set(&index_key, &employee);
 
         env.events().publish(
             (Symbol::new(&env, "ReferenceIdSet"), employee.clone()),
@@ -319,7 +319,10 @@ impl SalaryCommitmentContract {
 
     /// Get the employee address associated with a reference ID (for lookups).
     /// Returns None if no employee is associated with this ID.
-    pub fn get_employee_by_reference_id(env: Env, reference_id: soroban_sdk::String) -> Option<Address> {
+    pub fn get_employee_by_reference_id(
+        env: Env,
+        reference_id: soroban_sdk::String,
+    ) -> Option<Address> {
         let key = DataKey::ReferenceIdIndex(reference_id);
         env.storage().persistent().get(&key)
     }
