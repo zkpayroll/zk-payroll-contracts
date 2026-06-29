@@ -231,3 +231,79 @@ fn test_get_commitment_returns_employee_commitment() {
     let got = client.get_commitment(&company_id, &employee);
     assert_eq!(got, commitment);
 }
+
+#[test]
+fn test_add_employee_initializes_empty_metadata() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+    let empty = BytesN::from_array(&env, &[0u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    let metadata = client.get_employee_metadata(&company_id, &employee);
+    assert_eq!(metadata.profile_hash, empty);
+    assert_eq!(metadata.role_hash, empty);
+}
+
+#[test]
+fn test_update_employee_profile_hash_preserves_role_and_commitment() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[4u8; 32]);
+    let profile_hash = BytesN::from_array(&env, &[5u8; 32]);
+    let empty = BytesN::from_array(&env, &[0u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    client.update_employee_profile_hash(&company_id, &employee, &profile_hash);
+
+    let metadata = client.get_employee_metadata(&company_id, &employee);
+    assert_eq!(metadata.profile_hash, profile_hash);
+    assert_eq!(metadata.role_hash, empty);
+    assert_eq!(client.get_commitment(&company_id, &employee), commitment);
+}
+
+#[test]
+fn test_update_employee_role_hash_preserves_profile_and_commitment() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[6u8; 32]);
+    let profile_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let role_hash = BytesN::from_array(&env, &[8u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    client.update_employee_profile_hash(&company_id, &employee, &profile_hash);
+    client.update_employee_role_hash(&company_id, &employee, &role_hash);
+
+    let metadata = client.get_employee_metadata(&company_id, &employee);
+    assert_eq!(metadata.profile_hash, profile_hash);
+    assert_eq!(metadata.role_hash, role_hash);
+    assert_eq!(client.get_commitment(&company_id, &employee), commitment);
+}
+
+#[test]
+fn test_update_employee_metadata_rejects_missing_employee() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let profile_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let result = client.try_update_employee_profile_hash(&company_id, &employee, &profile_hash);
+
+    assert!(result.is_err());
+}
