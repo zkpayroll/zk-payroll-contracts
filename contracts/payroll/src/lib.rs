@@ -496,7 +496,10 @@ impl Payroll {
         e.storage().persistent().set(&run_key, &run);
 
         e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "reconciliation_updated")),
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "reconciliation_updated"),
+            ),
             (run_id, status),
         );
     }
@@ -1153,7 +1156,10 @@ mod tests {
         );
 
         let run = payroll_client.get_payroll_run(&run_id);
-        assert_eq!(run.reconciliation_status, ReconciliationStatus::Unreconciled);
+        assert_eq!(
+            run.reconciliation_status,
+            ReconciliationStatus::Unreconciled
+        );
     }
 
     #[test]
@@ -1173,7 +1179,11 @@ mod tests {
         );
 
         // Update to Reconciled
-        payroll_client.update_reconciliation_status(&admin, &run_id, &ReconciliationStatus::Reconciled);
+        payroll_client.update_reconciliation_status(
+            &admin,
+            &run_id,
+            &ReconciliationStatus::Reconciled,
+        );
         let run = payroll_client.get_payroll_run(&run_id);
         assert_eq!(run.reconciliation_status, ReconciliationStatus::Reconciled);
 
@@ -1201,7 +1211,11 @@ mod tests {
         );
 
         let non_admin = Address::generate(&env);
-        payroll_client.update_reconciliation_status(&non_admin, &run_id, &ReconciliationStatus::Reconciled);
+        payroll_client.update_reconciliation_status(
+            &non_admin,
+            &run_id,
+            &ReconciliationStatus::Reconciled,
+        );
     }
 
     #[test]
@@ -1211,6 +1225,10 @@ mod tests {
         let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
             setup_simple_payroll(&env);
 
-        payroll_client.update_reconciliation_status(&admin, &999u64, &ReconciliationStatus::Reconciled);
+        payroll_client.update_reconciliation_status(
+            &admin,
+            &999u64,
+            &ReconciliationStatus::Reconciled,
+        );
     }
 }
