@@ -75,6 +75,13 @@ mod e2e {
         commitment_client.compute_commitment(&5000u64, &blinding_factor)
     }
 
+    /// Generates a unique 32-byte nonce from a counter seed for tests.
+    fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
+        let mut arr = [0u8; 32];
+        arr[0] = seed;
+        BytesN::from_array(env, &arr)
+    }
+
     // ── Helper: register & initialise all five contracts ─────────────────────
 
     struct TestContext<'a> {
@@ -96,6 +103,7 @@ mod e2e {
         // ── Register contracts ───────────────────────────────────────────────
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
+        let treasury_owner = Address::generate(&env);
         let alice = Address::generate(&env);
 
         let verifier_id = env.register_contract(None, ProofVerifier);
@@ -115,7 +123,14 @@ mod e2e {
 
         // ── Initialise payroll executor ───────────────────────────────────────
         let payroll_client = PayrollClient::new(&env, &payroll_id);
-        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+        payroll_client.initialize(
+            &admin,
+            &token_id,
+            &verifier_id,
+            &commitment_id,
+            &treasury,
+            &treasury_owner,
+        );
 
         let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client_init.set_payroll_operator(&payroll_id);
@@ -183,8 +198,14 @@ mod e2e {
 
         // Execute batch payroll: verifier checks proof, commitment is retrieved,
         // nullifier is recorded, and the token transfer is executed.
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &payment_amount);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &payment_amount,
+            &test_nonce(env, 1),
+            &None,
+        );
 
         // ── ASSERTIONS ────────────────────────────────────────────────────────
 
@@ -240,8 +261,14 @@ mod e2e {
         let mut employees = Vec::new(env);
         employees.push_back(ctx.alice.clone());
 
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &5_000i128,
+            &test_nonce(env, 2),
+            &None,
+        );
     }
 
     /// Running payroll twice for the same employee reuses the nullifier and must panic.
@@ -272,13 +299,25 @@ mod e2e {
 
         // First payroll run succeeds.
         let (proofs, amounts, employees) = make_batch(env, &ctx.alice);
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &5_000i128,
+            &test_nonce(env, 3),
+            &None,
+        );
 
         // Second payroll run with the same nullifier (batch index 0) must panic.
         let (proofs2, amounts2, employees2) = make_batch(env, &ctx.alice);
-        ctx.payroll_client
-            .batch_process_payroll(&proofs2, &amounts2, &employees2, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs2,
+            &amounts2,
+            &employees2,
+            &5_000i128,
+            &test_nonce(env, 4),
+            &None,
+        );
     }
 
     /// Array length mismatches must be rejected immediately.
@@ -300,8 +339,14 @@ mod e2e {
         employees.push_back(ctx.alice.clone());
         employees.push_back(ctx.alice.clone());
 
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &5_000i128,
+            &test_nonce(env, 5),
+            &None,
+        );
     }
 
     // ── Dynamic proof generation test ─────────────────────────────────────────
@@ -365,8 +410,14 @@ mod e2e {
         amounts.push_back(payment_amount);
         employees.push_back(ctx.alice.clone());
 
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &payment_amount);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &payment_amount,
+            &test_nonce(env, 6),
+            &None,
+        );
 
         assert_eq!(
             ctx.token_client.balance(&ctx.treasury),
