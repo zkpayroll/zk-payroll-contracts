@@ -92,9 +92,12 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Employee(company_id, employee), &commitment);
+        let key = DataKey::Employee(company_id, employee.clone());
+        if env.storage().persistent().has(&key) {
+            panic!("Employee already exists");
+        }
+
+        env.storage().persistent().set(&key, &commitment);
     }
 
     fn remove_employee(env: Env, company_id: u64, employee: Address) {

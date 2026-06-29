@@ -231,3 +231,41 @@ fn test_get_commitment_returns_employee_commitment() {
     let got = client.get_commitment(&company_id, &employee);
     assert_eq!(got, commitment);
 }
+
+#[test]
+#[should_panic(expected = "Employee already exists")]
+fn test_add_employee_rejects_duplicate() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    // Should panic
+    client.add_employee(&company_id, &employee, &commitment);
+}
+
+#[test]
+fn test_add_employee_allows_re_onboarding_after_removal() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment1 = BytesN::from_array(&env, &[1u8; 32]);
+    let commitment2 = BytesN::from_array(&env, &[2u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    
+    client.add_employee(&company_id, &employee, &commitment1);
+    client.remove_employee(&company_id, &employee);
+    
+    // Should succeed because employee was removed
+    client.add_employee(&company_id, &employee, &commitment2);
+
+    let got = client.get_commitment(&company_id, &employee);
+    assert_eq!(got, commitment2);
+}
