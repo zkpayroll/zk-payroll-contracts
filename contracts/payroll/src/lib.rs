@@ -24,6 +24,15 @@ pub struct ContractAddresses {
     pub treasury_owner: Address,
 }
 
+/// Reconciliation status for completed payroll runs.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconciliationStatus {
+    Unreconciled,
+    Reconciled,
+    Failed,
+}
+
 /// A completed payroll run record.
 ///
 /// `draft_hash` is the SHA-256 / Poseidon hash of the off-chain payroll
@@ -45,6 +54,7 @@ pub struct PayrollRun {
     pub draft_hash: BytesN<32>,
     /// Caller-supplied run nonce (issue #103). Unique per contract lifetime.
     pub nonce: BytesN<32>,
+    pub reconciliation_status: ReconciliationStatus,
 }
 
 /// Pending emergency withdrawal request (issue #104).
@@ -441,6 +451,7 @@ impl Payroll {
             employee_count: count,
             draft_hash: resolved_draft_hash,
             nonce: nonce.clone(),
+            reconciliation_status: ReconciliationStatus::Unreconciled,
         };
         e.storage()
             .persistent()
@@ -452,6 +463,42 @@ impl Payroll {
         );
 
         run_id
+    }
+
+    /// Update the reconciliation status of a completed payroll run.
+    ///
+    /// Only the `admin` may update the reconciliation status.
+    /// Emits a `reconciliation_updated` event.
+    pub fn update_reconciliation_status(
+        e: Env,
+        admin: Address,
+        run_id: u64,
+        status: ReconciliationStatus,
+    ) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let run_key = DataKey::PayrollRun(run_id);
+        let mut run: PayrollRun = e
+            .storage()
+            .persistent()
+            .get(&run_key)
+            .expect("Run not found");
+
+        run.reconciliation_status = status;
+        e.storage().persistent().set(&run_key, &run);
+
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "reconciliation_updated")),
+            (run_id, status),
+        );
     }
 }
 
@@ -1085,5 +1132,85 @@ mod tests {
         let recipient = Address::generate(&env);
         payroll_client.request_emergency_withdrawal(&treasury_owner, &100i128, &recipient);
         payroll_client.request_emergency_withdrawal(&treasury_owner, &200i128, &recipient);
+    }
+
+    // ── Issue #134: reconciliation status tracking ─────────────────────────────
+
+    #[test]
+    fn test_new_run_is_unreconciled() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 30),
+            &None,
+        );
+
+        let run = payroll_client.get_payroll_run(&run_id);
+        assert_eq!(run.reconciliation_status, ReconciliationStatus::Unreconciled);
+    }
+
+    #[test]
+    fn test_admin_can_update_reconciliation_status() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 31),
+            &None,
+        );
+
+        // Update to Reconciled
+        payroll_client.update_reconciliation_status(&admin, &run_id, &ReconciliationStatus::Reconciled);
+        let run = payroll_client.get_payroll_run(&run_id);
+        assert_eq!(run.reconciliation_status, ReconciliationStatus::Reconciled);
+
+        // Update to Failed
+        payroll_client.update_reconciliation_status(&admin, &run_id, &ReconciliationStatus::Failed);
+        let run = payroll_client.get_payroll_run(&run_id);
+        assert_eq!(run.reconciliation_status, ReconciliationStatus::Failed);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_non_admin_cannot_update_reconciliation_status() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 32),
+            &None,
+        );
+
+        let non_admin = Address::generate(&env);
+        payroll_client.update_reconciliation_status(&non_admin, &run_id, &ReconciliationStatus::Reconciled);
+    }
+
+    #[test]
+    #[should_panic(expected = "Run not found")]
+    fn test_update_status_for_invalid_run_panics() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        payroll_client.update_reconciliation_status(&admin, &999u64, &ReconciliationStatus::Reconciled);
     }
 }
