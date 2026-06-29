@@ -59,11 +59,13 @@ fn setup_system<'a>(
     executor.initialize(&addresses);
     verifier.init_verifier_admin(&Address::generate(env));
     verifier.initialize_verifier(&mock_vk(env));
+    commitment_client.init_commitment_admin(&Address::generate(env));
 
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
 
     let company_id = registry.register_company(&admin, &treasury);
+    registry.activate_company(&company_id);
 
     executor.create_period(&company_id);
 

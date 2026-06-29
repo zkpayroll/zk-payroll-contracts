@@ -12,6 +12,23 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
 pub struct CompanyInfo {
     pub admin: Address,
     pub treasury: Address,
+    pub status: CompanyStatus,
+}
+
+/// Company lifecycle state.
+///
+/// Transitions are explicit:
+/// - `Onboarding` -> `Active` or `Archived`
+/// - `Active` -> `Paused` or `Archived`
+/// - `Paused` -> `Active` or `Archived`
+/// - `Archived` is terminal
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompanyStatus {
+    Onboarding,
+    Active,
+    Paused,
+    Archived,
 }
 
 /// Privacy-preserving employee metadata.
@@ -82,8 +99,27 @@ pub trait PayrollRegistryTrait {
     /// Read mutable employee metadata hashes.
     fn get_employee_metadata(env: Env, company_id: u64, employee: Address) -> EmployeeMetadata;
 
+    /// Move a company from onboarding to active.
+    /// Requires authorisation from the company admin.
+    fn activate_company(env: Env, company_id: u64);
+
+    /// Temporarily pause an active company.
+    /// Requires authorisation from the company admin.
+    fn pause_company(env: Env, company_id: u64);
+
+    /// Resume a paused company by returning it to active.
+    /// Requires authorisation from the company admin.
+    fn resume_company(env: Env, company_id: u64);
+
+    /// Archive a company. Archived companies are terminal and reject mutations.
+    /// Requires authorisation from the company admin.
+    fn archive_company(env: Env, company_id: u64);
+
     /// Read company metadata by company ID.
     fn get_company(env: Env, company_id: u64) -> CompanyInfo;
+
+    /// Read company lifecycle status by company ID.
+    fn get_company_status(env: Env, company_id: u64) -> CompanyStatus;
 
     /// Read an employee's active commitment under a company.
     fn get_commitment(env: Env, company_id: u64, employee: Address) -> BytesN<32>;
@@ -114,6 +150,48 @@ impl PayrollRegistry {
         info.admin.require_auth();
     }
 
+    fn require_company_allows_employee_changes(env: &Env, company_id: u64) {
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        match info.status {
+            CompanyStatus::Onboarding | CompanyStatus::Active => {}
+            CompanyStatus::Paused => panic!("Company is paused"),
+            CompanyStatus::Archived => panic!("Company is archived"),
+        }
+    }
+
+    fn set_company_status(env: &Env, company_id: u64, next_status: CompanyStatus) {
+        let key = DataKey::Company(company_id);
+        let mut info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Company not found");
+
+        info.admin.require_auth();
+
+        let allowed = matches!(
+            (info.status, next_status),
+            (CompanyStatus::Onboarding, CompanyStatus::Active)
+                | (CompanyStatus::Onboarding, CompanyStatus::Archived)
+                | (CompanyStatus::Active, CompanyStatus::Paused)
+                | (CompanyStatus::Active, CompanyStatus::Archived)
+                | (CompanyStatus::Paused, CompanyStatus::Active)
+                | (CompanyStatus::Paused, CompanyStatus::Archived)
+        );
+
+        if !allowed {
+            panic!("Invalid company status transition");
+        }
+
+        info.status = next_status;
+        env.storage().persistent().set(&key, &info);
+    }
+
     fn require_employee_exists(env: &Env, company_id: u64, employee: &Address) {
         if !env
             .storage()
@@ -141,20 +219,19 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::CompanySequence, &next);
 
-        let info = CompanyInfo { admin, treasury };
+        let info = CompanyInfo {
+            admin,
+            treasury,
+            status: CompanyStatus::Onboarding,
+        };
         env.storage().persistent().set(&DataKey::Company(id), &info);
 
         id
     }
 
     fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>) {
-        let info: CompanyInfo = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Company(company_id))
-            .expect("Company not found");
-
-        info.admin.require_auth();
+        Self::require_company_admin(&env, company_id);
+        Self::require_company_allows_employee_changes(&env, company_id);
 
         env.storage().persistent().set(
             &DataKey::Employee(company_id, employee.clone()),
@@ -167,13 +244,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
     }
 
     fn remove_employee(env: Env, company_id: u64, employee: Address) {
-        let info: CompanyInfo = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Company(company_id))
-            .expect("Company not found");
-
-        info.admin.require_auth();
+        Self::require_company_admin(&env, company_id);
+        Self::require_company_allows_employee_changes(&env, company_id);
 
         env.storage()
             .persistent()
@@ -184,13 +256,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
     }
 
     fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>) {
-        let info: CompanyInfo = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Company(company_id))
-            .expect("Company not found");
-
-        info.admin.require_auth();
+        Self::require_company_admin(&env, company_id);
+        Self::require_company_allows_employee_changes(&env, company_id);
 
         let key = DataKey::Employee(company_id, employee);
         if !env.storage().persistent().has(&key) {
@@ -207,6 +274,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
         profile_hash: BytesN<32>,
     ) {
         Self::require_company_admin(&env, company_id);
+        Self::require_company_allows_employee_changes(&env, company_id);
         Self::require_employee_exists(&env, company_id, &employee);
 
         let key = DataKey::EmployeeMetadata(company_id, employee);
@@ -226,6 +294,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
         role_hash: BytesN<32>,
     ) {
         Self::require_company_admin(&env, company_id);
+        Self::require_company_allows_employee_changes(&env, company_id);
         Self::require_employee_exists(&env, company_id, &employee);
 
         let key = DataKey::EmployeeMetadata(company_id, employee);
@@ -247,11 +316,31 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .unwrap_or_else(|| Self::empty_metadata(&env))
     }
 
+    fn activate_company(env: Env, company_id: u64) {
+        Self::set_company_status(&env, company_id, CompanyStatus::Active);
+    }
+
+    fn pause_company(env: Env, company_id: u64) {
+        Self::set_company_status(&env, company_id, CompanyStatus::Paused);
+    }
+
+    fn resume_company(env: Env, company_id: u64) {
+        Self::set_company_status(&env, company_id, CompanyStatus::Active);
+    }
+
+    fn archive_company(env: Env, company_id: u64) {
+        Self::set_company_status(&env, company_id, CompanyStatus::Archived);
+    }
+
     fn get_company(env: Env, company_id: u64) -> CompanyInfo {
         env.storage()
             .persistent()
             .get(&DataKey::Company(company_id))
             .expect("Company not found")
+    }
+
+    fn get_company_status(env: Env, company_id: u64) -> CompanyStatus {
+        Self::get_company(env, company_id).status
     }
 
     fn get_commitment(env: Env, company_id: u64, employee: Address) -> BytesN<32> {

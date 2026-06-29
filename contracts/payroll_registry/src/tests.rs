@@ -307,3 +307,91 @@ fn test_update_employee_metadata_rejects_missing_employee() {
 
     assert!(result.is_err());
 }
+
+#[test]
+fn test_registered_company_starts_onboarding() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+
+    assert_eq!(
+        client.get_company_status(&company_id),
+        CompanyStatus::Onboarding
+    );
+    assert_eq!(
+        client.get_company(&company_id).status,
+        CompanyStatus::Onboarding
+    );
+}
+
+#[test]
+fn test_company_lifecycle_transitions() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.activate_company(&company_id);
+    assert_eq!(
+        client.get_company_status(&company_id),
+        CompanyStatus::Active
+    );
+
+    client.pause_company(&company_id);
+    assert_eq!(
+        client.get_company_status(&company_id),
+        CompanyStatus::Paused
+    );
+
+    client.resume_company(&company_id);
+    assert_eq!(
+        client.get_company_status(&company_id),
+        CompanyStatus::Active
+    );
+
+    client.archive_company(&company_id);
+    assert_eq!(
+        client.get_company_status(&company_id),
+        CompanyStatus::Archived
+    );
+}
+
+#[test]
+fn test_invalid_company_status_transitions_are_rejected() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    assert!(client.try_pause_company(&company_id).is_err());
+    client.archive_company(&company_id);
+    assert!(client.try_activate_company(&company_id).is_err());
+}
+
+#[test]
+fn test_paused_and_archived_companies_block_employee_changes() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let paused_company = client.register_company(&admin, &treasury);
+    client.activate_company(&paused_company);
+    client.pause_company(&paused_company);
+    assert!(client
+        .try_add_employee(&paused_company, &employee, &commitment)
+        .is_err());
+
+    let archived_company = client.register_company(&admin, &treasury);
+    client.archive_company(&archived_company);
+    assert!(client
+        .try_add_employee(&archived_company, &employee, &commitment)
+        .is_err());
+}
