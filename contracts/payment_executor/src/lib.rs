@@ -502,6 +502,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -548,6 +549,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -693,6 +695,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
