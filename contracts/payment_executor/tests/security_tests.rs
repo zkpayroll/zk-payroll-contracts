@@ -60,6 +60,9 @@ fn setup_system<'a>(
     verifier.init_verifier_admin(&Address::generate(env));
     verifier.initialize_verifier(&mock_vk(env));
 
+    let commitment_admin = Address::generate(env);
+    commitment_client.init_commitment_admin(&commitment_admin);
+
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
 
