@@ -8,7 +8,7 @@ use pause_manager::PauseManagerClient;
 use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
 
-const MAX_BATCH: u32 = 50; // Conservative default; adjust if benchmarking shows higher safe limit
+const MAX_BATCH: u32 = 50;
 
 #[contract]
 pub struct Payroll;
@@ -21,17 +21,30 @@ pub struct ContractAddresses {
     pub verifier: Address,
     pub commitment: Address,
     pub treasury: Address,
+    pub treasury_owner: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollRun {
+    pub run_id: u64,
+    pub executed_at: u64,
+    pub admin: Address,
+    pub total_amount: i128,
+    pub employee_count: u32,
 }
 
 #[contracttype]
 pub enum DataKey {
     Addresses,
     PauseManager,
+    PayrollRun(u64),
+    TreasuryOwner,
+    RunCounter,
 }
 
 #[contractimpl]
 impl Payroll {
-    /// Initialize with admin, token contract, verifier, commitment contracts and treasury address
     pub fn initialize(
         e: Env,
         admin: Address,
@@ -39,6 +52,7 @@ impl Payroll {
         verifier: Address,
         commitment: Address,
         treasury: Address,
+        treasury_owner: Address,
     ) {
         let key = DataKey::Addresses;
         if e.storage().persistent().has(&key) {
@@ -50,8 +64,13 @@ impl Payroll {
             verifier,
             commitment,
             treasury,
+            treasury_owner: treasury_owner.clone(),
         };
         e.storage().persistent().set(&key, &addrs);
+        e.storage()
+            .persistent()
+            .set(&DataKey::TreasuryOwner, &treasury_owner);
+        e.storage().persistent().set(&DataKey::RunCounter, &0u64);
     }
 
     pub fn set_pause_manager(e: Env, pause_manager: Address) {
@@ -66,47 +85,75 @@ impl Payroll {
             .set(&DataKey::PauseManager, &pause_manager);
     }
 
-    pub fn deposit(_e: Env, _from: Address, _amount: i128) {
-        // Deposit placeholder
+    pub fn deposit(e: Env, from: Address, amount: i128) {
+        if amount <= 0 {
+            panic!("Deposit amount must be positive");
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let treasury_owner: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryOwner)
+            .expect("Treasury owner not set");
+
+        from.require_auth();
+        treasury_owner.require_auth();
+
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+        token_client.transfer(&from, &addrs.treasury, &amount);
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "deposit"),
+            ),
+            (from, amount),
+        );
     }
 
-    /// Batch process payroll: verify each proof and execute token transfers.
-    ///
-    /// Only the registered admin may trigger payroll execution.
-    ///
-    /// # Parameters
-    /// - `expected_total_spend`: The total amount the HR Admin authorises for this batch.
-    ///   Must equal the sum of all individual `amounts`. This makes the admin's spending
-    ///   intent explicit and prevents a malicious or accidental amount substitution attack
-    ///   where individual line items are altered after admin approval.
-    ///
-    /// # Atomicity & Nullifier Safety (AC-1)
-    /// The nullifier for each employee is recorded **before** the token transfer is
-    /// attempted.  Soroban executes the entire transaction atomically: if the token
-    /// transfer panics (e.g. insufficient treasury balance), the runtime rolls back
-    /// every state change made in that invocation — including the nullifier recording.
-    /// The nullifier is therefore never durably saved unless the corresponding transfer
-    /// succeeds.
+    fn derive_run_id(e: &Env) -> u64 {
+        let counter: u64 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunCounter)
+            .unwrap_or(0);
+
+        let run_id = counter + 1;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunCounter, &run_id);
+
+        run_id
+    }
+
+    pub fn get_payroll_run(e: Env, run_id: u64) -> PayrollRun {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PayrollRun(run_id))
+            .expect("Run not found")
+    }
+
     pub fn batch_process_payroll(
         e: Env,
         proofs: Vec<BytesN<256>>,
         amounts: Vec<i128>,
         employees: Vec<Address>,
         expected_total_spend: i128,
-    ) {
+    ) -> u64 {
         let count = proofs.len();
 
         if amounts.len() != count || employees.len() != count {
             panic!("Array length mismatch");
         }
 
-        // Enforce conservative max batch size to avoid hitting Soroban instruction limit
         assert!(count <= MAX_BATCH, "Batch too large");
 
-        // ── AC-2: Explicit spend authorisation ───────────────────────────────
-        // Sum up every individual payment and verify it matches the amount the
-        // admin declared upfront.  This check happens before any state changes so
-        // a mismatch is caught instantly at no cost.
         let mut total: i128 = 0;
         for i in 0..count {
             total += amounts.get(i).unwrap();
@@ -124,7 +171,6 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
 
-        // Check if a pause manager has been configured
         if e.storage().persistent().has(&DataKey::PauseManager) {
             let pm_addr: Address = e
                 .storage()
@@ -137,8 +183,9 @@ impl Payroll {
             }
         }
 
-        // Only the registered admin may trigger payroll execution
         addrs.admin.require_auth();
+
+        let run_id = Self::derive_run_id(&e);
 
         let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
         let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
@@ -149,43 +196,29 @@ impl Payroll {
             let amount = amounts.get(i).unwrap();
             let employee = employees.get(i).unwrap();
 
-            // ── FLOW STEP 1: Retrieve commitment ─────────────────────────────
-            // Panics with "Commitment not found" if the employee is not enrolled.
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
 
-            // Derive a unique nullifier per (batch_index) to prevent double-payment.
-            // In production these come from the prover's public inputs.
             let mut nullifier_arr = [0u8; 32];
             nullifier_arr[0] = (i % 256) as u8;
             nullifier_arr[1] = (i / 256) as u8;
             let nullifier = BytesN::from_array(&e, &nullifier_arr);
             let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
 
-            // Verify the Groth16 proof for this payment
             let mut public_inputs = Vec::new(&e);
             public_inputs.push_back(commitment.clone());
             public_inputs.push_back(nullifier.clone());
             public_inputs.push_back(recipient_hash.clone());
 
-            // ── FLOW STEP 2: Groth16 proof verification ───────────────────────
             let ok = verifier.verify_payment_proof(&proof, &public_inputs);
             if !ok {
                 panic!("Invalid payment proof for employee {}", i);
             }
 
-            // ── FLOW STEP 3: Record nullifier (effect before interaction) ─────
-            // Panics with "Nullifier already used" on a replay attempt.
-            // Because this comes before the token transfer, Soroban's atomic
-            // rollback guarantees the nullifier is discarded if the transfer fails.
             commitment_client.record_nullifier(&nullifier);
 
-            // ── FLOW STEP 4: Token transfer ───────────────────────────────────
-            // A panic here (e.g. insufficient treasury balance) causes Soroban to
-            // roll back the entire transaction, including the nullifier recorded above.
             token_client.transfer(&addrs.treasury, &employee, &amount);
 
-            // ── FLOW STEP 5: Emit event for off-chain indexers ────────────────
             e.events().publish(
                 (
                     symbol_short!("payroll"),
@@ -194,6 +227,27 @@ impl Payroll {
                 (employee.clone(), amount),
             );
         }
+
+        let run = PayrollRun {
+            run_id,
+            executed_at: e.ledger().timestamp(),
+            admin: addrs.admin.clone(),
+            total_amount: expected_total_spend,
+            employee_count: count,
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::PayrollRun(run_id), &run);
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "run_executed"),
+            ),
+            (run_id, expected_total_spend),
+        );
+
+        run_id
     }
 }
 
@@ -230,11 +284,59 @@ mod tests {
     }
 
     #[test]
+    fn test_payroll_run_id_derivation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+        let verifier_admin = Address::generate(&env);
+        verifier_client.init_verifier_admin(&verifier_admin);
+        verifier_client.initialize_verifier(&mock_vk(&env));
+
+        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
+        let commitment_admin = Address::generate(&env);
+        commitment_client.init_commitment_admin(&commitment_admin);
+
+        let token_id = env.register_contract(None, Token);
+        let _token_client = TokenClient::new(&env, &token_id);
+
+        let treasury = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let treasury_owner = Address::generate(&env);
+
+        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury, &treasury_owner);
+
+        commitment_client.set_payroll_operator(&payroll_id);
+
+        let employee = Address::generate(&env);
+        commitment_client.store_commitment(&employee, &BytesN::from_array(&env, &[0u8; 32]));
+
+        let mut proofs = Vec::new(&env);
+        proofs.push_back(mock_proof(&env));
+        let mut amounts = Vec::new(&env);
+        amounts.push_back(1000i128);
+        let mut employees = Vec::new(&env);
+        employees.push_back(employee.clone());
+
+        let run_id_1 = payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &1000);
+        assert_eq!(run_id_1, 1);
+
+        let run_1 = payroll_client.get_payroll_run(run_id_1);
+        assert_eq!(run_1.run_id, 1);
+        assert_eq!(run_1.total_amount, 1000);
+        assert_eq!(run_1.employee_count, 1);
+    }
+
+    #[test]
     fn benchmark_50_batch_validations() {
         let env = Env::default();
-        env.mock_all_auths(); // required: batch_process_payroll enforces admin.require_auth()
+        env.mock_all_auths();
 
-        // register dependent contracts
         let verifier_id = env.register_contract(None, ProofVerifier);
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let verifier_admin = Address::generate(&env);
@@ -251,18 +353,17 @@ mod tests {
 
         let treasury = Address::generate(&env);
         let admin = Address::generate(&env);
+        let treasury_owner = Address::generate(&env);
 
         let payroll_id = env.register_contract(None, Payroll);
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
-        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury, &treasury_owner);
 
         commitment_client.set_payroll_operator(&payroll_id);
 
-        // amounts are 100..149; total = sum(100..=149) = 6225
         token_client.mint(&treasury, &10_000i128);
 
-        // prepare 50 proofs/amounts/employees
         let mut proofs = Vec::new(&env);
         let mut amounts = Vec::new(&env);
         let mut employees = Vec::new(&env);
@@ -272,19 +373,17 @@ mod tests {
             proofs.push_back(p);
             amounts.push_back(100i128 + i as i128);
             let emp = Address::generate(&env);
-            // store a dummy commitment for each employee so get_commitment succeeds
             commitment_client.store_commitment(&emp, &BytesN::from_array(&env, &[0u8; 32]));
             employees.push_back(emp);
         }
 
-        // amounts are 100..149; total = sum(100..=149) = 5000 + (49*50/2) = 6225
         let expected_total_spend: i128 = 6225;
 
-        // Execute batch - should succeed with MAX_BATCH == 50
-        payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &expected_total_spend);
+        let run_id = payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &expected_total_spend);
+        assert!(run_id > 0);
     }
 
-    fn setup_simple_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address) {
+    fn setup_simple_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Address) {
         env.mock_all_auths();
 
         let verifier_id = env.register_contract(None, ProofVerifier);
@@ -299,23 +398,22 @@ mod tests {
         commitment_client.init_commitment_admin(&commitment_admin);
 
         let token_id = env.register_contract(None, Token);
-        let token_client = TokenClient::new(env, &token_id);
+        let _token_client = TokenClient::new(env, &token_id);
 
         let payroll_id = env.register_contract(None, Payroll);
         let payroll_client = PayrollClient::new(env, &payroll_id);
 
         let treasury = Address::generate(env);
         let admin = Address::generate(env);
-        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+        let treasury_owner = Address::generate(env);
+        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury, &treasury_owner);
 
         commitment_client.set_payroll_operator(&payroll_id);
-
-        token_client.mint(&treasury, &10_000i128);
 
         let employee = Address::generate(env);
         commitment_client.store_commitment(&employee, &BytesN::from_array(env, &[0u8; 32]));
 
-        (payroll_client, admin, treasury, employee)
+        (payroll_client, admin, treasury, treasury_owner, employee)
     }
 
     fn single_payment_batch(
@@ -335,7 +433,7 @@ mod tests {
     #[test]
     fn test_set_pause_manager_stores_address() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _employee) = setup_simple_payroll(&env);
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) = setup_simple_payroll(&env);
 
         let pm_id = env.register_contract(None, PauseManager);
         let pm_client = PauseManagerClient::new(&env, &pm_id);
@@ -344,7 +442,6 @@ mod tests {
 
         payroll_client.set_pause_manager(&pm_id);
 
-        // Verify it's stored by checking that a paused state blocks execution
         pm_client.pause();
         let (proofs, amounts, employees) = single_payment_batch(&env, &_employee, 1000);
         let result = payroll_client.try_batch_process_payroll(&proofs, &amounts, &employees, &1000);
@@ -354,7 +451,7 @@ mod tests {
     #[test]
     fn test_paused_payroll_rejects_batch_processing() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, employee) = setup_simple_payroll(&env);
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) = setup_simple_payroll(&env);
 
         let pm_id = env.register_contract(None, PauseManager);
         let pm_client = PauseManagerClient::new(&env, &pm_id);
@@ -372,7 +469,7 @@ mod tests {
     #[test]
     fn test_unpaused_payroll_resumes_processing() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, employee) = setup_simple_payroll(&env);
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) = setup_simple_payroll(&env);
 
         let pm_id = env.register_contract(None, PauseManager);
         let pm_client = PauseManagerClient::new(&env, &pm_id);
@@ -382,12 +479,10 @@ mod tests {
         payroll_client.set_pause_manager(&pm_id);
         pm_client.pause();
 
-        // Verify paused
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
         let result = payroll_client.try_batch_process_payroll(&proofs, &amounts, &employees, &1000);
         assert!(result.is_err());
 
-        // Unpause
         pm_client.unpause();
 
         let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 1000);
@@ -397,7 +492,7 @@ mod tests {
     #[test]
     fn test_payroll_works_without_pause_manager() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, employee) = setup_simple_payroll(&env);
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) = setup_simple_payroll(&env);
 
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
         payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &1000);
@@ -410,7 +505,6 @@ mod tests {
         let payroll_id = env.register_contract(None, Payroll);
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
-        // Initialize with a specific admin
         let verifier_id = env.register_contract(None, ProofVerifier);
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let verifier_admin = Address::generate(&env);
@@ -421,9 +515,9 @@ mod tests {
         let token_id = env.register_contract(None, Token);
         let treasury = Address::generate(&env);
         let admin = Address::generate(&env);
+        let treasury_owner = Address::generate(&env);
         let attacker = Address::generate(&env);
 
-        // Only mock auth for admin during initialize
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -435,14 +529,14 @@ mod tests {
                     verifier_id.clone(),
                     commitment_id.clone(),
                     treasury.clone(),
+                    treasury_owner.clone(),
                 )
                     .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury, &treasury_owner);
 
-        // Attacker tries to set pause manager
         let pm_id = env.register_contract(None, PauseManager);
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &attacker,
