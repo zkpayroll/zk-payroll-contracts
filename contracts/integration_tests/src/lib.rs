@@ -230,14 +230,15 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. Exactly two events must have been emitted across the full flow:
+        // 4. Exactly three events must have been emitted across the full flow:
         //      - `CommitmentUpdated` from salary_commitment.store_commitment (onboarding)
         //      - `payment_executed`  from payroll.batch_process_payroll    (execution)
+        //      - `run_executed`      from payroll.batch_process_payroll    (execution)
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            2,
-            "Expected 2 events: CommitmentUpdated (onboarding) + payment_executed (execution)"
+            3,
+            "Expected 3 events: CommitmentUpdated (onboarding) + payment_executed (execution) + run_executed (execution)"
         );
     }
 
