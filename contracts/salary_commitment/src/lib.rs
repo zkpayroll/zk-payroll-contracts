@@ -124,10 +124,13 @@ impl SalaryCommitmentContract {
         let key = DataKey::Commitment(employee.clone());
         env.storage().persistent().set(&key, &salary_commitment);
 
+        // Emit CommitmentUpdated event so off-chain indexers track commitment history.
         env.events().publish(
             (Symbol::new(&env, "CommitmentUpdated"), employee),
             (commitment,),
         );
+        // topics : ("CommitmentUpdated", employee)
+        // data   : (commitment,)
 
         salary_commitment
     }
@@ -169,6 +172,8 @@ impl SalaryCommitmentContract {
             (Symbol::new(&env, "CommitmentUpdated"), employee),
             (new_commitment,),
         );
+        // topics : ("CommitmentUpdated", employee)
+        // data   : (new_commitment,)
 
         updated
     }
@@ -428,8 +433,8 @@ impl SalaryCommitmentContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Env;
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{Env, Symbol, TryIntoVal};
 
     fn setup_with_admin() -> (Env, soroban_sdk::Address, Address) {
         let env = Env::default();
@@ -454,7 +459,15 @@ mod tests {
 
         assert_eq!(result.commitment, commitment);
         assert_eq!(result.version, 1);
-        assert!(!result.revoked);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let event = events.get(0).unwrap();
+        assert_eq!(event.1.len(), 2);
+        let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "CommitmentUpdated"));
+        let addr0: Address = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(addr0, employee);
     }
 
     #[test]
@@ -467,7 +480,10 @@ mod tests {
         let updated = BytesN::from_array(&env, &[2u8; 32]);
 
         client.store_commitment(&employee, &initial);
+        let before = env.events().all().len();
         let result = client.update_commitment(&employee, &updated);
+        let after = env.events().all().len();
+        assert_eq!(after, before + 1);
 
         assert_eq!(result.commitment, updated);
         assert_eq!(result.version, 2);

@@ -25,15 +25,15 @@ mod proof_helper;
 ///      unregistered employees cannot be paid.
 #[cfg(test)]
 mod e2e {
+    use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use payroll::{Payroll, PayrollClient};
     use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
-    use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+    use token::{Token, TokenClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        Address, BytesN, Env, Vec,
+        Address, BytesN, Env, Symbol, TryIntoVal, Vec,
     };
-    use token::{Token, TokenClient};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -61,6 +61,13 @@ mod e2e {
         BytesN::from_array(env, &[0u8; 256])
     }
 
+    /// Generates a unique 32-byte nonce from a counter seed for tests.
+    fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
+        let mut arr = [0u8; 32];
+        arr[0] = seed;
+        BytesN::from_array(env, &arr)
+    }
+
     /// Compute the salary commitment used across tests.
     ///
     /// In production this will use the Poseidon host function (CAP-0075).
@@ -75,15 +82,7 @@ mod e2e {
         commitment_client.compute_commitment(&5000u64, &blinding_factor)
     }
 
-    /// Generates a unique 32-byte nonce from a counter seed for tests.
-    fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
-        let mut arr = [0u8; 32];
-        arr[0] = seed;
-        BytesN::from_array(env, &arr)
-    }
-
     // ── Helper: register & initialise all five contracts ─────────────────────
-
     struct TestContext<'a> {
         env: Env,
         admin: Address,
@@ -230,16 +229,46 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. Exactly three events must have been emitted across the full flow:
-        //      - `CommitmentUpdated` from salary_commitment.store_commitment (onboarding)
-        //      - `payment_executed`  from payroll.batch_process_payroll    (execution)
-        //      - `run_executed`      from payroll.batch_process_payroll    (execution)
+        // 4. Events must have been emitted across the full flow:
+        //      - `CompanyRegistered`  from payroll_registry.register_company (setup)
+        //      - `CommitmentUpdated`  from salary_commitment.store_commitment (onboarding)
+        //      - `EmployeeAdded`      from payroll_registry.add_employee    (onboarding)
+        //      - `payment_executed`   from payroll.batch_process_payroll     (execution)
+        //      - `run_executed`       from payroll.batch_process_payroll     (execution)
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            3,
-            "Expected 3 events: CommitmentUpdated (onboarding) + payment_executed (execution) + run_executed (execution)"
+            5,
+            "Expected 5 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + payment_executed + run_executed"
         );
+
+        // Event tuple is (contract, topics, data) - access topics via .1
+        let topics0 = events.get(0).unwrap().1;
+        let val0 = topics0.get(0).unwrap();
+        let sym0: Symbol = val0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(env, "CompanyRegistered"));
+        let topics1 = events.get(1).unwrap().1;
+        let val1 = topics1.get(0).unwrap();
+        let sym1: Symbol = val1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym1, Symbol::new(env, "CommitmentUpdated"));
+        let topics2 = events.get(2).unwrap().1;
+        let val2 = topics2.get(0).unwrap();
+        let sym2: Symbol = val2.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym2, Symbol::new(env, "EmployeeAdded"));
+        let topics3 = events.get(3).unwrap().1;
+        let val3_0 = topics3.get(0).unwrap();
+        let sym3a: Symbol = val3_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3a, Symbol::new(env, "payroll"));
+        let val3_1 = topics3.get(1).unwrap();
+        let sym3b: Symbol = val3_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3b, Symbol::new(env, "payment_executed"));
+        let topics4 = events.get(4).unwrap().1;
+        let val4_0 = topics4.get(0).unwrap();
+        let sym4a: Symbol = val4_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym4a, Symbol::new(env, "payroll"));
+        let val4_1 = topics4.get(1).unwrap();
+        let sym4b: Symbol = val4_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym4b, Symbol::new(env, "run_executed"));
     }
 
     /// Paying an employee who has no commitment on-chain must panic.

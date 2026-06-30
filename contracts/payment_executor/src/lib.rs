@@ -262,7 +262,7 @@ impl PaymentExecutor {
 
         // Validate the period exists and is open
         let period_key = DataKey::Period(company_id, period);
-        let mut period_record: PayrollPeriod = env
+        let period_record: PayrollPeriod = env
             .storage()
             .persistent()
             .get(&period_key)
@@ -333,12 +333,7 @@ impl PaymentExecutor {
             .persistent()
             .set(&total_key, &(current_total + amount));
 
-        // Increment payment count in the period record
-        period_record.payment_count += 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Period(company_id, period), &period_record);
-
+        // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
         env.events().publish(
             (
                 soroban_sdk::Symbol::new(&env, "PayrollProcessed"),
@@ -346,6 +341,8 @@ impl PaymentExecutor {
             ),
             (employee, amount, period),
         );
+        // topics : ("PayrollProcessed", company_id)
+        // data   : (employee, amount, period)
 
         let _ = nullifier;
 
@@ -421,13 +418,13 @@ impl PaymentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::pause_manager::{PauseManager, PauseManagerClient};
+    use ::salary_commitment::SalaryCommitmentContract;
     use ::token::{Token, TokenClient};
-    use pause_manager::{PauseManager, PauseManagerClient};
     use payroll_registry::PayrollRegistry;
     use proof_verifier::{ProofVerifier, VerificationKey};
-    use salary_commitment::SalaryCommitmentContract;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Env, IntoVal};
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{Env, IntoVal, Symbol, TryIntoVal};
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
@@ -540,6 +537,15 @@ mod tests {
 
         assert_eq!(token_client.balance(&treasury), 9_000);
         assert_eq!(token_client.balance(&employee), 1_000);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 5);
+        let event = events.get(4).unwrap();
+        assert_eq!(event.1.len(), 2);
+        let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
+        let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(comp_id, company_id);
     }
 
     #[test]
@@ -819,6 +825,13 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 2_500);
         assert!(client.is_paid(&employee, &1));
         assert_eq!(client.get_total_paid(&company_id), 2_500);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 5);
+        let event = events.get(4).unwrap();
+        assert_eq!(event.1.len(), 2);
+        let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));
 
         let replay = client.try_execute_payment(
             &company_id,

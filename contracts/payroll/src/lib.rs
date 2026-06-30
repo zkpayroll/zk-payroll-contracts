@@ -441,6 +441,8 @@ impl Payroll {
                 ),
                 (employee.clone(), amount),
             );
+            // topics : ("payroll", "payment_executed")
+            // data   : (employee, amount)
         }
 
         let run = PayrollRun {

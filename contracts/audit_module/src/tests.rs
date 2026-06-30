@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
-use soroban_sdk::{Env, Symbol};
+use soroban_sdk::{Env, Symbol, TryIntoVal};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,6 +30,17 @@ fn test_generate_view_key_stores_and_verify_access_succeeds() {
 
     assert_eq!(key_bytes.len(), 32);
 
+    let after = env.events().all().len();
+    assert_eq!(after, 1);
+
+    let event = env.events().all().get(0).unwrap();
+    assert_eq!(event.1.len(), 2);
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "ViewKeyGenerated"));
+    let addr0: Address = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(addr0, auditor);
+
+    // verify_access: auditor holds a valid key
     assert!(client.verify_access(&auditor));
 
     let record = client.get_view_key(&auditor);
@@ -104,7 +115,19 @@ fn test_revoke_removes_key() {
     assert!(client.verify_access(&auditor));
 
     let admin = contract_id.clone();
+    let before = env.events().all().len();
     client.revoke_view_key(&admin, &auditor);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.1.len(), 3);
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "AuditAccessRevoked"));
+    let addr0: Address = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(addr0, admin);
+    let addr1: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(addr1, auditor);
 
     assert!(!client.verify_access(&auditor));
 

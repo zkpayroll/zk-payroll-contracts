@@ -125,7 +125,14 @@ impl AuditModule {
 
         env.storage()
             .persistent()
-            .set(&DataKey::AuditorKey(auditor), &record);
+            .set(&DataKey::AuditorKey(auditor.clone()), &record);
+
+        env.events().publish(
+            (Symbol::new(&env, "ViewKeyGenerated"), auditor),
+            (key_bytes.clone(), expiration_ledger),
+        );
+        // topics : ("ViewKeyGenerated", auditor)
+        // data   : (key_bytes, expiration_ledger)
 
         key_bytes
     }
@@ -163,6 +170,8 @@ impl AuditModule {
             (Symbol::new(&env, "AuditAccessRevoked"), admin, auditor.clone()),
             (env.ledger().timestamp(),),
         );
+        // topics : ("AuditAccessRevoked", admin, auditor)
+        // data   : (timestamp,)
 
         Ok(())
     }
@@ -286,6 +295,8 @@ impl AuditModule {
                 (Symbol::new(env, "AuditSuccessful"), auditor.clone()),
                 (scope, keyed_stored),
             );
+            // topics : ("AuditSuccessful", auditor)
+            // data   : (scope, keyed_stored)
         }
 
         matched
@@ -320,6 +331,8 @@ impl AuditModule {
                 report.period_end,
             ),
         );
+        // topics : ("AggregateAuditGenerated", auditor)
+        // data   : (company_id, period_start, period_end)
 
         // Record the aggregate report generation as an audit log entry.
         Self::record_audit_log(&env, &auditor, AuditScope::AggregateOnly, true);

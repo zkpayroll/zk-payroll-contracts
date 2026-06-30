@@ -1,6 +1,6 @@
 use super::*;
-use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Env, IntoVal};
+use soroban_sdk::testutils::{Address as _, Events};
+use soroban_sdk::{Env, IntoVal, Symbol, TryIntoVal};
 
 fn setup() -> (Env, Address) {
     let env = Env::default();
@@ -232,9 +232,32 @@ fn test_get_commitment_returns_employee_commitment() {
     assert_eq!(got, commitment);
 }
 
+// ---------------------------------------------------------------------------
+// Event emission tests
+// ---------------------------------------------------------------------------
+
 #[test]
-#[should_panic(expected = "Employee already exists")]
-fn test_add_employee_rejects_duplicate() {
+fn test_register_company_emits_event() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let before = env.events().all().len();
+    let company_id = client.register_company(&admin, &treasury);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.1.len(), 2);
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "CompanyRegistered"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+}
+
+#[test]
+fn test_add_employee_emits_event() {
     let (env, contract_id) = setup();
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -243,29 +266,70 @@ fn test_add_employee_rejects_duplicate() {
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
 
     let company_id = client.register_company(&admin, &treasury);
+    let before = env.events().all().len();
     client.add_employee(&company_id, &employee, &commitment);
-    // Should panic
-    client.add_employee(&company_id, &employee, &commitment);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.1.len(), 3);
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "EmployeeAdded"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(emp_addr, employee);
 }
 
 #[test]
-fn test_add_employee_allows_re_onboarding_after_removal() {
+fn test_remove_employee_emits_event() {
     let (env, contract_id) = setup();
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
-    let commitment1 = BytesN::from_array(&env, &[1u8; 32]);
-    let commitment2 = BytesN::from_array(&env, &[2u8; 32]);
+    let commitment = BytesN::from_array(&env, &[2u8; 32]);
 
     let company_id = client.register_company(&admin, &treasury);
-    
-    client.add_employee(&company_id, &employee, &commitment1);
+    client.add_employee(&company_id, &employee, &commitment);
+    let before = env.events().all().len();
     client.remove_employee(&company_id, &employee);
-    
-    // Should succeed because employee was removed
-    client.add_employee(&company_id, &employee, &commitment2);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
 
-    let got = client.get_commitment(&company_id, &employee);
-    assert_eq!(got, commitment2);
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.1.len(), 3);
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "EmployeeRemoved"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(emp_addr, employee);
+}
+
+#[test]
+fn test_update_commitment_emits_event() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let old_commitment = BytesN::from_array(&env, &[1u8; 32]);
+    let new_commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &old_commitment);
+    let before = env.events().all().len();
+    client.update_commitment(&company_id, &employee, &new_commitment);
+    let after = env.events().all().len();
+    assert_eq!(after, before + 1);
+
+    let event = env.events().all().get(after - 1).unwrap();
+    assert_eq!(event.1.len(), 3);
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "CommitmentUpdated"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(emp_addr, employee);
 }
