@@ -9,6 +9,7 @@ soroban-sdk = { workspace = true }
 proof_verifier = { path = "../proof_verifier" }
 salary_commitment = { path = "../salary_commitment" }
 token = { path = "../token" }
+pause_manager = { path = "../pause_manager", default-features = false }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -16,3 +17,4 @@ doctest = false
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+pause_manager = { path = "../pause_manager", features = ["contract"] }

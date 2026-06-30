@@ -1,0 +1,20 @@
+[package]
+name = "pause_manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+default = ["contract"]
+contract = []
+testutils = ["soroban-sdk/testutils"]

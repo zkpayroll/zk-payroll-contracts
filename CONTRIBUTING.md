@@ -22,6 +22,13 @@ verifying keys) are load-bearing — please follow this guide carefully.
 - [Areas of Contribution](#areas-of-contribution)
 - [Getting Help](#getting-help)
 
+## Additional Guides
+
+| Guide | Description |
+|-------|-------------|
+| [Soroban Build Troubleshooting](docs/troubleshooting-soroban-build.md) | Common local build, optimize, and CLI failures with actionable fixes |
+| [Incident Response Playbook](docs/incident-response-playbook.md) | How to respond when audit workflows fail or disclosure is handled incorrectly |
+
 ---
 
 ## Code of Conduct
