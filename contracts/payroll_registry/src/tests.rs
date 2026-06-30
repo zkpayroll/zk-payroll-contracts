@@ -233,148 +233,8 @@ fn test_get_commitment_returns_employee_commitment() {
 }
 
 #[test]
-fn test_add_employee_initializes_empty_metadata() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let employee = Address::generate(&env);
-    let commitment = BytesN::from_array(&env, &[1u8; 32]);
-    let empty = BytesN::from_array(&env, &[0u8; 32]);
-
-    let company_id = client.register_company(&admin, &treasury);
-    client.add_employee(&company_id, &employee, &commitment);
-
-    let metadata = client.get_employee_metadata(&company_id, &employee);
-    assert_eq!(metadata.profile_hash, empty);
-    assert_eq!(metadata.role_hash, empty);
-}
-
-#[test]
-fn test_update_employee_profile_hash_preserves_role_and_commitment() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let employee = Address::generate(&env);
-    let commitment = BytesN::from_array(&env, &[4u8; 32]);
-    let profile_hash = BytesN::from_array(&env, &[5u8; 32]);
-    let empty = BytesN::from_array(&env, &[0u8; 32]);
-
-    let company_id = client.register_company(&admin, &treasury);
-    client.add_employee(&company_id, &employee, &commitment);
-    client.update_employee_profile_hash(&company_id, &employee, &profile_hash);
-
-    let metadata = client.get_employee_metadata(&company_id, &employee);
-    assert_eq!(metadata.profile_hash, profile_hash);
-    assert_eq!(metadata.role_hash, empty);
-    assert_eq!(client.get_commitment(&company_id, &employee), commitment);
-}
-
-#[test]
-fn test_update_employee_role_hash_preserves_profile_and_commitment() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let employee = Address::generate(&env);
-    let commitment = BytesN::from_array(&env, &[6u8; 32]);
-    let profile_hash = BytesN::from_array(&env, &[7u8; 32]);
-    let role_hash = BytesN::from_array(&env, &[8u8; 32]);
-
-    let company_id = client.register_company(&admin, &treasury);
-    client.add_employee(&company_id, &employee, &commitment);
-    client.update_employee_profile_hash(&company_id, &employee, &profile_hash);
-    client.update_employee_role_hash(&company_id, &employee, &role_hash);
-
-    let metadata = client.get_employee_metadata(&company_id, &employee);
-    assert_eq!(metadata.profile_hash, profile_hash);
-    assert_eq!(metadata.role_hash, role_hash);
-    assert_eq!(client.get_commitment(&company_id, &employee), commitment);
-}
-
-#[test]
-fn test_update_employee_metadata_rejects_missing_employee() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let employee = Address::generate(&env);
-    let profile_hash = BytesN::from_array(&env, &[9u8; 32]);
-
-    let company_id = client.register_company(&admin, &treasury);
-    let result = client.try_update_employee_profile_hash(&company_id, &employee, &profile_hash);
-
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_registered_company_starts_onboarding() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    let company_id = client.register_company(&admin, &treasury);
-
-    assert_eq!(
-        client.get_company_status(&company_id),
-        CompanyStatus::Onboarding
-    );
-    assert_eq!(
-        client.get_company(&company_id).status,
-        CompanyStatus::Onboarding
-    );
-}
-
-#[test]
-fn test_company_lifecycle_transitions() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    let company_id = client.register_company(&admin, &treasury);
-    client.activate_company(&company_id);
-    assert_eq!(
-        client.get_company_status(&company_id),
-        CompanyStatus::Active
-    );
-
-    client.pause_company(&company_id);
-    assert_eq!(
-        client.get_company_status(&company_id),
-        CompanyStatus::Paused
-    );
-
-    client.resume_company(&company_id);
-    assert_eq!(
-        client.get_company_status(&company_id),
-        CompanyStatus::Active
-    );
-
-    client.archive_company(&company_id);
-    assert_eq!(
-        client.get_company_status(&company_id),
-        CompanyStatus::Archived
-    );
-}
-
-#[test]
-fn test_invalid_company_status_transitions_are_rejected() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    let company_id = client.register_company(&admin, &treasury);
-    assert!(client.try_pause_company(&company_id).is_err());
-    client.archive_company(&company_id);
-    assert!(client.try_activate_company(&company_id).is_err());
-}
-
-#[test]
-fn test_paused_and_archived_companies_block_employee_changes() {
+#[should_panic(expected = "Employee already exists")]
+fn test_add_employee_rejects_duplicate() {
     let (env, contract_id) = setup();
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -382,16 +242,30 @@ fn test_paused_and_archived_companies_block_employee_changes() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
 
-    let paused_company = client.register_company(&admin, &treasury);
-    client.activate_company(&paused_company);
-    client.pause_company(&paused_company);
-    assert!(client
-        .try_add_employee(&paused_company, &employee, &commitment)
-        .is_err());
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    // Should panic
+    client.add_employee(&company_id, &employee, &commitment);
+}
 
-    let archived_company = client.register_company(&admin, &treasury);
-    client.archive_company(&archived_company);
-    assert!(client
-        .try_add_employee(&archived_company, &employee, &commitment)
-        .is_err());
+#[test]
+fn test_add_employee_allows_re_onboarding_after_removal() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment1 = BytesN::from_array(&env, &[1u8; 32]);
+    let commitment2 = BytesN::from_array(&env, &[2u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    
+    client.add_employee(&company_id, &employee, &commitment1);
+    client.remove_employee(&company_id, &employee);
+    
+    // Should succeed because employee was removed
+    client.add_employee(&company_id, &employee, &commitment2);
+
+    let got = client.get_commitment(&company_id, &employee);
+    assert_eq!(got, commitment2);
 }

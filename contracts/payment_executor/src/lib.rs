@@ -712,7 +712,6 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
-        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -887,7 +886,6 @@ mod tests {
         let commitment = BytesN::from_array(env, &[9u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
-        registry_client.activate_company(&company_id);
         commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
@@ -998,7 +996,6 @@ mod tests {
         let commitment = BytesN::from_array(&env, &[9u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
-        registry_client.activate_company(&company_id);
         commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         client.create_period(&company_id);

@@ -233,14 +233,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
         Self::require_company_admin(&env, company_id);
         Self::require_company_allows_employee_changes(&env, company_id);
 
-        env.storage().persistent().set(
-            &DataKey::Employee(company_id, employee.clone()),
-            &commitment,
-        );
-        env.storage().persistent().set(
-            &DataKey::EmployeeMetadata(company_id, employee),
-            &Self::empty_metadata(&env),
-        );
+        info.admin.require_auth();
+
+        let key = DataKey::Employee(company_id, employee.clone());
+        if env.storage().persistent().has(&key) {
+            panic!("Employee already exists");
+        }
+
+        env.storage().persistent().set(&key, &commitment);
     }
 
     fn remove_employee(env: Env, company_id: u64, employee: Address) {
