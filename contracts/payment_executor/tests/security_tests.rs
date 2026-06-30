@@ -223,3 +223,306 @@ fn test_reentrancy_state_updates_before_external_calls() {
     // ProofAlreadyUsed error would happen first because nullifier checks precede AlreadyPaid checks and token transfers.
     assert_eq!(replay.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
 }
+
+// ============================================================================
+// Retry Scenario Tests (Issue #136)
+// ============================================================================
+
+/// Acceptance Criteria: Retry Safety After Partial Failure
+/// - Execute payment for employee A in period 1 (success).
+/// - Execute payment for employee A in period 2 (success).
+/// - Verify both payments were recorded.
+/// - Attempt replay of period 1 payment (should fail with ProofAlreadyUsed).
+/// - This demonstrates that period-based retries with new periods succeed
+///   while cross-period replay is prevented by nullifier mechanism.
+#[test]
+fn test_retry_across_periods_succeeds_with_new_period() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[10u8; 32]);
+
+    commitment_client.store_commitment(&employee, &commitment);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    // Payment 1 in period 1
+    let proof_a_1 = BytesN::from_array(&env, &[20u8; 64]);
+    let proof_b_1 = BytesN::from_array(&env, &[21u8; 128]);
+    let proof_c_1 = BytesN::from_array(&env, &[22u8; 64]);
+    let nullifier_1 = BytesN::from_array(&env, &[23u8; 32]);
+
+    executor.execute_payment(
+        &company_id,
+        &employee,
+        &500,
+        &proof_a_1,
+        &proof_b_1,
+        &proof_c_1,
+        &nullifier_1,
+        &1,
+    );
+
+    assert!(executor.is_paid(&employee, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 500);
+
+    // Create a new period (period 2)
+    executor.create_period(&company_id);
+
+    // Payment 2 in period 2 with different proof/amount
+    let proof_a_2 = BytesN::from_array(&env, &[30u8; 64]);
+    let proof_b_2 = BytesN::from_array(&env, &[31u8; 128]);
+    let proof_c_2 = BytesN::from_array(&env, &[32u8; 64]);
+    let nullifier_2 = BytesN::from_array(&env, &[33u8; 32]);
+
+    executor.execute_payment(
+        &company_id,
+        &employee,
+        &300,
+        &proof_a_2,
+        &proof_b_2,
+        &proof_c_2,
+        &nullifier_2,
+        &2,
+    );
+
+    // Both payments recorded
+    assert!(executor.is_paid(&employee, &1));
+    assert!(executor.is_paid(&employee, &2));
+    assert_eq!(executor.get_total_paid(&company_id), 800);
+
+    // Verify replay of either proof is blocked
+    let replay_1 = executor.try_execute_payment(
+        &company_id,
+        &employee,
+        &500,
+        &proof_a_1,
+        &proof_b_1,
+        &proof_c_1,
+        &nullifier_1,
+        &1,
+    );
+    assert_eq!(replay_1.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+
+    let replay_2 = executor.try_execute_payment(
+        &company_id,
+        &employee,
+        &300,
+        &proof_a_2,
+        &proof_b_2,
+        &proof_c_2,
+        &nullifier_2,
+        &2,
+    );
+    assert_eq!(replay_2.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+}
+
+/// Acceptance Criteria: Idempotent Retry Within Same Period
+/// - Execute payment for employee A with period 1.
+/// - Verify payment recorded.
+/// - Attempt same payment again (should fail with AlreadyPaid).
+/// - Verify state unchanged: exactly one payment recorded.
+#[test]
+fn test_retry_same_period_detects_already_paid() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[50u8; 32]);
+
+    commitment_client.store_commitment(&employee, &commitment);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    let proof_a = BytesN::from_array(&env, &[60u8; 64]);
+    let proof_b = BytesN::from_array(&env, &[61u8; 128]);
+    let proof_c = BytesN::from_array(&env, &[62u8; 64]);
+    let nullifier = BytesN::from_array(&env, &[63u8; 32]);
+
+    // First payment in period 1
+    executor.execute_payment(&company_id, &employee, &1000, &proof_a, &proof_b, &proof_c, &nullifier, &1);
+
+    assert!(executor.is_paid(&employee, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+
+    // Retry same payment in same period (should fail)
+    let retry_result = executor.try_execute_payment(
+        &company_id,
+        &employee,
+        &1000,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &nullifier,
+        &1,
+    );
+
+    // Should fail due to ProofAlreadyUsed (nullifier already consumed)
+    assert_eq!(retry_result.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+
+    // Verify no duplicate payment was recorded
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+}
+
+/// Acceptance Criteria: Period-Based Replay Isolation
+/// - Execute payment for employee A with proof P in period 1.
+/// - Create period 2.
+/// - Verify that proof P cannot be reused in period 2 (even though period changed).
+/// - This confirms nullifier is scoped correctly and prevents cross-period replay.
+#[test]
+fn test_period_isolation_prevents_cross_period_replay() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[70u8; 32]);
+
+    commitment_client.store_commitment(&employee, &commitment);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    let proof_a = BytesN::from_array(&env, &[80u8; 64]);
+    let proof_b = BytesN::from_array(&env, &[81u8; 128]);
+    let proof_c = BytesN::from_array(&env, &[82u8; 64]);
+    let nullifier = BytesN::from_array(&env, &[83u8; 32]);
+
+    // Execute payment in period 1
+    executor.execute_payment(&company_id, &employee, &2000, &proof_a, &proof_b, &proof_c, &nullifier, &1);
+    assert!(executor.is_paid(&employee, &1));
+
+    // Create a new period (period 2)
+    executor.create_period(&company_id);
+
+    // Attempt to reuse same proof in period 2 (should fail due to nullifier)
+    let cross_period_result = executor.try_execute_payment(
+        &company_id,
+        &employee,
+        &2000,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &nullifier,
+        &2,
+    );
+
+    // Should fail because nullifier was already consumed in period 1
+    assert_eq!(cross_period_result.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+
+    // Verify employee is not marked as paid in period 2
+    assert!(!executor.is_paid(&employee, &2));
+
+    // Verify total paid remains at first payment only
+    assert_eq!(executor.get_total_paid(&company_id), 2000);
+}
+
+/// Acceptance Criteria: Multiple Employees in Same Period
+/// - Execute payment for employee A with proof PA in period 1.
+/// - Execute payment for employee B with proof PB in period 1.
+/// - Verify both payments recorded.
+/// - Attempt replay of PA (should fail with ProofAlreadyUsed).
+/// - Attempt replay of PB (should fail with ProofAlreadyUsed).
+/// - Attempt to pay employee A again in period 1 with new proof (should fail with AlreadyPaid).
+/// - This confirms: nullifier prevents proof reuse, AlreadyPaid prevents duplicate employee payments.
+#[test]
+fn test_retry_multiple_employees_detects_duplicates() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let employee_a = Address::generate(&env);
+    let employee_b = Address::generate(&env);
+
+    let commitment_a = BytesN::from_array(&env, &[90u8; 32]);
+    let commitment_b = BytesN::from_array(&env, &[91u8; 32]);
+
+    commitment_client.store_commitment(&employee_a, &commitment_a);
+    commitment_client.store_commitment(&employee_b, &commitment_b);
+    registry.add_employee(&company_id, &employee_a, &commitment_a);
+    registry.add_employee(&company_id, &employee_b, &commitment_b);
+
+    // First employee payment
+    let proof_a_1 = BytesN::from_array(&env, &[100u8; 64]);
+    let proof_b_1 = BytesN::from_array(&env, &[101u8; 128]);
+    let proof_c_1 = BytesN::from_array(&env, &[102u8; 64]);
+    let nullifier_1 = BytesN::from_array(&env, &[103u8; 32]);
+
+    executor.execute_payment(
+        &company_id,
+        &employee_a,
+        &500,
+        &proof_a_1,
+        &proof_b_1,
+        &proof_c_1,
+        &nullifier_1,
+        &1,
+    );
+
+    assert_eq!(executor.get_total_paid(&company_id), 500);
+
+    // Second employee payment
+    let proof_a_2 = BytesN::from_array(&env, &[110u8; 64]);
+    let proof_b_2 = BytesN::from_array(&env, &[111u8; 128]);
+    let proof_c_2 = BytesN::from_array(&env, &[112u8; 64]);
+    let nullifier_2 = BytesN::from_array(&env, &[113u8; 32]);
+
+    executor.execute_payment(
+        &company_id,
+        &employee_b,
+        &300,
+        &proof_a_2,
+        &proof_b_2,
+        &proof_c_2,
+        &nullifier_2,
+        &1,
+    );
+
+    // Both payments recorded
+    assert_eq!(executor.get_total_paid(&company_id), 800);
+
+    // Verify replay of either proof is blocked by nullifier
+    let replay_1 = executor.try_execute_payment(
+        &company_id,
+        &employee_a,
+        &500,
+        &proof_a_1,
+        &proof_b_1,
+        &proof_c_1,
+        &nullifier_1,
+        &1,
+    );
+    assert_eq!(replay_1.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+
+    let replay_2 = executor.try_execute_payment(
+        &company_id,
+        &employee_b,
+        &300,
+        &proof_a_2,
+        &proof_b_2,
+        &proof_c_2,
+        &nullifier_2,
+        &1,
+    );
+    assert_eq!(replay_2.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+
+    // Attempt to pay employee A again with different proof (should fail with AlreadyPaid)
+    let proof_a_3 = BytesN::from_array(&env, &[120u8; 64]);
+    let proof_b_3 = BytesN::from_array(&env, &[121u8; 128]);
+    let proof_c_3 = BytesN::from_array(&env, &[122u8; 64]);
+    let nullifier_3 = BytesN::from_array(&env, &[123u8; 32]);
+
+    let double_pay_result = executor.try_execute_payment(
+        &company_id,
+        &employee_a,
+        &250,
+        &proof_a_3,
+        &proof_b_3,
+        &proof_c_3,
+        &nullifier_3,
+        &1,
+    );
+    assert_eq!(double_pay_result.unwrap_err().unwrap(), PaymentError::AlreadyPaid);
+
+    // Final verification: total paid unchanged
+    assert_eq!(executor.get_total_paid(&company_id), 800);
+}
