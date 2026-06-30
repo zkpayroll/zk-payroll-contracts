@@ -1231,4 +1231,507 @@ mod tests {
             &ReconciliationStatus::Reconciled,
         );
     }
+
+    // ── Regression suite: period × role × pause-state interactions ────────────
+    //
+    // These tests cover combined edge cases between:
+    //   • payroll period state (active / paused / resumed)
+    //   • role-restricted actions (admin, treasury_owner, operator, attacker)
+    //   • state transitions that occur mid-flow
+    //
+    // Run with:  cargo test regression_
+    //
+    // IMPORTANT — ordering note in `batch_process_payroll`:
+    //   The draft hash commitment is CONSUMED (removed from storage) before the
+    //   pause check executes. If the contract is paused at execution time the
+    //   batch is rejected, but the commitment slot is already gone. Tests
+    //   `regression_draft_consumed_before_pause_check_*` document this
+    //   intentionally so the behaviour is observable and reproducible.
+
+    // ── Regression helper ─────────────────────────────────────────────────────
+
+    /// Extends `setup_simple_payroll` by registering and attaching a
+    /// PauseManager. Returns the payroll client, admin, treasury,
+    /// treasury_owner, employee, and PauseManagerClient.
+    #[allow(clippy::type_complexity)]
+    fn setup_with_pause_manager(
+        env: &Env,
+    ) -> (
+        PayrollClient<'_>,
+        Address,
+        Address,
+        Address,
+        Address,
+        PauseManagerClient<'_>,
+    ) {
+        let (payroll_client, admin, treasury, treasury_owner, employee) =
+            setup_simple_payroll(env);
+
+        let pm_id = env.register_contract(None, PauseManager);
+        let pm_client = PauseManagerClient::new(env, &pm_id);
+        let operator = Address::generate(env);
+        pm_client.initialize(&operator);
+
+        payroll_client.set_pause_manager(&pm_id);
+
+        (
+            payroll_client,
+            admin,
+            treasury,
+            treasury_owner,
+            employee,
+            pm_client,
+        )
+    }
+
+    // ── 1. Paused payroll periods — batch rejected ─────────────────────────────
+
+    /// A nonce that was used in a rejected (paused) batch attempt is NOT marked
+    /// as consumed. After the contract is unpaused the same nonce must be
+    /// accepted, allowing the caller to retry without needing a fresh nonce.
+    ///
+    /// This documents that nonce consumption (step 9 in batch_process_payroll)
+    /// occurs AFTER the pause guard, so pause-rejected calls never exhaust the
+    /// nonce.
+    #[test]
+    fn regression_paused_batch_rejected_nonce_remains_reusable_after_unpause() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let reused_nonce = test_nonce(&env, 40);
+
+        // Attempt to run while paused — must be rejected.
+        pm_client.pause();
+        let (p1, a1, e1) = single_payment_batch(&env, &employee, 1000);
+        let paused_result = payroll_client.try_batch_process_payroll(
+            &p1,
+            &a1,
+            &e1,
+            &1000,
+            &reused_nonce,
+            &None,
+        );
+        assert!(
+            paused_result.is_err(),
+            "batch must be rejected while paused"
+        );
+
+        // After unpause the SAME nonce must be accepted — it was never consumed.
+        pm_client.unpause();
+        let (p2, a2, e2) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &p2,
+            &a2,
+            &e2,
+            &1000,
+            &reused_nonce, // same nonce — must succeed
+            &None,
+        );
+        assert!(run_id > 0, "run_id must be positive after successful retry");
+    }
+
+    /// Documents that the draft commitment is consumed from storage BEFORE the
+    /// pause check inside `batch_process_payroll`. A batch submitted while the
+    /// contract is paused will therefore permanently lose its pre-committed draft
+    /// hash even though the batch itself fails.
+    ///
+    /// After unpause, a retry with the same draft hash is rejected because the
+    /// commitment slot was already cleared. The caller must commit a new draft
+    /// hash before retrying.
+    ///
+    /// This test exists to make the ordering observable and to catch any future
+    /// refactor that changes the evaluation sequence.
+    #[test]
+    fn regression_draft_consumed_before_pause_check_commitment_lost_on_pause_rejection() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let draft_hash = BytesN::from_array(&env, &[0xddu8; 32]);
+        payroll_client.commit_draft(&admin, &draft_hash);
+
+        // Pause and attempt batch with the pre-committed draft hash.
+        pm_client.pause();
+        let (p1, a1, e1) = single_payment_batch(&env, &employee, 1000);
+        let paused_result = payroll_client.try_batch_process_payroll(
+            &p1,
+            &a1,
+            &e1,
+            &1000,
+            &test_nonce(&env, 41),
+            &Some(draft_hash.clone()),
+        );
+        assert!(
+            paused_result.is_err(),
+            "batch must be rejected while paused"
+        );
+
+        // Unpause and retry with the same draft hash — must fail because the
+        // commitment was already consumed in the previous (paused) attempt.
+        pm_client.unpause();
+        let (p2, a2, e2) = single_payment_batch(&env, &employee, 1000);
+        let retry_result = payroll_client.try_batch_process_payroll(
+            &p2,
+            &a2,
+            &e2,
+            &1000,
+            &test_nonce(&env, 42),
+            &Some(draft_hash),
+        );
+        assert!(
+            retry_result.is_err(),
+            "draft hash must be irrecoverable after being consumed during a paused attempt"
+        );
+    }
+
+    /// A completed run record stored before the contract was paused must be
+    /// fully intact and retrievable both while paused and after unpause.
+    #[test]
+    fn regression_completed_run_record_persists_through_pause_unpause_cycle() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        // Execute a run while the contract is active.
+        let (p, a, e) = single_payment_batch(&env, &employee, 500);
+        let run_id =
+            payroll_client.batch_process_payroll(&p, &a, &e, &500, &test_nonce(&env, 43), &None);
+        assert!(run_id > 0);
+
+        // Pause — run record must still be accessible.
+        pm_client.pause();
+        let run_while_paused = payroll_client.get_payroll_run(&run_id);
+        assert_eq!(
+            run_while_paused.run_id, run_id,
+            "run record must be intact while paused"
+        );
+        assert_eq!(run_while_paused.total_amount, 500);
+
+        // Unpause — run record must remain identical.
+        pm_client.unpause();
+        let run_after_unpause = payroll_client.get_payroll_run(&run_id);
+        assert_eq!(
+            run_after_unpause.run_id, run_id,
+            "run record must be intact after unpause"
+        );
+        assert_eq!(
+            run_after_unpause.employee_count,
+            run_while_paused.employee_count
+        );
+    }
+
+    // ── 2. Role-restricted actions during paused state — allowed paths ─────────
+
+    /// The admin may call `commit_draft` even when the contract is paused,
+    /// because `commit_draft` has no pause guard. This allows the admin to
+    /// prepare the next run's draft hash during a maintenance window.
+    #[test]
+    fn regression_admin_can_commit_draft_while_paused() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        pm_client.pause();
+
+        // commit_draft must succeed — it does not consult the pause manager.
+        let draft_hash = BytesN::from_array(&env, &[0xaau8; 32]);
+        payroll_client.commit_draft(&admin, &draft_hash);
+        // No assertion needed beyond the call not panicking; the commitment
+        // slot existence is validated by test_draft_hash_binding_accepted_when_pre_committed.
+    }
+
+    /// The admin may update the reconciliation status of a completed run while
+    /// the contract is paused. Reconciliation is an administrative bookkeeping
+    /// action and must not be blocked by the pause guard.
+    #[test]
+    fn regression_admin_can_update_reconciliation_status_while_paused() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        // Complete a run before pausing.
+        let (p, a, e) = single_payment_batch(&env, &employee, 300);
+        let run_id =
+            payroll_client.batch_process_payroll(&p, &a, &e, &300, &test_nonce(&env, 44), &None);
+
+        pm_client.pause();
+
+        // Reconciliation update must succeed while paused.
+        payroll_client.update_reconciliation_status(
+            &admin,
+            &run_id,
+            &ReconciliationStatus::Reconciled,
+        );
+        let run = payroll_client.get_payroll_run(&run_id);
+        assert_eq!(
+            run.reconciliation_status,
+            ReconciliationStatus::Reconciled,
+            "reconciliation status must be persisted while paused"
+        );
+    }
+
+    /// The treasury_owner may submit an emergency withdrawal request while the
+    /// contract is paused. Emergency controls must remain reachable regardless
+    /// of pause state.
+    #[test]
+    fn regression_treasury_owner_can_request_emergency_withdrawal_while_paused() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        pm_client.pause();
+
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &100i128, &recipient);
+
+        let req = payroll_client
+            .get_emergency_request()
+            .expect("emergency request must exist");
+        assert_eq!(req.amount, 100i128);
+        assert_eq!(req.recipient, recipient);
+    }
+
+    /// The admin may approve an emergency withdrawal while the contract is
+    /// paused. Two-step emergency controls must be fully usable during a
+    /// maintenance pause.
+    #[test]
+    fn regression_admin_can_approve_emergency_withdrawal_while_paused() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &50i128, &recipient);
+
+        pm_client.pause();
+
+        // Approval (and token transfer) must succeed while paused.
+        payroll_client.approve_emergency_withdrawal(&admin);
+        assert!(
+            payroll_client.get_emergency_request().is_none(),
+            "approved request must be cleared from storage"
+        );
+    }
+
+    /// Either the admin or the treasury_owner may cancel a pending emergency
+    /// withdrawal while the contract is paused.
+    #[test]
+    fn regression_admin_can_cancel_emergency_withdrawal_while_paused() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &75i128, &recipient);
+
+        pm_client.pause();
+
+        payroll_client.cancel_emergency_withdrawal(&admin);
+        assert!(
+            payroll_client.get_emergency_request().is_none(),
+            "cancelled request must be cleared while paused"
+        );
+    }
+
+    // ── 3. Role-restricted actions during paused state — denied paths ──────────
+
+    /// A non-admin address must not be able to call `commit_draft`, regardless
+    /// of whether the contract is currently paused. The role check is
+    /// independent of pause state.
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn regression_non_admin_cannot_commit_draft_while_paused() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        pm_client.pause();
+
+        let attacker = Address::generate(&env);
+        let draft_hash = BytesN::from_array(&env, &[0x11u8; 32]);
+        payroll_client.commit_draft(&attacker, &draft_hash);
+    }
+
+    /// A non-admin address must not be able to update reconciliation status,
+    /// even while the contract is paused. The role check must not be relaxed
+    /// by pause state.
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn regression_non_admin_cannot_update_reconciliation_status_while_paused() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let (p, a, e) = single_payment_batch(&env, &employee, 200);
+        let run_id =
+            payroll_client.batch_process_payroll(&p, &a, &e, &200, &test_nonce(&env, 45), &None);
+
+        pm_client.pause();
+
+        let non_admin = Address::generate(&env);
+        payroll_client.update_reconciliation_status(
+            &non_admin,
+            &run_id,
+            &ReconciliationStatus::Reconciled,
+        );
+    }
+
+    /// An address that is not the treasury_owner must not be able to request an
+    /// emergency withdrawal while the contract is paused. Pause state must not
+    /// bypass role checks on the emergency workflow.
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not treasury owner")]
+    fn regression_non_treasury_owner_cannot_request_emergency_withdrawal_while_paused() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        pm_client.pause();
+
+        let attacker = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&attacker, &500i128, &recipient);
+    }
+
+    /// A non-admin address must not be able to approve an emergency withdrawal
+    /// while the contract is paused. The two-step approval role requirement
+    /// must hold across both pause and active states.
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn regression_non_admin_cannot_approve_emergency_withdrawal_while_paused() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &80i128, &recipient);
+
+        pm_client.pause();
+
+        let attacker = Address::generate(&env);
+        payroll_client.approve_emergency_withdrawal(&attacker);
+    }
+
+    // ── 4. Mid-flow state transitions ─────────────────────────────────────────
+
+    /// An emergency withdrawal request submitted before the contract was paused
+    /// must survive the pause/unpause cycle intact, ready to be approved or
+    /// cancelled after the contract resumes.
+    #[test]
+    fn regression_emergency_request_survives_pause_unpause_cycle() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, treasury_owner, _employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &250i128, &recipient);
+
+        // Pause then immediately unpause — request must be unchanged.
+        pm_client.pause();
+        pm_client.unpause();
+
+        let req = payroll_client
+            .get_emergency_request()
+            .expect("emergency request must still exist after pause/unpause");
+        assert_eq!(req.amount, 250i128, "amount must be unchanged");
+        assert_eq!(req.recipient, recipient, "recipient must be unchanged");
+        assert!(!req.approved, "request must still be pending approval");
+
+        // Admin can still approve after the cycle.
+        payroll_client.approve_emergency_withdrawal(&admin);
+        assert!(payroll_client.get_emergency_request().is_none());
+    }
+
+    /// Replacing the pause manager while the contract is paused via the old
+    /// manager does not automatically unpause the contract. The new manager's
+    /// `is_paused()` state is independent, so subsequent batches must succeed
+    /// if the new manager reports unpaused.
+    #[test]
+    fn regression_replacing_pause_manager_switches_pause_authority() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee, pm_old) =
+            setup_with_pause_manager(&env);
+
+        // Pause via the original manager.
+        pm_old.pause();
+        let (p1, a1, e1) = single_payment_batch(&env, &employee, 100);
+        let blocked = payroll_client.try_batch_process_payroll(
+            &p1,
+            &a1,
+            &e1,
+            &100,
+            &test_nonce(&env, 46),
+            &None,
+        );
+        assert!(blocked.is_err(), "batch must be blocked while paused");
+
+        // Register a fresh (unpaused) pause manager and point the contract at it.
+        let pm_new_id = env.register_contract(None, PauseManager);
+        let pm_new = PauseManagerClient::new(&env, &pm_new_id);
+        let new_operator = Address::generate(&env);
+        pm_new.initialize(&new_operator);
+        // New manager starts unpaused — no explicit unpause call needed.
+
+        payroll_client.set_pause_manager(&pm_new_id);
+
+        // Batch must now succeed because the new manager is not paused.
+        let (p2, a2, e2) = single_payment_batch(&env, &employee, 100);
+        let run_id = payroll_client.batch_process_payroll(
+            &p2,
+            &a2,
+            &e2,
+            &100,
+            &test_nonce(&env, 47),
+            &None,
+        );
+        assert!(
+            run_id > 0,
+            "batch must succeed after switching to an unpaused pause manager"
+        );
+    }
+
+    /// Run IDs must increment correctly across a pause/unpause cycle. A batch
+    /// executed before a pause gets run_id N; after unpause the next successful
+    /// batch must receive run_id N+1. Rejected (paused) attempts must not
+    /// consume a run_id slot.
+    #[test]
+    fn regression_run_id_not_incremented_on_paused_rejection() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee, pm_client) =
+            setup_with_pause_manager(&env);
+
+        // First successful run.
+        let (p1, a1, e1) = single_payment_batch(&env, &employee, 100);
+        let first_id =
+            payroll_client.batch_process_payroll(&p1, &a1, &e1, &100, &test_nonce(&env, 48), &None);
+
+        // Pause and attempt several batches — all must fail.
+        pm_client.pause();
+        for seed in 49u8..52 {
+            let (px, ax, ex) = single_payment_batch(&env, &employee, 100);
+            let _ = payroll_client.try_batch_process_payroll(
+                &px,
+                &ax,
+                &ex,
+                &100,
+                &test_nonce(&env, seed),
+                &None,
+            );
+        }
+
+        // Unpause and run again — must receive first_id + 1.
+        pm_client.unpause();
+        let (p2, a2, e2) = single_payment_batch(&env, &employee, 100);
+        let second_id =
+            payroll_client.batch_process_payroll(&p2, &a2, &e2, &100, &test_nonce(&env, 52), &None);
+
+        assert_eq!(
+            second_id,
+            first_id + 1,
+            "paused rejections must not consume run_id slots; expected {} but got {}",
+            first_id + 1,
+            second_id
+        );
+    }
 }
