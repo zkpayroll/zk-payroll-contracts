@@ -3,6 +3,7 @@
 use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
+use salary_commitment::SalaryCommitmentContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env,
 };
@@ -283,9 +284,11 @@ impl PaymentExecutor {
             return Err(PaymentError::AlreadyPaid);
         }
 
-        // Read on-chain commitment and company metadata from payroll_registry.
+        // Read the employee commitment from the dedicated commitment contract
+        // and company metadata from payroll_registry.
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let commitment = commitment_client.get_commitment(&employee).commitment;
         let registry = PayrollRegistryClient::new(&env, &addresses.registry);
-        let on_chain_commitment = registry.get_commitment(&company_id, &employee);
         let company: CompanyInfo = registry.get_company(&company_id);
 
         // Ensure only HR admin for this company can trigger payroll.
@@ -293,7 +296,7 @@ impl PaymentExecutor {
 
         // Construct public inputs required by issue #20:
         let mut public_inputs = soroban_sdk::Vec::new(&env);
-        public_inputs.push_back(on_chain_commitment);
+        public_inputs.push_back(commitment);
         public_inputs.push_back(Self::amount_to_public_input(&env, amount));
 
         // Validate Groth16 proof via proof_verifier contract.
@@ -424,6 +427,7 @@ mod tests {
     fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
         let registry_id = env.register_contract(None, PayrollRegistry);
+        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
         let verifier_id = env.register_contract(None, ProofVerifier);
         let token_id = env.register_contract(None, Token);
 
@@ -432,9 +436,13 @@ mod tests {
         verifier_client.init_verifier_admin(&verifier_admin);
         verifier_client.initialize_verifier(&mock_vk(env));
 
+        let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
+        let commitment_admin = Address::generate(env);
+        commitment_client.init_commitment_admin(&commitment_admin);
+
         ContractAddresses {
             registry: registry_id,
-            commitment: Address::generate(env),
+            commitment: commitment_id,
             verifier: verifier_id,
             token: token_id,
         }
@@ -493,6 +501,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -501,6 +510,7 @@ mod tests {
         let commitment = BytesN::from_array(&env, &[9u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -547,6 +557,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -555,6 +566,7 @@ mod tests {
         let commitment = BytesN::from_array(&env, &[7u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -776,6 +788,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -784,6 +797,7 @@ mod tests {
         let commitment = BytesN::from_array(&env, &[8u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -855,6 +869,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(env, &addresses.commitment);
         let token_client = TokenClient::new(env, &addresses.token);
 
         let admin = Address::generate(env);
@@ -863,6 +878,7 @@ mod tests {
         let commitment = BytesN::from_array(env, &[9u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         token_client.mint(&treasury, &10_000);
 
@@ -963,6 +979,7 @@ mod tests {
         client.initialize(&addresses);
 
         let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
         let token_client = TokenClient::new(&env, &addresses.token);
 
         let admin = Address::generate(&env);
@@ -971,6 +988,7 @@ mod tests {
         let commitment = BytesN::from_array(&env, &[9u8; 32]);
 
         let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
         registry_client.add_employee(&company_id, &employee, &commitment);
         client.create_period(&company_id);
         token_client.mint(&treasury, &10_000);

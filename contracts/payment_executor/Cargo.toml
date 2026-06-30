@@ -14,6 +14,7 @@ soroban-token-sdk = { workspace = true }
 payroll_registry = { path = "../payroll_registry" }
 proof_verifier = { path = "../proof_verifier" }
 pause_manager = { path = "../pause_manager", default-features = false }
+salary_commitment = { path = "../salary_commitment" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

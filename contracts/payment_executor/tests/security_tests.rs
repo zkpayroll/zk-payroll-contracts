@@ -2,6 +2,7 @@ use ::token::{Token, TokenClient};
 use payment_executor::{ContractAddresses, PaymentError, PaymentExecutor, PaymentExecutorClient};
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
+use salary_commitment::SalaryCommitmentContract;
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{Address, BytesN, Env, IntoVal, Vec};
 
@@ -27,6 +28,7 @@ fn setup_system<'a>(
 ) -> (
     PaymentExecutorClient<'a>,
     PayrollRegistryClient<'a>,
+    salary_commitment::SalaryCommitmentContractClient<'a>,
     TokenClient<'a>,
     u64,
     Address,
@@ -36,17 +38,20 @@ fn setup_system<'a>(
 
     let executor_id = env.register_contract(None, PaymentExecutor);
     let registry_id = env.register_contract(None, PayrollRegistry);
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
     let verifier_id = env.register_contract(None, ProofVerifier);
     let token_id = env.register_contract(None, Token);
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
+    let commitment_client =
+        salary_commitment::SalaryCommitmentContractClient::new(env, &commitment_id);
     let verifier = ProofVerifierClient::new(env, &verifier_id);
     let token = TokenClient::new(env, &token_id);
 
     let addresses = ContractAddresses {
         registry: registry_id,
-        commitment: Address::generate(env),
+        commitment: commitment_id,
         verifier: verifier_id,
         token: token_id,
     };
@@ -54,6 +59,9 @@ fn setup_system<'a>(
     executor.initialize(&addresses);
     verifier.init_verifier_admin(&Address::generate(env));
     verifier.initialize_verifier(&mock_vk(env));
+
+    let commitment_admin = Address::generate(env);
+    commitment_client.init_commitment_admin(&commitment_admin);
 
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
@@ -64,7 +72,15 @@ fn setup_system<'a>(
 
     token.mint(&treasury, &100_000);
 
-    (executor, registry, token, company_id, admin, treasury)
+    (
+        executor,
+        registry,
+        commitment_client,
+        token,
+        company_id,
+        admin,
+        treasury,
+    )
 }
 
 /// Acceptance Criteria: Proof Replay Protection (Double Spend)
@@ -74,10 +90,12 @@ fn setup_system<'a>(
 #[test]
 fn test_proof_replay_protection() {
     let env = Env::default();
-    let (executor, registry, _token, company_id, _admin, _treasury) = setup_system(&env);
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[9u8; 32]);
+    commitment_client.store_commitment(&employee, &commitment);
     registry.add_employee(&company_id, &employee, &commitment);
 
     let proof_a = BytesN::from_array(&env, &[1u8; 64]);
@@ -161,10 +179,12 @@ fn test_authorization_add_employee_fails_for_non_admin() {
 #[test]
 fn test_reentrancy_state_updates_before_external_calls() {
     let env = Env::default();
-    let (executor, registry, _token, company_id, _admin, _treasury) = setup_system(&env);
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[9u8; 32]);
+    commitment_client.store_commitment(&employee, &commitment);
     registry.add_employee(&company_id, &employee, &commitment);
 
     let proof_a = BytesN::from_array(&env, &[5u8; 64]);
