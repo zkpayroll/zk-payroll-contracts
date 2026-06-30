@@ -1,0 +1,23 @@
+[package]
+name = "zk-payroll-contracts-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary"] }
+arbitrary = { version = "1.3", features = ["derive"] }
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+payment_executor = { path = "../contracts/payment_executor", features = ["testutils"] }
+payroll_registry = { path = "../contracts/payroll_registry", features = ["testutils"] }
+proof_verifier = { path = "../contracts/proof_verifier", features = ["testutils"] }
+token = { path = "../contracts/token" }
+
+# Prevent this crate from ruining workspaces
+[workspace]
+
+[[bin]]
+name = "fuzz_proof_validation"
+path = "fuzz_targets/fuzz_proof_validation.rs"
+test = false
+doc = false
