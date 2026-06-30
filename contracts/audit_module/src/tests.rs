@@ -462,3 +462,137 @@ fn test_get_audit_log_count_increments() {
     let count_after = client.get_audit_log_count(&company_id);
     assert!(count_after > count_before);
 }
+
+// ---------------------------------------------------------------------------
+// Audit Access Revocation Verification (Issue #135)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_revoke_emits_audit_event() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    assert!(client.verify_access(&auditor));
+
+    let admin = contract_id.clone();
+    let before_count = env.events().all().len();
+
+    client.revoke_view_key(&admin, &auditor);
+
+    let after_count = env.events().all().len();
+    assert!(after_count > before_count, "revoke should emit an event");
+
+    // Verify the auditor can no longer verify access
+    assert!(!client.verify_access(&auditor));
+}
+
+#[test]
+fn test_revoke_requires_correct_admin_authorization() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    assert!(client.verify_access(&auditor));
+
+    // Wrong admin attempts revocation
+    let wrong_admin = soroban_sdk::Address::generate(&env);
+    let result = client.try_revoke_view_key(&wrong_admin, &auditor);
+
+    // Should fail with NotKeyGranter or authorization error
+    assert!(result.is_err(), "wrong admin should not be able to revoke");
+
+    // Verify access is still valid
+    assert!(client.verify_access(&auditor), "access should remain after failed revocation");
+}
+
+#[test]
+fn test_revoke_fails_for_nonexistent_key() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let admin = contract_id.clone();
+    let nonexistent_auditor = soroban_sdk::Address::generate(&env);
+
+    let result = client.try_revoke_view_key(&admin, &nonexistent_auditor);
+
+    // Should fail with KeyNotFound
+    assert!(result.is_err(), "revoke should fail for nonexistent key");
+}
+
+#[test]
+fn test_revoked_key_cannot_be_used_for_verification() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let key = client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let amount: i128 = 750_000;
+    let blinding = BytesN::from_array(&env, &[0xEE; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    // Verify access works before revocation
+    assert!(client.verify_access(&auditor));
+    let verify_before = client.try_verify_commitment_with_key(
+        &auditor,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList
+    );
+    assert!(verify_before.is_ok());
+
+    // Revoke the key
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    // Verify access is now denied
+    assert!(!client.verify_access(&auditor), "access should be denied after revocation");
+
+    // Attempt to use the key for verification (should fail)
+    let result = client.try_verify_commitment_with_view_key(
+        &auditor,
+        &key,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList,
+    );
+    assert!(result.is_err(), "verification should fail with revoked key");
+}
+
+#[test]
+fn test_revoke_idempotent_safe_on_second_attempt() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let admin = contract_id.clone();
+
+    // First revocation succeeds
+    let first_revoke = client.try_revoke_view_key(&admin, &auditor);
+    assert!(first_revoke.is_ok(), "first revocation should succeed");
+
+    // Second revocation attempt should fail with KeyNotFound
+    // (because the key no longer exists)
+    let second_revoke = client.try_revoke_view_key(&admin, &auditor);
+    assert!(
+        second_revoke.is_err(),
+        "second revocation should fail (key already removed)"
+    );
+}

@@ -156,7 +156,14 @@ impl AuditModule {
 
         env.storage()
             .persistent()
-            .remove(&DataKey::AuditorKey(auditor));
+            .remove(&DataKey::AuditorKey(auditor.clone()));
+
+        // Emit revocation event for audit trail
+        env.events().publish(
+            (Symbol::new(&env, "AuditAccessRevoked"), admin, auditor.clone()),
+            (env.ledger().timestamp(),),
+        );
+
         Ok(())
     }
 
