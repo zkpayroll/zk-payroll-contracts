@@ -33,6 +33,23 @@ pub enum ReconciliationStatus {
     Failed,
 }
 
+/// A pending payroll run that has been prepared but not yet finalized.
+/// Stores the metadata needed to execute the run without exposing salary amounts.
+///
+/// Once finalized (via `finalize_payroll_run`), this becomes a completed `PayrollRun`.
+/// If cancelled (via `cancel_payroll_run`), this is removed from storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingPayrollRun {
+    pub run_id: u64,
+    pub prepared_at: u64,
+    pub admin: Address,
+    pub total_amount: i128,
+    pub employee_count: u32,
+    pub draft_hash: BytesN<32>,
+    pub nonce: BytesN<32>,
+}
+
 /// A completed payroll run record.
 ///
 /// `draft_hash` is the SHA-256 / Poseidon hash of the off-chain payroll
@@ -78,6 +95,8 @@ pub enum DataKey {
     Addresses,
     PauseManager,
     PayrollRun(u64),
+    /// Pending payroll run awaiting finalization (issue #75).
+    PendingRun(u64),
     TreasuryOwner,
     RunCounter,
     /// Marks a run nonce as consumed. Value is the run_id that used it (#103).
@@ -328,6 +347,142 @@ impl Payroll {
     /// Returns the pending emergency withdrawal request, if any.
     pub fn get_emergency_request(e: Env) -> Option<EmergencyWithdrawalRequest> {
         e.storage().persistent().get(&DataKey::EmergencyRequest)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Payroll run cancellation (issue #75)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Prepare a pending payroll run for later finalization or cancellation.
+    ///
+    /// This function validates the batch metadata and reserves the nonce without
+    /// executing any payments. The run can later be finalized (via `finalize_payroll_run`)
+    /// or cancelled (via `cancel_payroll_run`). Only finalized runs are permanent.
+    ///
+    /// This two-step process allows operators to validate configuration before
+    /// committing treasury funds, reducing the risk of executing with incorrect
+    /// inputs.
+    pub fn prepare_payroll_run(
+        e: Env,
+        proofs: Vec<BytesN<256>>,
+        amounts: Vec<i128>,
+        employees: Vec<Address>,
+        expected_total_spend: i128,
+        nonce: BytesN<32>,
+        draft_hash: Option<BytesN<32>>,
+    ) -> u64 {
+        let count = proofs.len();
+
+        if amounts.len() != count || employees.len() != count {
+            panic!("Array length mismatch");
+        }
+
+        assert!(count <= MAX_BATCH, "Batch too large");
+
+        // Reject duplicate run nonces before any other work.
+        let nonce_key = DataKey::RunNonce(nonce.clone());
+        if e.storage().persistent().has(&nonce_key) {
+            panic!("Duplicate run nonce: this payroll batch has already been submitted");
+        }
+
+        // If a draft hash is supplied, verify a pre-commitment exists.
+        let resolved_draft_hash: BytesN<32> = if let Some(ref dh) = draft_hash {
+            let commit_key = DataKey::DraftCommitment(dh.clone());
+            if !e.storage().persistent().has(&commit_key) {
+                panic!("Draft hash not pre-committed: call commit_draft first");
+            }
+            dh.clone()
+        } else {
+            BytesN::from_array(&e, &[0u8; 32])
+        };
+
+        let mut total: i128 = 0;
+        for i in 0..count {
+            total += amounts.get(i).unwrap();
+        }
+        if total != expected_total_spend {
+            panic!(
+                "Expected spend mismatch: authorised {} but batch totals {}",
+                expected_total_spend, total
+            );
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        addrs.admin.require_auth();
+
+        let run_id = Self::derive_run_id(&e);
+
+        // Mark nonce as consumed (store run_id for auditability).
+        e.storage().persistent().set(&nonce_key, &run_id);
+
+        // Store the pending run
+        let pending_run = PendingPayrollRun {
+            run_id,
+            prepared_at: e.ledger().timestamp(),
+            admin: addrs.admin.clone(),
+            total_amount: expected_total_spend,
+            employee_count: count,
+            draft_hash: resolved_draft_hash,
+            nonce: nonce.clone(),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::PendingRun(run_id), &pending_run);
+
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "run_prepared")),
+            (run_id, expected_total_spend),
+        );
+
+        run_id
+    }
+
+    /// Get a pending payroll run, if it exists.
+    pub fn get_pending_run(e: Env, run_id: u64) -> Option<PendingPayrollRun> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PendingRun(run_id))
+    }
+
+    /// Cancel a pending payroll run without executing any payments.
+    ///
+    /// Only the admin may cancel. The cancellation frees the nonce for reuse
+    /// (actually, the nonce is marked as consumed, so it cannot be reused).
+    /// No funds are transferred; this is a pure cleanup operation.
+    ///
+    /// Cancellation emits an event for audit trails. Finalized runs cannot be
+    /// cancelled retroactively.
+    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let pending_key = DataKey::PendingRun(run_id);
+        let pending_run: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .expect("Pending run not found");
+
+        // Remove the pending run from storage
+        e.storage().persistent().remove(&pending_key);
+
+        // Emit cancellation event
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "run_cancelled")),
+            (run_id, pending_run.total_amount),
+        );
     }
 
     pub fn batch_process_payroll(
@@ -1230,5 +1385,102 @@ mod tests {
             &999u64,
             &ReconciliationStatus::Reconciled,
         );
+    }
+
+    // ── Issue #75: payroll cancellation ──────────────────────────────────────
+
+    #[test]
+    fn test_prepare_payroll_run_creates_pending_run() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 40),
+            &None,
+        );
+        assert!(run_id > 0);
+
+        let pending = payroll_client
+            .get_pending_run(&run_id)
+            .expect("Pending run should exist");
+        assert_eq!(pending.run_id, run_id);
+        assert_eq!(pending.total_amount, 1000);
+        assert_eq!(pending.employee_count, 1);
+    }
+
+    #[test]
+    fn test_cancel_pending_payroll_run() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 41),
+            &None,
+        );
+
+        // Cancel the pending run
+        payroll_client.cancel_payroll_run(&admin, &run_id);
+
+        // Verify it's no longer pending
+        assert!(payroll_client.get_pending_run(&run_id).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_cancel_by_non_admin_fails() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 42),
+            &None,
+        );
+
+        let non_admin = Address::generate(&env);
+        payroll_client.cancel_payroll_run(&non_admin, &run_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Pending run not found")]
+    fn test_cancel_non_existent_run_fails() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        payroll_client.cancel_payroll_run(&admin, &999u64);
+    }
+
+    #[test]
+    fn test_prepare_rejects_duplicate_nonce() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let nonce = test_nonce(&env, 43);
+        let (p1, a1, e1) = single_payment_batch(&env, &employee, 1000);
+        payroll_client.prepare_payroll_run(&p1, &a1, &e1, &1000, &nonce, &None);
+
+        // Second call with same nonce must fail
+        let (p2, a2, e2) = single_payment_batch(&env, &employee, 1000);
+        let result = payroll_client.try_prepare_payroll_run(&p2, &a2, &e2, &1000, &nonce, &None);
+        assert!(result.is_err());
     }
 }
