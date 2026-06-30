@@ -1,0 +1,34 @@
+name: WASM size regression alert
+
+on:
+  pull_request:
+    paths:
+      - "contracts/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-wasm-size.py"
+      - "scripts/wasm-size-thresholds.json"
+      - ".github/workflows/wasm-size-regression.yml"
+  push:
+    branches: [main]
+
+jobs:
+  wasm-size:
+    name: Check contract WASM sizes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build release WASM artifacts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Check WASM size thresholds
+        run: |
+          python3 scripts/check-wasm-size.py wasm-size-summary.md
+          cat wasm-size-summary.md >> "$GITHUB_STEP_SUMMARY"
