@@ -377,11 +377,11 @@ impl PaymentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::token::{Token, TokenClient};
     use payroll_registry::PayrollRegistry;
     use proof_verifier::{ProofVerifier, VerificationKey};
     use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::{Env, Symbol, TryIntoVal};
-    use ::token::{Token, TokenClient};
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
@@ -489,8 +489,8 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 1_000);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 1);
-        let event = events.get(0).unwrap();
+        assert_eq!(events.len(), 4);
+        let event = events.get(3).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
@@ -773,8 +773,8 @@ mod tests {
         assert_eq!(client.get_total_paid(&company_id), 2_500);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 1);
-        let event = events.get(0).unwrap();
+        assert_eq!(events.len(), 4);
+        let event = events.get(3).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));

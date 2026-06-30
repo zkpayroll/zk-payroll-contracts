@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events};
-use soroban_sdk::{Env, IntoVal, Symbol};
+use soroban_sdk::{Env, IntoVal, Symbol, TryIntoVal};
 
 fn setup() -> (Env, Address) {
     let env = Env::default();
@@ -250,11 +250,10 @@ fn test_register_company_emits_event() {
 
     let event = env.events().all().get(after - 1).unwrap();
     assert_eq!(event.1.len(), 2);
-    assert_eq!(
-        event.1.get(0).unwrap().unwrap(),
-        Symbol::new(&env, "CompanyRegistered").into_val(&env)
-    );
-    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "CompanyRegistered"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
 }
 
 #[test]
@@ -274,12 +273,12 @@ fn test_add_employee_emits_event() {
 
     let event = env.events().all().get(after - 1).unwrap();
     assert_eq!(event.1.len(), 3);
-    assert_eq!(
-        event.1.get(0).unwrap().unwrap(),
-        Symbol::new(&env, "EmployeeAdded").into_val(&env)
-    );
-    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
-    assert_eq!(event.1.get(2).unwrap().unwrap(), employee.into_val(&env));
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "EmployeeAdded"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(emp_addr, employee);
 }
 
 #[test]
@@ -300,12 +299,12 @@ fn test_remove_employee_emits_event() {
 
     let event = env.events().all().get(after - 1).unwrap();
     assert_eq!(event.1.len(), 3);
-    assert_eq!(
-        event.1.get(0).unwrap().unwrap(),
-        Symbol::new(&env, "EmployeeRemoved").into_val(&env)
-    );
-    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
-    assert_eq!(event.1.get(2).unwrap().unwrap(), employee.into_val(&env));
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "EmployeeRemoved"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(emp_addr, employee);
 }
 
 #[test]
@@ -327,10 +326,10 @@ fn test_update_commitment_emits_event() {
 
     let event = env.events().all().get(after - 1).unwrap();
     assert_eq!(event.1.len(), 3);
-    assert_eq!(
-        event.1.get(0).unwrap().unwrap(),
-        Symbol::new(&env, "CommitmentUpdated").into_val(&env)
-    );
-    assert_eq!(event.1.get(1).unwrap().unwrap(), company_id.into_val(&env));
-    assert_eq!(event.1.get(2).unwrap().unwrap(), employee.into_val(&env));
+    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(sym0, Symbol::new(&env, "CommitmentUpdated"));
+    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(comp_id, company_id);
+    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(emp_addr, employee);
 }

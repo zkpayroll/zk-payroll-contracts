@@ -362,7 +362,7 @@ impl SalaryCommitmentContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
-    use soroban_sdk::{Env, Symbol};
+    use soroban_sdk::{Env, Symbol, TryIntoVal};
 
     fn setup_with_admin() -> (Env, soroban_sdk::Address, Address) {
         let env = Env::default();
@@ -392,11 +392,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         let event = events.get(0).unwrap();
         assert_eq!(event.1.len(), 2);
-        assert_eq!(
-            event.1.get(0).unwrap().unwrap(),
-            Symbol::new(&env, "CommitmentUpdated").into_val(&env)
-        );
-        assert_eq!(event.1.get(1).unwrap().unwrap(), employee.into_val(&env));
+        let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "CommitmentUpdated"));
+        let addr0: Address = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(addr0, employee);
     }
 
     #[test]

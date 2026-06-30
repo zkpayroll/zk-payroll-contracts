@@ -21,16 +21,15 @@ mod proof_helper;
 ///      unregistered employees cannot be paid.
 #[cfg(test)]
 mod e2e {
+    use ::token::{Token, TokenClient};
     use payroll::{Payroll, PayrollClient};
     use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        TryIntoVal,
-        Address, BytesN, Env, Symbol, Vec,
+        Address, BytesN, Env, Symbol, TryIntoVal, Vec,
     };
-    use ::token::{Token, TokenClient};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -72,7 +71,7 @@ mod e2e {
         commitment_client.compute_commitment(&5000u64, &blinding_factor)
     }
 
-// ── Helper: register & initialise all five contracts ─────────────────────
+    // ── Helper: register & initialise all five contracts ─────────────────────
     struct TestContext<'a> {
         env: Env,
         admin: Address,
@@ -231,9 +230,12 @@ mod e2e {
         let sym2: Symbol = val2.try_into_val(&env.clone()).unwrap();
         assert_eq!(sym2, Symbol::new(env, "EmployeeAdded"));
         let topics3 = events.get(3).unwrap().1;
-        let val3 = topics3.get(0).unwrap();
-        let sym3: Symbol = val3.try_into_val(&env.clone()).unwrap();
-        assert_eq!(sym3, Symbol::new(env, "payment_executed"));
+        let val3_0 = topics3.get(0).unwrap();
+        let sym3a: Symbol = val3_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3a, Symbol::new(env, "payroll"));
+        let val3_1 = topics3.get(1).unwrap();
+        let sym3b: Symbol = val3_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3b, Symbol::new(env, "payment_executed"));
     }
 
     /// Paying an employee who has no commitment on-chain must panic.

@@ -125,10 +125,10 @@ impl AuditModule {
 
         env.storage()
             .persistent()
-            .set(&DataKey::AuditorKey(auditor), &record);
+            .set(&DataKey::AuditorKey(auditor.clone()), &record);
 
         env.events().publish(
-            (Symbol::new(&env, "ViewKeyGenerated"), auditor.clone()),
+            (Symbol::new(&env, "ViewKeyGenerated"), auditor),
             (key_bytes.clone(), expiration_ledger),
         );
         // topics : ("ViewKeyGenerated", auditor)
@@ -163,10 +163,10 @@ impl AuditModule {
 
         env.storage()
             .persistent()
-            .remove(&DataKey::AuditorKey(auditor));
+            .remove(&DataKey::AuditorKey(auditor.clone()));
 
         env.events()
-            .publish((Symbol::new(&env, "ViewKeyRevoked"), auditor.clone()), ());
+            .publish((Symbol::new(&env, "ViewKeyRevoked"), auditor), ());
         // topics : ("ViewKeyRevoked", auditor)
         // data   : ()
 
