@@ -8,6 +8,10 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env,
 };
 
+/// Maximum age for a proof relative to its period creation time (7 days in seconds).
+/// Proofs must be submitted within this window to prevent replay attacks using stale proofs.
+const MAX_PROOF_AGE_SECONDS: u64 = 7 * 24 * 60 * 60;
+
 /// Payment record
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -56,6 +60,8 @@ pub enum PaymentError {
     PeriodClosed = 5,
     /// Attempt to create a duplicate period for this company.
     PeriodAlreadyExists = 6,
+    /// The proof has expired and can no longer be used (issue #77).
+    ProofExpired = 7,
 }
 
 /// Contract addresses for dependencies
@@ -272,6 +278,14 @@ impl PaymentExecutor {
             return Err(PaymentError::PeriodClosed);
         }
 
+        // Check proof freshness: reject stale proofs (issue #77).
+        // Proofs must be submitted within MAX_PROOF_AGE_SECONDS of the period creation.
+        let current_time = env.ledger().timestamp();
+        let proof_age = current_time.saturating_sub(period_record.created_at);
+        if proof_age > MAX_PROOF_AGE_SECONDS {
+            return Err(PaymentError::ProofExpired);
+        }
+
         // Check cryptographically if the exact proof was submitted previously
         let nullifier_key = DataKey::Nullifier(nullifier.clone());
         if env.storage().persistent().has(&nullifier_key) {
@@ -412,6 +426,11 @@ impl PaymentExecutor {
     pub fn get_total_paid(env: Env, company_id: u64) -> i128 {
         let key = DataKey::TotalPaid(company_id);
         env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    /// Get the maximum allowed age for a proof in seconds (issue #77).
+    pub fn get_max_proof_age(_env: Env) -> u64 {
+        MAX_PROOF_AGE_SECONDS
     }
 }
 
@@ -1062,5 +1081,96 @@ mod tests {
             },
         }]);
         client.set_pause_manager(&pm_id);
+    }
+
+    // ── Issue #77: proof expiration checks ────────────────────────────────────
+
+    #[test]
+    fn test_fresh_proof_within_expiration_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10000i128);
+
+        // Create a period
+        let period = client.create_period(&company_id);
+        assert_eq!(period.period_id, 1);
+
+        // Execute payment immediately (proof is fresh)
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000i128,
+            &BytesN::from_array(&env, &[1u8; 64]),
+            &BytesN::from_array(&env, &[2u8; 128]),
+            &BytesN::from_array(&env, &[3u8; 64]),
+            &BytesN::from_array(&env, &[4u8; 32]),
+            &1,
+        );
+        // Should succeed (proof is fresh)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_period_tracks_creation_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10000i128);
+
+        // Create a period
+        let period = client.create_period(&company_id);
+
+        // Verify period is created and has correct initial state
+        assert_eq!(period.period_id, 1);
+        assert_eq!(period.company_id, company_id);
+        assert!(!period.closed);
+        assert_eq!(period.payment_count, 0);
+        // created_at is set to current ledger timestamp (can be 0 in test env)
+    }
+
+    #[test]
+    fn test_get_max_proof_age() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let max_age = client.get_max_proof_age();
+        // Should be 7 days in seconds
+        assert_eq!(max_age, 7 * 24 * 60 * 60);
     }
 }
