@@ -121,11 +121,13 @@ fn test_revoke_removes_key() {
     assert_eq!(after, before + 1);
 
     let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 2);
+    assert_eq!(event.1.len(), 3);
     let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
-    assert_eq!(sym0, Symbol::new(&env, "ViewKeyRevoked"));
+    assert_eq!(sym0, Symbol::new(&env, "AuditAccessRevoked"));
     let addr0: Address = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
-    assert_eq!(addr0, auditor);
+    assert_eq!(addr0, admin);
+    let addr1: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    assert_eq!(addr1, auditor);
 
     assert!(!client.verify_access(&auditor));
 

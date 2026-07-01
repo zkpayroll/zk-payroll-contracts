@@ -194,10 +194,13 @@ impl AuditModule {
             .persistent()
             .remove(&DataKey::AuditorKey(auditor.clone()));
 
-        env.events()
-            .publish((Symbol::new(&env, "ViewKeyRevoked"), auditor), ());
-        // topics : ("ViewKeyRevoked", auditor)
-        // data   : ()
+        // Emit revocation event for audit trail
+        env.events().publish(
+            (Symbol::new(&env, "AuditAccessRevoked"), admin, auditor.clone()),
+            (env.ledger().timestamp(),),
+        );
+        // topics : ("AuditAccessRevoked", admin, auditor)
+        // data   : (timestamp,)
 
         Ok(())
     }
