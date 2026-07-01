@@ -88,6 +88,35 @@ pub struct AuditQueryResult {
     pub entries: Vec<AuditLogEntry>,
 }
 
+// ── Issue #93: company-level audit metadata export ───────────────────────────
+
+/// Exportable audit metadata summary for external compliance review.
+///
+/// Privacy boundary: salary values are **never** included. Only metadata
+/// needed for downstream compliance tooling is present, so this type can
+/// be shared with external auditors without leaking sensitive payroll data.
+///
+/// Fields:
+/// - `company_id`               — identifier for the audited company.
+/// - `period_start` / `_end`   — time window of the export.
+/// - `total_audit_entries`      — total log entries in the period.
+/// - `verification_pass_count`  — entries where `matched == true`.
+/// - `verification_fail_count`  — entries where `matched == false`.
+/// - `exported_at`              — ledger timestamp of the export call.
+/// - `exported_by`              — auditor address that triggered the export.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AuditMetadataSummary {
+    pub company_id: Symbol,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub total_audit_entries: u32,
+    pub verification_pass_count: u32,
+    pub verification_fail_count: u32,
+    pub exported_at: u64,
+    pub exported_by: Address,
+}
+
 /// Storage key namespace.
 #[contracttype]
 pub enum DataKey {
@@ -418,6 +447,59 @@ impl AuditModule {
             .persistent()
             .get(&DataKey::AuditLogCounter(company_id))
             .unwrap_or(0)
+    }
+
+    // ── Issue #93: audit metadata export ─────────────────────────────────────
+
+    /// Export a compliance-ready audit metadata summary for a company and period.
+    ///
+    /// Requires a valid (non-expired) view key for the requesting auditor.
+    /// Salary values are never included in the returned summary — only
+    /// verification counts and metadata needed for external compliance tooling.
+    pub fn export_audit_summary(
+        env: Env,
+        auditor: Address,
+        company_id: Symbol,
+        period_start: u64,
+        period_end: u64,
+    ) -> Result<AuditMetadataSummary, AuditError> {
+        Self::authorize_auditor(&env, auditor.clone())?;
+
+        let period_result =
+            Self::query_by_period(env.clone(), company_id.clone(), period_start, period_end);
+
+        let mut pass_count: u32 = 0;
+        let mut fail_count: u32 = 0;
+        let total: u32 = period_result.entries.len();
+
+        for entry in period_result.entries.iter() {
+            if entry.matched {
+                pass_count += 1;
+            } else {
+                fail_count += 1;
+            }
+        }
+
+        let summary = AuditMetadataSummary {
+            company_id: company_id.clone(),
+            period_start,
+            period_end,
+            total_audit_entries: total,
+            verification_pass_count: pass_count,
+            verification_fail_count: fail_count,
+            exported_at: env.ledger().timestamp(),
+            exported_by: auditor.clone(),
+        };
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "AuditSummaryExported"),
+                auditor,
+            ),
+            (company_id, period_start, period_end, total),
+        );
+
+        Ok(summary)
     }
 
     // -----------------------------------------------------------------------

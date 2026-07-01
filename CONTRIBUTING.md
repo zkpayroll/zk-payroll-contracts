@@ -28,6 +28,7 @@ verifying keys) are load-bearing — please follow this guide carefully.
 |-------|-------------|
 | [Soroban Build Troubleshooting](docs/troubleshooting-soroban-build.md) | Common local build, optimize, and CLI failures with actionable fixes |
 | [Incident Response Playbook](docs/incident-response-playbook.md) | How to respond when audit workflows fail or disclosure is handled incorrectly |
+| [WASM Size Regression Thresholds](docs/testing/wasm-size-regression-thresholds.md) | Size alert thresholds, CI behavior, and contributor investigation steps |
 
 ---
 

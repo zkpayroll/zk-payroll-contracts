@@ -232,6 +232,10 @@ fn test_get_commitment_returns_employee_commitment() {
     assert_eq!(got, commitment);
 }
 
+// ── Issue #90: employee eligibility ──────────────────────────────────────────
+
+#[test]
+fn test_add_employee_sets_active_status() {
 // ---------------------------------------------------------------------------
 // Event emission tests
 // ---------------------------------------------------------------------------
@@ -242,6 +246,21 @@ fn test_register_company_emits_event() {
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Active,
+    );
+    assert!(client.is_eligible(&company_id, &employee));
+}
+
+#[test]
+fn test_set_employee_status_inactive_makes_ineligible() {
 
     let before = env.events().all().len();
     let company_id = client.register_company(&admin, &treasury);
@@ -263,6 +282,22 @@ fn test_add_employee_emits_event() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[2u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Inactive,
+    );
+    assert!(!client.is_eligible(&company_id, &employee));
+}
+
+#[test]
+fn test_set_employee_status_incomplete_makes_ineligible() {
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
 
     let company_id = client.register_company(&admin, &treasury);
@@ -288,6 +323,31 @@ fn test_remove_employee_emits_event() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[3u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Incomplete);
+
+    assert!(!client.is_eligible(&company_id, &employee));
+}
+
+#[test]
+fn test_unregistered_employee_is_not_eligible() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let stranger = Address::generate(&env);
+
+    assert!(!client.is_eligible(&company_id, &stranger));
+}
+
+#[test]
+fn test_reactivating_inactive_employee_restores_eligibility() {
     let commitment = BytesN::from_array(&env, &[2u8; 32]);
 
     let company_id = client.register_company(&admin, &treasury);
@@ -314,6 +374,115 @@ fn test_update_commitment_emits_event() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[4u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    assert!(!client.is_eligible(&company_id, &employee));
+
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
+    assert!(client.is_eligible(&company_id, &employee));
+}
+
+// ── Issue #91: company admin/treasury rotation ────────────────────────────────
+
+#[test]
+fn test_admin_rotation_full_flow() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin_rotation(&company_id, &admin, &new_admin);
+    client.accept_admin_rotation(&company_id, &new_admin);
+
+    let info = client.get_company(&company_id);
+    assert_eq!(info.admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not the company admin")]
+fn test_propose_admin_rotation_rejects_non_admin() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let attacker = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin_rotation(&company_id, &attacker, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not the proposed admin")]
+fn test_accept_admin_rotation_rejects_wrong_address() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+
+    client.propose_admin_rotation(&company_id, &admin, &new_admin);
+    client.accept_admin_rotation(&company_id, &impostor);
+}
+
+#[test]
+fn test_cancel_admin_rotation_clears_proposal() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin_rotation(&company_id, &admin, &new_admin);
+    client.cancel_admin_rotation(&company_id, &admin);
+
+    // Admin should remain unchanged
+    let info = client.get_company(&company_id);
+    assert_eq!(info.admin, admin);
+}
+
+#[test]
+fn test_treasury_rotation_full_flow() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_treasury = Address::generate(&env);
+
+    client.propose_treasury_rotation(&company_id, &admin, &new_treasury);
+    client.accept_treasury_rotation(&company_id, &new_treasury);
+
+    let info = client.get_company(&company_id);
+    assert_eq!(info.treasury, new_treasury);
+}
+
+#[test]
+#[should_panic(expected = "A pending admin rotation already exists for this company")]
+fn test_duplicate_admin_rotation_proposal_rejected() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin_rotation(&company_id, &admin, &new_admin);
+    client.propose_admin_rotation(&company_id, &admin, &new_admin);
     let old_commitment = BytesN::from_array(&env, &[1u8; 32]);
     let new_commitment = BytesN::from_array(&env, &[9u8; 32]);
 

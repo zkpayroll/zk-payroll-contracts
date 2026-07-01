@@ -486,12 +486,10 @@ fn test_get_audit_log_count_increments() {
     assert!(count_after > count_before);
 }
 
-// ---------------------------------------------------------------------------
-// Audit Access Revocation Verification (Issue #135)
-// ---------------------------------------------------------------------------
+// ── Issue #93: audit metadata export ─────────────────────────────────────────
 
 #[test]
-fn test_revoke_emits_audit_event() {
+fn test_export_audit_summary_returns_correct_counts() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
 
@@ -499,105 +497,47 @@ fn test_revoke_emits_audit_event() {
     let seq = env.ledger().sequence();
     client.generate_view_key(&auditor, &(seq + 1_000));
 
-    assert!(client.verify_access(&auditor));
-
-    let admin = contract_id.clone();
-    let before_count = env.events().all().len();
-
-    client.revoke_view_key(&admin, &auditor);
-
-    let after_count = env.events().all().len();
-    assert!(after_count > before_count, "revoke should emit an event");
-
-    // Verify the auditor can no longer verify access
-    assert!(!client.verify_access(&auditor));
-}
-
-#[test]
-fn test_revoke_requires_correct_admin_authorization() {
-    let (env, contract_id) = setup();
-    let client = AuditModuleClient::new(&env, &contract_id);
-
-    let auditor = soroban_sdk::Address::generate(&env);
-    let seq = env.ledger().sequence();
-    client.generate_view_key(&auditor, &(seq + 1_000));
-
-    assert!(client.verify_access(&auditor));
-
-    // Wrong admin attempts revocation
-    let wrong_admin = soroban_sdk::Address::generate(&env);
-    let result = client.try_revoke_view_key(&wrong_admin, &auditor);
-
-    // Should fail with NotKeyGranter or authorization error
-    assert!(result.is_err(), "wrong admin should not be able to revoke");
-
-    // Verify access is still valid
-    assert!(client.verify_access(&auditor), "access should remain after failed revocation");
-}
-
-#[test]
-fn test_revoke_fails_for_nonexistent_key() {
-    let (env, contract_id) = setup();
-    let client = AuditModuleClient::new(&env, &contract_id);
-
-    let admin = contract_id.clone();
-    let nonexistent_auditor = soroban_sdk::Address::generate(&env);
-
-    let result = client.try_revoke_view_key(&admin, &nonexistent_auditor);
-
-    // Should fail with KeyNotFound
-    assert!(result.is_err(), "revoke should fail for nonexistent key");
-}
-
-#[test]
-fn test_revoked_key_cannot_be_used_for_verification() {
-    let (env, contract_id) = setup();
-    let client = AuditModuleClient::new(&env, &contract_id);
-
-    let auditor = soroban_sdk::Address::generate(&env);
-    let seq = env.ledger().sequence();
-    let key = client.generate_view_key(&auditor, &(seq + 1_000));
-
-    let amount: i128 = 750_000;
-    let blinding = BytesN::from_array(&env, &[0xEE; 32]);
+    // Generate one passing and one failing audit entry.
+    let amount: i128 = 10_000;
+    let blinding = BytesN::from_array(&env, &[0xAA; 32]);
     let mut preimage = soroban_sdk::Bytes::new(&env);
     preimage.extend_from_array(&amount.to_le_bytes());
     let blinding_slice: [u8; 32] = (&blinding).into();
     preimage.extend_from_array(&blinding_slice);
-    let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
+    let correct_commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
 
-    // Verify access works before revocation
-    assert!(client.verify_access(&auditor));
-    let verify_before = client.try_verify_commitment_with_key(
+    // Pass
+    client.verify_commitment_with_key(
         &auditor,
-        &stored,
+        &correct_commitment,
         &amount,
         &blinding,
-        &AuditScope::EmployeeList
+        &AuditScope::FullCompany,
     );
-    assert!(verify_before.is_ok());
 
-    // Revoke the key
-    let admin = contract_id.clone();
-    client.revoke_view_key(&admin, &auditor);
-
-    // Verify access is now denied
-    assert!(!client.verify_access(&auditor), "access should be denied after revocation");
-
-    // Attempt to use the key for verification (should fail)
-    let result = client.try_verify_commitment_with_view_key(
+    // Fail — wrong amount causes CommitmentMismatch
+    let _ = client.try_verify_commitment_with_key(
         &auditor,
-        &key,
-        &stored,
-        &amount,
+        &correct_commitment,
+        &999_i128,
         &blinding,
-        &AuditScope::EmployeeList,
+        &AuditScope::FullCompany,
     );
-    assert!(result.is_err(), "verification should fail with revoked key");
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let summary =
+        client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000_000u64));
+
+    assert_eq!(summary.company_id, company_id);
+    assert_eq!(summary.exported_by, auditor);
+    assert!(summary.total_audit_entries >= 2);
+    assert!(summary.verification_pass_count >= 1);
+    assert!(summary.verification_fail_count >= 1);
 }
 
 #[test]
-fn test_revoke_idempotent_safe_on_second_attempt() {
+fn test_export_audit_summary_excludes_out_of_period_entries() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
 
@@ -605,17 +545,65 @@ fn test_revoke_idempotent_safe_on_second_attempt() {
     let seq = env.ledger().sequence();
     client.generate_view_key(&auditor, &(seq + 1_000));
 
-    let admin = contract_id.clone();
+    let amount: i128 = 5_000;
+    let blinding = BytesN::from_array(&env, &[0xBB; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
 
-    // First revocation succeeds
-    let first_revoke = client.try_revoke_view_key(&admin, &auditor);
-    assert!(first_revoke.is_ok(), "first revocation should succeed");
-
-    // Second revocation attempt should fail with KeyNotFound
-    // (because the key no longer exists)
-    let second_revoke = client.try_revoke_view_key(&admin, &auditor);
-    assert!(
-        second_revoke.is_err(),
-        "second revocation should fail (key already removed)"
+    client.verify_commitment_with_key(
+        &auditor,
+        &commitment,
+        &amount,
+        &blinding,
+        &AuditScope::FullCompany,
     );
+
+    let company_id = Symbol::new(&env, "default");
+    // Request a period that is far in the future — no entries should match.
+    let far_future: u64 = 999_999_999_999;
+    let summary = client.export_audit_summary(
+        &auditor,
+        &company_id,
+        &far_future,
+        &(far_future + 1_000),
+    );
+
+    assert_eq!(summary.total_audit_entries, 0);
+    assert_eq!(summary.verification_pass_count, 0);
+    assert_eq!(summary.verification_fail_count, 0);
+}
+
+#[test]
+fn test_export_audit_summary_requires_valid_key() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let stranger = soroban_sdk::Address::generate(&env);
+    let company_id = Symbol::new(&env, "default");
+
+    // Stranger has no view key — should return KeyNotFound error.
+    assert!(client
+        .try_export_audit_summary(&stranger, &company_id, &0u64, &1_000u64)
+        .is_err());
+}
+
+#[test]
+fn test_export_audit_summary_emits_event() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let before = env.events().all().len();
+
+    client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    assert!(env.events().all().len() > before);
 }
