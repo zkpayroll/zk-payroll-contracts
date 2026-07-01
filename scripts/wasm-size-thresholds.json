@@ -1,0 +1,15 @@
+{
+  "max_bytes": 65536,
+  "warning_growth_percent": 5,
+  "failure_growth_percent": 10,
+  "artifacts": {
+    "audit_module.wasm": 65536,
+    "payment_executor.wasm": 65536,
+    "payroll.wasm": 65536,
+    "payroll_registry.wasm": 65536,
+    "pause_manager.wasm": 65536,
+    "proof_verifier.wasm": 65536,
+    "salary_commitment.wasm": 65536,
+    "token.wasm": 65536
+  }
+}

@@ -30,3 +30,7 @@ This document tracks the minimum requirements, blockers, and optional improvemen
 - [ ] **Batch Payment Optimization**: Implement bulk salary commitment processing to reduce gas. (See `feat/salary-commitment-batch`)
 - [ ] **Multi-currency Support**: Allow payroll in different Stellar assets (e.g., USDC, XLM). (Issue #XX)
 - [ ] **Indexer Reconciliation**: Support off-chain indexer state reconciliation. (Issue #11)
+## Production-like environment cutover
+
+Before moving beyond testnet-style workflows, use the [production-like environment cutover checklist](ops/production-cutover-checklist.md) to coordinate contract, SDK, dashboard, monitoring, rollback, and communication readiness.
+
