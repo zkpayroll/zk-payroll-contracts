@@ -25,15 +25,15 @@ mod proof_helper;
 ///      unregistered employees cannot be paid.
 #[cfg(test)]
 mod e2e {
+    use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use payroll::{Payroll, PayrollClient};
     use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
-    use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+    use token::{Token, TokenClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
-        Address, BytesN, Env, Vec,
+        Address, BytesN, Env, Symbol, TryIntoVal, Vec,
     };
-    use token::{Token, TokenClient};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -61,6 +61,13 @@ mod e2e {
         BytesN::from_array(env, &[0u8; 256])
     }
 
+    /// Generates a unique 32-byte nonce from a counter seed for tests.
+    fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
+        let mut arr = [0u8; 32];
+        arr[0] = seed;
+        BytesN::from_array(env, &arr)
+    }
+
     /// Compute the salary commitment used across tests.
     ///
     /// In production this will use the Poseidon host function (CAP-0075).
@@ -76,7 +83,6 @@ mod e2e {
     }
 
     // ── Helper: register & initialise all five contracts ─────────────────────
-
     struct TestContext<'a> {
         env: Env,
         admin: Address,
@@ -96,6 +102,7 @@ mod e2e {
         // ── Register contracts ───────────────────────────────────────────────
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
+        let treasury_owner = Address::generate(&env);
         let alice = Address::generate(&env);
 
         let verifier_id = env.register_contract(None, ProofVerifier);
@@ -115,7 +122,14 @@ mod e2e {
 
         // ── Initialise payroll executor ───────────────────────────────────────
         let payroll_client = PayrollClient::new(&env, &payroll_id);
-        payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &treasury);
+        payroll_client.initialize(
+            &admin,
+            &token_id,
+            &verifier_id,
+            &commitment_id,
+            &treasury,
+            &treasury_owner,
+        );
 
         let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client_init.set_payroll_operator(&payroll_id);
@@ -183,8 +197,14 @@ mod e2e {
 
         // Execute batch payroll: verifier checks proof, commitment is retrieved,
         // nullifier is recorded, and the token transfer is executed.
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &payment_amount);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &payment_amount,
+            &test_nonce(env, 1),
+            &None,
+        );
 
         // ── ASSERTIONS ────────────────────────────────────────────────────────
 
@@ -209,15 +229,46 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. Exactly two events must have been emitted across the full flow:
-        //      - `CommitmentUpdated` from salary_commitment.store_commitment (onboarding)
-        //      - `payment_executed`  from payroll.batch_process_payroll    (execution)
+        // 4. Events must have been emitted across the full flow:
+        //      - `CompanyRegistered`  from payroll_registry.register_company (setup)
+        //      - `CommitmentUpdated`  from salary_commitment.store_commitment (onboarding)
+        //      - `EmployeeAdded`      from payroll_registry.add_employee    (onboarding)
+        //      - `payment_executed`   from payroll.batch_process_payroll     (execution)
+        //      - `run_executed`       from payroll.batch_process_payroll     (execution)
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            2,
-            "Expected 2 events: CommitmentUpdated (onboarding) + payment_executed (execution)"
+            5,
+            "Expected 5 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + payment_executed + run_executed"
         );
+
+        // Event tuple is (contract, topics, data) - access topics via .1
+        let topics0 = events.get(0).unwrap().1;
+        let val0 = topics0.get(0).unwrap();
+        let sym0: Symbol = val0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(env, "CompanyRegistered"));
+        let topics1 = events.get(1).unwrap().1;
+        let val1 = topics1.get(0).unwrap();
+        let sym1: Symbol = val1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym1, Symbol::new(env, "CommitmentUpdated"));
+        let topics2 = events.get(2).unwrap().1;
+        let val2 = topics2.get(0).unwrap();
+        let sym2: Symbol = val2.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym2, Symbol::new(env, "EmployeeAdded"));
+        let topics3 = events.get(3).unwrap().1;
+        let val3_0 = topics3.get(0).unwrap();
+        let sym3a: Symbol = val3_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3a, Symbol::new(env, "payroll"));
+        let val3_1 = topics3.get(1).unwrap();
+        let sym3b: Symbol = val3_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym3b, Symbol::new(env, "payment_executed"));
+        let topics4 = events.get(4).unwrap().1;
+        let val4_0 = topics4.get(0).unwrap();
+        let sym4a: Symbol = val4_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym4a, Symbol::new(env, "payroll"));
+        let val4_1 = topics4.get(1).unwrap();
+        let sym4b: Symbol = val4_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym4b, Symbol::new(env, "run_executed"));
     }
 
     /// Paying an employee who has no commitment on-chain must panic.
@@ -240,8 +291,14 @@ mod e2e {
         let mut employees = Vec::new(env);
         employees.push_back(ctx.alice.clone());
 
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &5_000i128,
+            &test_nonce(env, 2),
+            &None,
+        );
     }
 
     /// Running payroll twice for the same employee reuses the nullifier and must panic.
@@ -272,13 +329,25 @@ mod e2e {
 
         // First payroll run succeeds.
         let (proofs, amounts, employees) = make_batch(env, &ctx.alice);
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &5_000i128,
+            &test_nonce(env, 3),
+            &None,
+        );
 
         // Second payroll run with the same nullifier (batch index 0) must panic.
         let (proofs2, amounts2, employees2) = make_batch(env, &ctx.alice);
-        ctx.payroll_client
-            .batch_process_payroll(&proofs2, &amounts2, &employees2, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs2,
+            &amounts2,
+            &employees2,
+            &5_000i128,
+            &test_nonce(env, 4),
+            &None,
+        );
     }
 
     /// Array length mismatches must be rejected immediately.
@@ -300,8 +369,14 @@ mod e2e {
         employees.push_back(ctx.alice.clone());
         employees.push_back(ctx.alice.clone());
 
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &5_000i128);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &5_000i128,
+            &test_nonce(env, 5),
+            &None,
+        );
     }
 
     // ── Dynamic proof generation test ─────────────────────────────────────────
@@ -365,8 +440,14 @@ mod e2e {
         amounts.push_back(payment_amount);
         employees.push_back(ctx.alice.clone());
 
-        ctx.payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &payment_amount);
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &payment_amount,
+            &test_nonce(env, 6),
+            &None,
+        );
 
         assert_eq!(
             ctx.token_client.balance(&ctx.treasury),

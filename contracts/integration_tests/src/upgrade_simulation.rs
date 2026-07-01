@@ -25,6 +25,7 @@
 //! network or Node.js installation required.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod upgrade_simulation {
     use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};

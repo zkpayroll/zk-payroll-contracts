@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -160,8 +160,18 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::CompanySequence, &next);
 
-        let info = CompanyInfo { admin, treasury };
+        let info = CompanyInfo {
+            admin: admin.clone(),
+            treasury: treasury.clone(),
+        };
         env.storage().persistent().set(&DataKey::Company(id), &info);
+
+        env.events().publish(
+            (Symbol::new(&env, "CompanyRegistered"), id),
+            (admin, treasury),
+        );
+        // topics : ("CompanyRegistered", company_id)
+        // data   : (admin, treasury)
 
         id
     }
@@ -175,6 +185,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
+        let emp = employee.clone();
         env.storage()
             .persistent()
             .set(&DataKey::Employee(company_id, employee.clone()), &commitment);
@@ -184,6 +195,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
             &DataKey::EmpStatus(company_id, employee),
             &EmployeeStatus::Active,
         );
+            .set(&DataKey::Employee(company_id, emp), &commitment);
+
+        env.events().publish(
+            (Symbol::new(&env, "EmployeeAdded"), company_id, employee),
+            (commitment,),
+        );
+        // topics : ("EmployeeAdded", company_id, employee)
+        // data   : (commitment,)
     }
 
     fn remove_employee(env: Env, company_id: u64, employee: Address) {
@@ -195,9 +214,17 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
+        let emp = employee.clone();
         env.storage()
             .persistent()
-            .remove(&DataKey::Employee(company_id, employee));
+            .remove(&DataKey::Employee(company_id, emp));
+
+        env.events().publish(
+            (Symbol::new(&env, "EmployeeRemoved"), company_id, employee),
+            (),
+        );
+        // topics : ("EmployeeRemoved", company_id, employee)
+        // data   : ()
     }
 
     fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>) {
@@ -209,12 +236,20 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         info.admin.require_auth();
 
-        let key = DataKey::Employee(company_id, employee);
+        let emp = employee.clone();
+        let key = DataKey::Employee(company_id, emp);
         if !env.storage().persistent().has(&key) {
             panic!("Employee not found");
         }
 
         env.storage().persistent().set(&key, &new_commitment);
+
+        env.events().publish(
+            (Symbol::new(&env, "CommitmentUpdated"), company_id, employee),
+            (new_commitment,),
+        );
+        // topics : ("CommitmentUpdated", company_id, employee)
+        // data   : (new_commitment,)
     }
 
     fn get_company(env: Env, company_id: u64) -> CompanyInfo {

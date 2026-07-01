@@ -15,3 +15,4 @@ payroll_registry = { path = "../payroll_registry" }
 salary_commitment = { path = "../salary_commitment" }
 proof_verifier = { path = "../proof_verifier" }
 token = { path = "../token" }
+pause_manager = { path = "../pause_manager" }
