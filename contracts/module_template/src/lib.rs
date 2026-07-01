@@ -32,6 +32,11 @@ pub enum ModuleError {
     Unauthorized = 3,
 }
 
+#[contracttype]
+pub enum DataKey {
+    Admin,
+}
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 /// One variant per logical storage slot.
@@ -93,6 +98,8 @@ impl ModuleTemplate {
             .get(&DataKey::Admin)
             .ok_or(ModuleError::NotInitialized)
     }
+}
+
 
     // TODO: implement module-specific entry-points below.
     //
@@ -128,6 +135,8 @@ mod tests {
     fn test_initialize_sets_admin() {
         let env = Env::default();
         env.mock_all_auths();
+        let contract_id = env.register_contract(None, ModuleTemplate);
+        let client = ModuleTemplateClient::new(&env, &contract_id);
 
         let contract_id = env.register_contract(None, ModuleTemplate);
         let client = ModuleTemplateClient::new(&env, &contract_id);
@@ -141,6 +150,13 @@ mod tests {
     fn test_double_initialize_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
+        let contract_id = env.register_contract(None, ModuleTemplate);
+        let client = ModuleTemplateClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let result = client.try_initialize(&admin);
+        assert_eq!(result, Err(Ok(ModuleError::AlreadyInitialized)));
+    }
 
         let contract_id = env.register_contract(None, ModuleTemplate);
         let client = ModuleTemplateClient::new(&env, &contract_id);

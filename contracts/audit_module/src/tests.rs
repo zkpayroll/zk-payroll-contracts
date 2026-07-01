@@ -483,3 +483,125 @@ fn test_get_audit_log_count_increments() {
     let count_after = client.get_audit_log_count(&company_id);
     assert!(count_after > count_before);
 }
+
+// ── Issue #93: audit metadata export ─────────────────────────────────────────
+
+#[test]
+fn test_export_audit_summary_returns_correct_counts() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    // Generate one passing and one failing audit entry.
+    let amount: i128 = 10_000;
+    let blinding = BytesN::from_array(&env, &[0xAA; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let correct_commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    // Pass
+    client.verify_commitment_with_key(
+        &auditor,
+        &correct_commitment,
+        &amount,
+        &blinding,
+        &AuditScope::FullCompany,
+    );
+
+    // Fail — wrong amount causes CommitmentMismatch
+    let _ = client.try_verify_commitment_with_key(
+        &auditor,
+        &correct_commitment,
+        &999_i128,
+        &blinding,
+        &AuditScope::FullCompany,
+    );
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let summary =
+        client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000_000u64));
+
+    assert_eq!(summary.company_id, company_id);
+    assert_eq!(summary.exported_by, auditor);
+    assert!(summary.total_audit_entries >= 2);
+    assert!(summary.verification_pass_count >= 1);
+    assert!(summary.verification_fail_count >= 1);
+}
+
+#[test]
+fn test_export_audit_summary_excludes_out_of_period_entries() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let amount: i128 = 5_000;
+    let blinding = BytesN::from_array(&env, &[0xBB; 32]);
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = (&blinding).into();
+    preimage.extend_from_array(&blinding_slice);
+    let commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    client.verify_commitment_with_key(
+        &auditor,
+        &commitment,
+        &amount,
+        &blinding,
+        &AuditScope::FullCompany,
+    );
+
+    let company_id = Symbol::new(&env, "default");
+    // Request a period that is far in the future — no entries should match.
+    let far_future: u64 = 999_999_999_999;
+    let summary = client.export_audit_summary(
+        &auditor,
+        &company_id,
+        &far_future,
+        &(far_future + 1_000),
+    );
+
+    assert_eq!(summary.total_audit_entries, 0);
+    assert_eq!(summary.verification_pass_count, 0);
+    assert_eq!(summary.verification_fail_count, 0);
+}
+
+#[test]
+fn test_export_audit_summary_requires_valid_key() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let stranger = soroban_sdk::Address::generate(&env);
+    let company_id = Symbol::new(&env, "default");
+
+    // Stranger has no view key — should return KeyNotFound error.
+    assert!(client
+        .try_export_audit_summary(&stranger, &company_id, &0u64, &1_000u64)
+        .is_err());
+}
+
+#[test]
+fn test_export_audit_summary_emits_event() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let before = env.events().all().len();
+
+    client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    assert!(env.events().all().len() > before);
+}
