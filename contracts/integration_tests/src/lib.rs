@@ -1,5 +1,10 @@
 #![no_std]
 
+// Fixture datasets for local testing — Issue #81.
+// Provides deterministic test data for companies, employees, and payroll periods.
+#[cfg(test)]
+mod fixtures;
+
 // Upgrade simulation tests — Issue #108.
 #[cfg(test)]
 mod upgrade_simulation;
