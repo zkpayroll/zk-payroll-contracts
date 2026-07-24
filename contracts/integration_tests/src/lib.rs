@@ -386,6 +386,87 @@ mod e2e {
 
     // ── Dynamic proof generation test ─────────────────────────────────────────
 
+    // ── Employee deactivation & payroll exclusion coverage ────────────────────
+
+    /// Demonstrates the payroll exclusion GAP: deactivating an employee in the
+    /// registry does NOT prevent the payroll contract from paying them.
+    ///
+    /// The `batch_process_payroll` function never queries `is_eligible()` from
+    /// the payroll registry.  As a result, an employee whose status has been set
+    /// to `Inactive` can still receive payment via the payroll contract.
+    ///
+    /// This test documents the gap explicitly rather than silently fixing it.
+    /// The registry-level `is_eligible()` correctly returns `false`, but the
+    /// payroll execution layer never calls it.
+    #[test]
+    fn test_inactive_employee_still_paid_by_payroll_gap() {
+        let ctx = setup();
+        let env = &ctx.env;
+
+        // ── Onboard Alice normally ───────────────────────────────────────────
+        let commitment = alice_salary_commitment(&ctx.commitment_client);
+        ctx.commitment_client.store_commitment(&ctx.alice, &commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &ctx.alice, &commitment);
+
+        // ── Deactivate Alice in the registry ─────────────────────────────────
+        ctx.registry_client
+            .set_employee_status(&ctx.company_id, &ctx.alice, &payroll_registry::EmployeeStatus::Inactive);
+
+        // Verify the registry correctly marks her as ineligible.
+        assert!(
+            !ctx.registry_client.is_eligible(&ctx.company_id, &ctx.alice),
+            "Registry must report deactivated employee as ineligible"
+        );
+
+        // ── Fund treasury and attempt payroll execution ──────────────────────
+        let initial_treasury: i128 = 10_000;
+        let payment_amount: i128 = 5_000;
+        ctx.token_client.mint(&ctx.treasury, &initial_treasury);
+
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        let mut amounts = Vec::new(env);
+        amounts.push_back(payment_amount);
+        let mut employees = Vec::new(env);
+        employees.push_back(ctx.alice.clone());
+
+        // Execute payroll — this DOES NOT revert, proving the gap.
+        ctx.payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &payment_amount,
+            &test_nonce(env, 7),
+            &None,
+        );
+
+        // ── Despite being inactive, Alice received the full payment ──────────
+        assert_eq!(
+            ctx.token_client.balance(&ctx.treasury),
+            initial_treasury - payment_amount,
+            "GAP: Treasury decreased even though Alice was deactivated"
+        );
+        assert_eq!(
+            ctx.token_client.balance(&ctx.alice),
+            payment_amount,
+            "GAP: Deactivated Alice received payment"
+        );
+
+        // ── Verify the payment event was emitted for the inactive employee ────
+        let events = env.events().all();
+        // Expected events: CompanyRegistered, CommitmentUpdated, EmployeeAdded,
+        //   payment_executed, run_executed  (= 5 events total)
+        assert_eq!(events.len(), 5, "GAP: payment_executed event emitted for inactive employee");
+
+        let topics3 = events.get(3).unwrap().1;
+        let evt_sym0: Symbol = topics3.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(evt_sym0, Symbol::new(env, "payroll"));
+        let evt_sym1: Symbol = topics3.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(evt_sym1, Symbol::new(env, "payment_executed"),
+            "GAP: payment_executed event fired for inactive employee");
+    }
+
     /// Tests the full proof-generation pipeline using a dynamically generated proof.
     ///
     /// This test bridges Circom/SnarkJS with the Soroban test framework by:

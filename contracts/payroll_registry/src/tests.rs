@@ -526,6 +526,126 @@ fn test_duplicate_admin_rotation_proposal_rejected() {
     client.propose_admin_rotation(&company_id, &admin, &new_admin);
 }
 
+// ── Employee deactivation / status change authorization & edge cases ────────
+
+#[test]
+fn test_set_employee_status_requires_admin_auth() {
+    let env = Env::default();
+
+    // We intentionally do NOT mock_all_auths() here, because we want to test that
+    // the registry correctly enforces `require_auth` dynamically against the correct admin.
+
+    let contract_id = env.register_contract(None, PayrollRegistry);
+    let registry = PayrollRegistryClient::new(&env, &contract_id);
+
+    // Register a company with a specific admin address
+    let correct_admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &correct_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "register_company",
+            args: (correct_admin.clone(), treasury.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let company_id = registry.register_company(&correct_admin, &treasury);
+
+    // Add an employee as the legitimate admin
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[5u8; 32]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &correct_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_employee",
+            args: (company_id, employee.clone(), commitment.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    // A rogue address tries to deactivate the employee — this must fail.
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_employee_status",
+            args: (
+                company_id,
+                employee,
+                EmployeeStatus::Inactive,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = registry.try_set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    assert!(result.is_err(), "Non-admin must not be allowed to change employee status");
+}
+
+#[test]
+#[should_panic(expected = "Employee not found")]
+fn test_set_employee_status_nonexistent_employee_panics() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+
+    // Attempt to deactivate an employee who was never added — must panic.
+    client.set_employee_status(&company_id, &stranger, &EmployeeStatus::Inactive);
+}
+
+#[test]
+fn test_deactivate_reactivate_cycle_maintains_consistency() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[6u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    // Initially active and eligible
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Active,
+    );
+    assert!(client.is_eligible(&company_id, &employee));
+
+    // Deactivate → inactive and ineligible
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Inactive,
+    );
+    assert!(!client.is_eligible(&company_id, &employee));
+
+    // Reactivate → active and eligible again
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Active,
+    );
+    assert!(client.is_eligible(&company_id, &employee));
+
+    // Deactivate again → stays consistent
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    assert_eq!(
+        client.get_employee_status(&company_id, &employee),
+        EmployeeStatus::Inactive,
+    );
+    assert!(!client.is_eligible(&company_id, &employee));
+}
+
 // ── Issue #152: Duplicate company registration rejection tests ───────────────
 
 #[test]
