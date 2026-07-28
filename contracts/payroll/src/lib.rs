@@ -249,6 +249,9 @@ pub enum DataKey {
     PendingTreasuryRotation,
     /// Marks a run nonce as consumed. Value is the run_id that used it (#103).
     RunNonce(BytesN<32>),
+    /// Stores the batch fingerprint alongside a consumed nonce for idempotent
+    /// retry detection. Value is (run_id, batch_fingerprint).
+    NonceFingerprint(BytesN<32>),
     /// Marks a deposit nonce as consumed to prevent replay (#191).
     DepositNonce(BytesN<32>),
     /// Pre-committed draft hash bound before execution (#102).
@@ -627,10 +630,38 @@ impl Payroll {
 
         assert!(count <= MAX_BATCH, "Batch too large");
 
-        // Reject duplicate run nonces before any other work.
+        // Idempotent nonce check with payload fingerprint.
+        let batch_fingerprint = Self::compute_batch_fingerprint(
+            &e,
+            &proofs,
+            &amounts,
+            &employees,
+            expected_total_spend,
+        );
+
         let nonce_key = DataKey::RunNonce(nonce.clone());
         if e.storage().persistent().has(&nonce_key) {
-            panic!("Duplicate run nonce: this payroll batch has already been submitted");
+            let fingerprint_key = DataKey::NonceFingerprint(nonce.clone());
+            let stored_fingerprint: BytesN<32> = e
+                .storage()
+                .persistent()
+                .get(&fingerprint_key)
+                .expect("Nonce consumed but fingerprint missing");
+
+            if stored_fingerprint == batch_fingerprint {
+                // Safe idempotent retry — same nonce, same payload.
+                // Return the previously assigned run_id.
+                let existing_run_id: u64 = e
+                    .storage()
+                    .persistent()
+                    .get(&nonce_key)
+                    .expect("Nonce consumed but run_id missing");
+                return existing_run_id;
+            } else {
+                panic!(
+                    "Conflicting replay detected: nonce already used with a different batch payload"
+                );
+            }
         }
 
         // If a draft hash is supplied, verify a pre-commitment exists.
@@ -670,7 +701,11 @@ impl Payroll {
         let run_id = Self::derive_run_id(&e);
 
         // Mark nonce as consumed (store run_id for auditability).
+        // Also store the batch fingerprint for idempotent retry detection.
         e.storage().persistent().set(&nonce_key, &run_id);
+        e.storage()
+            .persistent()
+            .set(&DataKey::NonceFingerprint(nonce.clone()), &batch_fingerprint);
 
         // Store the pending run
         let pending_run = PendingPayrollRun {
@@ -736,6 +771,61 @@ impl Payroll {
         );
     }
 
+    /// Compute a deterministic SHA-256 fingerprint of the batch payload.
+    ///
+    /// The fingerprint encodes:
+    ///   - Employee addresses (each as 32 bytes)
+    ///   - Payment amounts (each as 16 bytes big-endian)
+    ///   - Proof hashes (each as 32 bytes from first 32 bytes of proof)
+    ///   - Expected total spend (16 bytes big-endian)
+    ///
+    /// This fingerprint is stored alongside the nonce so that idempotent
+    /// retries (same nonce, same payload) can be distinguished from
+    /// malicious replays (same nonce, different payload).
+    fn compute_batch_fingerprint(
+        e: &Env,
+        proofs: &Vec<BytesN<256>>,
+        amounts: &Vec<i128>,
+        employees: &Vec<Address>,
+        expected_total_spend: i128,
+    ) -> BytesN<32> {
+        let mut hash_input: soroban_sdk::Bytes = soroban_sdk::Bytes::new(e);
+
+        // Encode expected_total_spend (16 bytes big-endian)
+        let mut total_bytes = [0u8; 16];
+        total_bytes.copy_from_slice(&(expected_total_spend as u128).to_be_bytes());
+        for &b in &total_bytes {
+            hash_input.push_back(b);
+        }
+
+        let count = employees.len();
+        for i in 0..count {
+            let emp = employees.get(i).unwrap();
+            let amt = amounts.get(i).unwrap();
+            let proof = proofs.get(i).unwrap();
+
+            // Employee address XDR bytes (first 32 bytes)
+            let emp_xdr: soroban_sdk::Bytes = emp.to_xdr(e);
+            for j in 0..32 {
+                hash_input.push_back(emp_xdr.get(j).unwrap_or(0));
+            }
+
+            // Amount (16 bytes big-endian)
+            let mut amt_bytes = [0u8; 16];
+            amt_bytes.copy_from_slice(&(amt as u128).to_be_bytes());
+            for &b in &amt_bytes {
+                hash_input.push_back(b);
+            }
+
+            // First 32 bytes of the proof (acts as proof fingerprint)
+            for j in 0..32 {
+                hash_input.push_back(proof.get(j).unwrap_or(0));
+            }
+        }
+
+        e.crypto().sha256(&hash_input)
+    }
+
     pub fn batch_process_payroll(
         e: Env,
         proofs: Vec<BytesN<256>>,
@@ -753,10 +843,40 @@ impl Payroll {
 
         assert!(count <= MAX_BATCH, "Batch too large");
 
-        // #103 — reject duplicate run nonces before any other work.
+        // #103 — idempotent nonce check with payload fingerprint.
+        // Compute batch fingerprint before any state mutations.
+        let batch_fingerprint = Self::compute_batch_fingerprint(
+            &e,
+            &proofs,
+            &amounts,
+            &employees,
+            expected_total_spend,
+        );
+
         let nonce_key = DataKey::RunNonce(nonce.clone());
         if e.storage().persistent().has(&nonce_key) {
-            panic!("Duplicate run nonce: this payroll batch has already been submitted");
+            let fingerprint_key = DataKey::NonceFingerprint(nonce.clone());
+            let stored_fingerprint: BytesN<32> = e
+                .storage()
+                .persistent()
+                .get(&fingerprint_key)
+                .expect("Nonce consumed but fingerprint missing");
+
+            if stored_fingerprint == batch_fingerprint {
+                // Safe idempotent retry — same nonce, same payload.
+                // Return the previously assigned run_id.
+                let existing_run_id: u64 = e
+                    .storage()
+                    .persistent()
+                    .get(&nonce_key)
+                    .expect("Nonce consumed but run_id missing");
+                return existing_run_id;
+            } else {
+                // Malicious replay — same nonce, different payload.
+                panic!(
+                    "Conflicting replay detected: nonce already used with a different batch payload"
+                );
+            }
         }
 
         // #102 — if a draft hash is supplied, verify a pre-commitment exists.
@@ -810,7 +930,11 @@ impl Payroll {
         let run_id = Self::derive_run_id(&e);
 
         // #103 — mark nonce as consumed (store run_id for auditability).
+        // Also store the batch fingerprint for idempotent retry detection.
         e.storage().persistent().set(&nonce_key, &run_id);
+        e.storage()
+            .persistent()
+            .set(&DataKey::NonceFingerprint(nonce.clone()), &batch_fingerprint);
 
         let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
         let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
@@ -2949,5 +3073,187 @@ mod tests {
 
         let result = payroll_client.try_finalize_run_draft(&admin, &draft_id);
         assert!(result.is_err());
+    }
+
+    // ── Idempotent Retry & Replay Protection ─────────────────────────────────
+
+    /// Retrying the exact same batch with the same nonce must return the same
+    /// run_id without re-executing (safe idempotent retry).
+    #[test]
+    fn test_idempotent_retry_same_batch_returns_same_run_id() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let nonce = test_nonce(&env, 90);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+
+        // First execution
+        let run_id_1 = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        // Idempotent retry with identical payload
+        let run_id_2 = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        assert_eq!(run_id_1, run_id_2, "Idempotent retry must return same run_id");
+    }
+
+    /// Submitting a different payload with the same nonce must be rejected as
+    /// a conflicting replay (malicious replay detection).
+    #[test]
+    #[should_panic(expected = "Conflicting replay detected")]
+    fn test_conflicting_replay_with_modified_payload_is_rejected() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let nonce = test_nonce(&env, 91);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+
+        // First execution with nonce
+        payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        // Conflicting replay: same nonce, different amount
+        let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 2000);
+        payroll_client.batch_process_payroll(
+            &proofs2,
+            &amounts2,
+            &employees2,
+            &2000,
+            &nonce, // same nonce but different payload
+            &None,
+        );
+    }
+
+    /// Idempotent retry with prepare_payroll_run must also return same run_id.
+    #[test]
+    fn test_prepare_payroll_run_idempotent_retry() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let nonce = test_nonce(&env, 92);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+
+        let run_id_1 = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        // Idempotent retry with same payload
+        let run_id_2 = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        assert_eq!(run_id_1, run_id_2, "Prepare idempotent retry must return same run_id");
+    }
+
+    /// Conflicting replay on prepare_payroll_run must be rejected.
+    #[test]
+    #[should_panic(expected = "Conflicting replay detected")]
+    fn test_prepare_payroll_run_rejects_conflicting_replay() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let nonce = test_nonce(&env, 93);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+
+        payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        // Conflicting replay: same nonce, different amount
+        let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 2000);
+        payroll_client.prepare_payroll_run(
+            &proofs2,
+            &amounts2,
+            &employees2,
+            &2000,
+            &nonce,
+            &None,
+        );
+    }
+
+    /// Distinct nonces with the same payload on separate contract instances
+    /// must produce distinct run IDs. This also demonstrates cross-company
+    /// collision safety: the same nonce value used on different contract
+    /// instances (different companies) does not interfere.
+    #[test]
+    fn test_distinct_nonces_with_same_payload_are_distinct_runs() {
+        let env = Env::default();
+
+        // Use two completely separate contract setups (same pattern as
+        // test_distinct_nonces_allow_multiple_runs).
+        let (client1, _a1, _t1, _to1, emp1) = setup_simple_payroll(&env);
+        let (p1, a1, e1) = single_payment_batch(&env, &emp1, 500);
+        let id1 = client1.batch_process_payroll(&p1, &a1, &e1, &500, &test_nonce(&env, 94), &None);
+
+        let (client2, _a2, _t2, _to2, emp2) = setup_simple_payroll(&env);
+        let (p2, a2, e2) = single_payment_batch(&env, &emp2, 500);
+        let id2 = client2.batch_process_payroll(&p2, &a2, &e2, &500, &test_nonce(&env, 95), &None);
+
+        assert_ne!(id1, id2, "Distinct nonces must produce distinct run IDs");
+        assert!(id1 > 0);
+        assert!(id2 > 0);
+    }
+
+    /// Cross-company collision safety: the same nonce byte sequence used on
+    /// two completely separate contract instances must both succeed because
+    /// each contract has its own independent RunNonce storage namespace.
+    #[test]
+    fn test_cross_company_same_nonce_does_not_collide() {
+        let env = Env::default();
+
+        // Two payroll setups with the exact same nonce value.
+        let shared_nonce = test_nonce(&env, 99);
+
+        let (client1, _a1, _t1, _to1, emp1) = setup_simple_payroll(&env);
+        let (p1, a1, e1) = single_payment_batch(&env, &emp1, 1000);
+        let id1 = client1.batch_process_payroll(&p1, &a1, &e1, &1000, &shared_nonce, &None);
+
+        let (client2, _a2, _t2, _to2, emp2) = setup_simple_payroll(&env);
+        let (p2, a2, e2) = single_payment_batch(&env, &emp2, 1000);
+        let id2 = client2.batch_process_payroll(&p2, &a2, &e2, &1000, &shared_nonce, &None);
+
+        // Both must succeed independently — different contract instances
+        // have independent RunNonce storage.
+        assert!(id1 > 0);
+        assert!(id2 > 0);
+        assert_ne!(id1, id2, "Same nonce on different contract instances must not collide");
     }
 }

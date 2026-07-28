@@ -690,12 +690,14 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `CompanyRegistered` | `payroll_registry` | `(company_id)` | `(admin, treasury)` |
 | `PeriodCreated` | `payment_executor` | `(company_id)` | `(period_id,)` |
 | `PeriodClosed` | `payment_executor` | `(company_id)` | `(period_id,)` |
+| `BatchExecuted` | `payment_executor` | `(company_id)` | `(fingerprint, period_id)` |
 | `PayrollProcessed` | `payment_executor` | `(company_id)` | `(employee, amount, period_id)` |
 | `ViewKeyGenerated` | `audit_module` | `(auditor)` | `(key_bytes, expiration_ledger)` |
 | `AuditAccessRevoked` | `audit_module` | `(admin, auditor)` | `(timestamp,)` |
 | `AuditSuccessful` | `audit_module` | `(auditor)` | `(scope, keyed_stored)` |
 | `AggregateAuditGenerated` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end)` |
 | `AuditSummaryExported` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end, total)` |
+| `BatchExecuted` | `payment_executor` | `(company_id)` | `(batch_fingerprint, period_id)` |
 | `PauseManager / op_proposed` | `pause_manager` | `("PauseManager", "op_proposed")` | `(current_operator, new_operator)` |
 | `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address — single-value data)* |
 | `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address — single-value data)* |
