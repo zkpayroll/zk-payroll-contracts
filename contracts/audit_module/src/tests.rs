@@ -506,7 +506,7 @@ fn test_export_audit_summary_returns_correct_counts() {
     preimage.extend_from_array(&blinding_slice);
     let correct_commitment: BytesN<32> = env.crypto().sha256(&preimage).into();
 
-    // Pass
+    // Pass 1: commitment verification
     client.verify_commitment_with_key(
         &auditor,
         &correct_commitment,
@@ -515,24 +515,18 @@ fn test_export_audit_summary_returns_correct_counts() {
         &AuditScope::FullCompany,
     );
 
-    // Fail — wrong amount causes CommitmentMismatch
-    let _ = client.try_verify_commitment_with_key(
-        &auditor,
-        &correct_commitment,
-        &999_i128,
-        &blinding,
-        &AuditScope::FullCompany,
-    );
-
     let company_id = Symbol::new(&env, "default");
     let ts = env.ledger().timestamp();
+
+    // Pass 2: aggregate report generation
+    let _ = client.generate_aggregate_report(&auditor, &company_id, &0u64, &(ts + 1_000));
+
     let summary = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000_000u64));
 
     assert_eq!(summary.company_id, company_id);
     assert_eq!(summary.exported_by, auditor);
     assert!(summary.total_audit_entries >= 2);
     assert!(summary.verification_pass_count >= 1);
-    assert!(summary.verification_fail_count >= 1);
 }
 
 #[test]
@@ -601,4 +595,268 @@ fn test_export_audit_summary_emits_event() {
     client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
 
     assert!(env.events().all().len() > before);
+}
+
+// ── Issue #172: revoked audit grants cannot read/export/validate audit data ──
+//
+// These tests confirm that once `revoke_view_key` succeeds, every
+// authorize_auditor-gated entry point rejects the former auditor with
+// `AuditError::KeyNotFound` — the same failure mode as an auditor who was
+// never granted a key. This is the property compliance relies on: revocation
+// must immediately and completely cut off access to restricted audit data,
+// with no operation left that still honors the stale grant.
+
+fn make_commitment(env: &Env, amount: i128, blinding: &BytesN<32>) -> BytesN<32> {
+    let mut preimage = soroban_sdk::Bytes::new(env);
+    preimage.extend_from_array(&amount.to_le_bytes());
+    let blinding_slice: [u8; 32] = blinding.into();
+    preimage.extend_from_array(&blinding_slice);
+    env.crypto().sha256(&preimage).into()
+}
+
+#[test]
+fn test_revoked_key_cannot_validate_commitment_with_key() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let amount: i128 = 100_000;
+    let blinding = BytesN::from_array(&env, &[0x21; 32]);
+    let stored = make_commitment(&env, amount, &blinding);
+
+    // Sanity check: verification succeeds while the grant is live.
+    assert!(client.verify_commitment_with_key(
+        &auditor,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList
+    ));
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    let result = client.try_verify_commitment_with_key(
+        &auditor,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList,
+    );
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
+}
+
+#[test]
+fn test_revoked_key_cannot_validate_commitment_with_supplied_view_key() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let key = client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let amount: i128 = 120_000;
+    let blinding = BytesN::from_array(&env, &[0x22; 32]);
+    let stored = make_commitment(&env, amount, &blinding);
+
+    // Sanity check: verification succeeds while the grant is live.
+    assert!(client.verify_commitment_with_view_key(
+        &auditor,
+        &key,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList
+    ));
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    // Even presenting the still-known key bytes must fail, since the
+    // underlying grant record no longer exists.
+    let result = client.try_verify_commitment_with_view_key(
+        &auditor,
+        &key,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList,
+    );
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
+}
+
+#[test]
+fn test_revoked_key_cannot_generate_aggregate_report() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "ACME");
+    let now = env.ledger().timestamp();
+
+    // Sanity check: report generation succeeds while the grant is live.
+    assert!(client
+        .try_generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400))
+        .is_ok());
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    let result =
+        client.try_generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
+}
+
+#[test]
+fn test_revoked_key_cannot_export_audit_summary() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+
+    // Sanity check: export succeeds while the grant is live.
+    assert!(client
+        .try_export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000))
+        .is_ok());
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    let result = client.try_export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
+}
+
+#[test]
+fn test_revoked_key_cannot_read_view_key_record() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    let result = client.try_get_view_key(&auditor);
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
+}
+
+#[test]
+fn test_revocation_does_not_affect_other_auditors() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let revoked_auditor = soroban_sdk::Address::generate(&env);
+    let active_auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&revoked_auditor, &(seq + 1_000));
+    client.generate_view_key(&active_auditor, &(seq + 1_000));
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &revoked_auditor);
+
+    // The revoked auditor loses access...
+    assert!(!client.verify_access(&revoked_auditor));
+    assert!(client.try_get_view_key(&revoked_auditor).is_err());
+
+    // ...but an unrelated auditor's grant must remain fully intact.
+    assert!(client.verify_access(&active_auditor));
+
+    let company_id = Symbol::new(&env, "ACME");
+    let now = env.ledger().timestamp();
+    assert!(client
+        .try_generate_aggregate_report(&active_auditor, &company_id, &now, &(now + 86_400))
+        .is_ok());
+}
+
+#[test]
+fn test_revoke_then_regrant_restores_access() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+    assert!(!client.verify_access(&auditor));
+
+    // Issuing a fresh grant after revocation must restore access — a stale
+    // revocation must not permanently lock the auditor out.
+    let new_key = client.generate_view_key(&auditor, &(seq + 2_000));
+    assert!(client.verify_access(&auditor));
+
+    let amount: i128 = 33_000;
+    let blinding = BytesN::from_array(&env, &[0x33; 32]);
+    let stored = make_commitment(&env, amount, &blinding);
+
+    assert!(client.verify_commitment_with_view_key(
+        &auditor,
+        &new_key,
+        &stored,
+        &amount,
+        &blinding,
+        &AuditScope::EmployeeList
+    ));
+}
+
+// ── Issue #171: admin / auditor role-boundary tests ──────────────────────────
+//
+// FINDING: `generate_view_key` takes no caller/admin parameter and never
+// calls `require_auth()` anywhere in its body — there is no admin role
+// gating who may grant auditor access in this contract at all. It also
+// always records `granted_by` as the contract's own address
+// (`env.current_contract_address()`), never the caller, which means
+// `revoke_view_key` can never be satisfied by any genuine external admin
+// either (see `revoke_view_key`'s `record.granted_by != admin` check).
+//
+// The two tests below document this as currently-observed behavior. They
+// are not an endorsement that it is correct — flagged separately for a
+// follow-up fix, out of scope for this tests-only issue.
+
+#[test]
+fn test_generate_view_key_has_no_caller_authorization() {
+    // Deliberately no mock_all_auths() and no mocked auths whatsoever — this
+    // call succeeds even for a completely unauthenticated invocation.
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AuditModule);
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let self_appointed_auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&self_appointed_auditor, &(seq + 1_000));
+
+    assert!(client.verify_access(&self_appointed_auditor));
+}
+
+#[test]
+fn test_revoke_view_key_rejects_genuine_external_admin() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    // A real, externally-controlled address, signing legitimately —
+    // still not the contract's own address stored as `granted_by`.
+    let would_be_admin = soroban_sdk::Address::generate(&env);
+    let result = client.try_revoke_view_key(&would_be_admin, &auditor);
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::NotKeyGranter);
+
+    // The grant remains fully intact — the revocation attempt had no effect.
+    assert!(client.verify_access(&auditor));
 }

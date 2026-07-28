@@ -3,9 +3,18 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingOperatorRotation {
+    pub new_operator: Address,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     Paused,
     Operator,
+    PendingOperator,
 }
 
 #[cfg(feature = "contract")]
@@ -58,16 +67,87 @@ impl PauseManager {
             .unwrap_or(false)
     }
 
-    pub fn set_operator(e: Env, new_operator: Address) {
+    pub fn propose_operator_rotation(e: Env, current_operator: Address, new_operator: Address) {
         let operator: Address = e
             .storage()
             .persistent()
             .get(&DataKey::Operator)
             .expect("Not initialized");
-        operator.require_auth();
+        if current_operator != operator {
+            panic!("Unauthorized: caller is not the current operator");
+        }
+        current_operator.require_auth();
+
+        if e.storage().persistent().has(&DataKey::PendingOperator) {
+            panic!("A pending operator rotation already exists");
+        }
+
+        let proposal = PendingOperatorRotation {
+            new_operator: new_operator.clone(),
+            proposed_by: current_operator.clone(),
+            proposed_at: e.ledger().timestamp(),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::PendingOperator, &proposal);
+
+        e.events().publish(
+            (Symbol::new(&e, "PauseManager"), Symbol::new(&e, "op_proposed")),
+            (current_operator, new_operator),
+        );
+    }
+
+    pub fn accept_operator_rotation(e: Env, new_operator: Address) {
+        let proposal: PendingOperatorRotation = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingOperator)
+            .expect("No pending operator rotation");
+
+        if new_operator != proposal.new_operator {
+            panic!("Unauthorized: caller is not the proposed operator");
+        }
+        new_operator.require_auth();
+
         e.storage()
             .persistent()
             .set(&DataKey::Operator, &new_operator);
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PendingOperator);
+
+        e.events().publish(
+            (Symbol::new(&e, "PauseManager"), Symbol::new(&e, "op_rotated")),
+            new_operator,
+        );
+    }
+
+    pub fn cancel_operator_rotation(e: Env, current_operator: Address) {
+        let operator: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Operator)
+            .expect("Not initialized");
+        if current_operator != operator {
+            panic!("Unauthorized");
+        }
+        current_operator.require_auth();
+
+        if !e.storage().persistent().has(&DataKey::PendingOperator) {
+            panic!("No pending operator rotation to cancel");
+        }
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PendingOperator);
+
+        e.events().publish(
+            (Symbol::new(&e, "PauseManager"), Symbol::new(&e, "op_cancelled")),
+            current_operator,
+        );
+    }
+
+    pub fn get_pending_operator_rotation(e: Env) -> Option<PendingOperatorRotation> {
+        e.storage().persistent().get(&DataKey::PendingOperator)
     }
 }
 
@@ -103,12 +183,37 @@ impl<'a> PauseManagerClient<'a> {
             .invoke_contract(&self.1, &Symbol::new(self.0, "is_paused"), ())
     }
 
-    pub fn set_operator(&self, new_operator: &Address) {
+    pub fn propose_operator_rotation(&self, current_operator: &Address, new_operator: &Address) {
         self.0.invoke_contract(
             &self.1,
-            &Symbol::new(self.0, "set_operator"),
+            &Symbol::new(self.0, "propose_operator_rotation"),
+            (current_operator.clone(), new_operator.clone()),
+        );
+    }
+
+    pub fn accept_operator_rotation(&self, new_operator: &Address) {
+        self.0.invoke_contract(
+            &self.1,
+            &Symbol::new(self.0, "accept_operator_rotation"),
             (new_operator.clone(),),
         );
+    }
+
+    pub fn cancel_operator_rotation(&self, current_operator: &Address) {
+        self.0.invoke_contract(
+            &self.1,
+            &Symbol::new(self.0, "cancel_operator_rotation"),
+            (current_operator.clone(),),
+        );
+    }
+
+    pub fn get_pending_operator_rotation(&self) -> Option<PendingOperatorRotation> {
+        self.0
+            .invoke_contract(
+                &self.1,
+                &Symbol::new(self.0, "get_pending_operator_rotation"),
+                (),
+            )
     }
 }
 
@@ -177,8 +282,10 @@ mod tests {
         assert!(client.is_paused());
     }
 
+    // ── Issue #192: two-step operator rotation ───────────────────────────────
+
     #[test]
-    fn test_set_operator_changes_operator() {
+    fn test_propose_operator_rotation_creates_pending() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, PauseManager);
@@ -187,11 +294,106 @@ mod tests {
         client.initialize(&operator);
 
         let new_operator = Address::generate(&env);
-        client.set_operator(&new_operator);
+        client.propose_operator_rotation(&operator, &new_operator);
+
+        let proposal = client.get_pending_operator_rotation().unwrap();
+        assert_eq!(proposal.new_operator, new_operator);
+        assert_eq!(proposal.proposed_by, operator);
+    }
+
+    #[test]
+    fn test_accept_operator_rotation_completes_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+        client.initialize(&operator);
+
+        let new_operator = Address::generate(&env);
+        client.propose_operator_rotation(&operator, &new_operator);
+        client.accept_operator_rotation(&new_operator);
 
         // New operator can pause
         client.pause();
         assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_cancel_operator_rotation_removes_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+        client.initialize(&operator);
+
+        let new_operator = Address::generate(&env);
+        client.propose_operator_rotation(&operator, &new_operator);
+        client.cancel_operator_rotation(&operator);
+
+        // Old operator can still pause
+        client.pause();
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "A pending operator rotation already exists")]
+    fn test_duplicate_operator_rotation_proposal_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+        client.initialize(&operator);
+
+        let new_op1 = Address::generate(&env);
+        let new_op2 = Address::generate(&env);
+        client.propose_operator_rotation(&operator, &new_op1);
+        client.propose_operator_rotation(&operator, &new_op2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_cancel_operator_rotation_rejects_non_operator() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+        client.initialize(&operator);
+
+        let new_operator = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.propose_operator_rotation(&operator, &new_operator);
+        client.cancel_operator_rotation(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending operator rotation to cancel")]
+    fn test_cancel_operator_rotation_without_proposal_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+        client.initialize(&operator);
+
+        client.cancel_operator_rotation(&operator);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending operator rotation")]
+    fn test_accept_operator_rotation_without_proposal_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+        client.initialize(&operator);
+
+        let new_operator = Address::generate(&env);
+        client.accept_operator_rotation(&new_operator);
     }
 
     #[test]

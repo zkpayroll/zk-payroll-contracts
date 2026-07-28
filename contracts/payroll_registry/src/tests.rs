@@ -676,3 +676,99 @@ fn test_register_company_duplicate_registration_panics() {
     // Duplicate registration panics
     client.register_company(&admin, &treasury);
 }
+
+// ── Issue #171: admin / treasury role-separation tests ───────────────────────
+
+/// Role separation: holding the company's *treasury* address does not
+/// confer HR-admin privileges. `add_employee` must still require the
+/// registered company admin's signature — the treasury holder signing for
+/// themselves is not enough.
+#[test]
+#[should_panic(expected = "authorized")]
+fn test_treasury_cannot_add_employee() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, PayrollRegistry);
+    let registry = PayrollRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "register_company",
+            args: (admin.clone(), treasury.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let company_id = registry.register_company(&admin, &treasury);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[3u8; 32]);
+
+    // The company's own treasury address signs the call — a legitimate
+    // role in this system, just not the HR-admin role.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &treasury,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_employee",
+            args: (company_id, employee.clone(), commitment.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.add_employee(&company_id, &employee, &commitment);
+}
+
+/// Role separation: the treasury address is not the admin, so it must be
+/// rejected when passed as `current_admin` to an admin-rotation call —
+/// business-logic identity checks, not just signatures, must hold.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not the company admin")]
+fn test_treasury_cannot_propose_admin_rotation() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin_rotation(&company_id, &treasury, &new_admin);
+}
+
+/// Mirrors `test_propose_admin_rotation_rejects_non_admin` for the
+/// treasury-rotation path, which previously had no equivalent coverage.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not the company admin")]
+fn test_propose_treasury_rotation_rejects_non_admin() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let attacker = Address::generate(&env);
+    let new_treasury = Address::generate(&env);
+
+    client.propose_treasury_rotation(&company_id, &attacker, &new_treasury);
+}
+
+/// Role separation: the admin who proposed a treasury rotation cannot
+/// short-circuit the two-step handoff by accepting it themselves in place
+/// of the actual proposed treasury holder.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not the proposed treasury")]
+fn test_admin_cannot_accept_treasury_rotation_in_place_of_proposed_treasury() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let new_treasury = Address::generate(&env);
+
+    client.propose_treasury_rotation(&company_id, &admin, &new_treasury);
+    client.accept_treasury_rotation(&company_id, &admin);
+}

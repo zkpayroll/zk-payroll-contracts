@@ -85,6 +85,10 @@ pub enum DataKey {
     PauseManager,
     Period(u64, u32),
     PeriodSequence(u64),
+    /// Allowed assets for payment execution (issue #175)
+    AllowedAsset(Address),
+    /// Storage key schema version (issue #174)
+    StorageVersion,
 }
 
 #[contract]
@@ -103,6 +107,20 @@ impl PaymentExecutor {
         BytesN::from_array(env, &bytes)
     }
 
+    fn require_not_paused(env: &Env) {
+        if env.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(env, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
+        }
+    }
+
     /// Initialize with contract addresses
     pub fn initialize(env: Env, addresses: ContractAddresses) {
         let key = DataKey::Addresses;
@@ -110,6 +128,12 @@ impl PaymentExecutor {
             panic!("Already initialized");
         }
         env.storage().persistent().set(&key, &addresses);
+        // Automatically allow initial token asset (issue #175)
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowedAsset(addresses.token.clone()), &true);
+        // Set initial storage key version (issue #174)
+        env.storage().persistent().set(&DataKey::StorageVersion, &1u32);
     }
 
     /// Set the executor-level admin (one-time, protected by auth).
@@ -136,6 +160,35 @@ impl PaymentExecutor {
             .set(&DataKey::PauseManager, &pause_manager);
     }
 
+    /// Allow or disallow an asset token for payment execution (only executor admin - issue #175).
+    pub fn set_asset_allowed(env: Env, asset: Address, allowed: bool) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowedAsset(asset), &allowed);
+    }
+
+    /// Check if an asset token is allowlisted for payments (issue #175).
+    pub fn is_asset_allowed(env: Env, asset: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AllowedAsset(asset))
+            .unwrap_or(false)
+    }
+
+    /// Read contract storage schema version (issue #174).
+    pub fn get_storage_version(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(1u32)
+    }
+
     // -----------------------------------------------------------------------
     // Payroll period lifecycle
     // -----------------------------------------------------------------------
@@ -146,6 +199,7 @@ impl PaymentExecutor {
     /// be open at a time — a new period cannot be created until the previous
     /// one is closed (or no periods exist yet).
     pub fn create_period(env: Env, company_id: u64) -> Result<PayrollPeriod, PaymentError> {
+        Self::require_not_paused(&env);
         let addresses: ContractAddresses = env
             .storage()
             .persistent()
@@ -192,6 +246,7 @@ impl PaymentExecutor {
         company_id: u64,
         period_id: u32,
     ) -> Result<PayrollPeriod, PaymentError> {
+        Self::require_not_paused(&env);
         let addresses: ContractAddresses = env
             .storage()
             .persistent()
@@ -322,6 +377,11 @@ impl PaymentExecutor {
         };
         if !verifier.verify(&proof, &public_inputs) {
             panic!("Invalid payment proof");
+        }
+
+        // Validate treasury asset allowlist (issue #175)
+        if !Self::is_asset_allowed(env.clone(), addresses.token.clone()) {
+            panic!("Asset not allowed");
         }
 
         // Execute token transfer from company treasury to employee.
@@ -1172,5 +1232,87 @@ mod tests {
         let max_age = client.get_max_proof_age();
         // Should be 7 days in seconds
         assert_eq!(max_age, 7 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_asset_allowlist_management_and_execution() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
+
+        // Initial token asset is allowlisted
+        assert!(client.is_asset_allowed(&addresses.token));
+
+        // Disallow token asset
+        client.set_asset_allowed(&addresses.token, &false);
+        assert!(!client.is_asset_allowed(&addresses.token));
+
+        // Re-allow token asset
+        client.set_asset_allowed(&addresses.token, &true);
+        assert!(client.is_asset_allowed(&addresses.token));
+    }
+
+    #[test]
+    #[should_panic(expected = "Asset not allowed")]
+    fn test_execute_payment_fails_when_asset_disallowed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
+
+        // Disallow the payment token asset
+        client.set_asset_allowed(&addresses.token, &false);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10000i128);
+
+        let _period = client.create_period(&company_id);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &1000i128,
+            &BytesN::from_array(&env, &[1u8; 64]),
+            &BytesN::from_array(&env, &[2u8; 128]),
+            &BytesN::from_array(&env, &[3u8; 64]),
+            &BytesN::from_array(&env, &[4u8; 32]),
+            &1,
+        );
+    }
+
+    #[test]
+    fn test_storage_version_returns_version_1() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        assert_eq!(client.get_storage_version(), 1);
     }
 }

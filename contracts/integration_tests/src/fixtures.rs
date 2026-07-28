@@ -50,14 +50,14 @@ pub mod fixtures {
         id: 1,
         name: "Bob",
         salary: 3500,
-        blinding_factor: 456,
+        blinding_factor: 156,
     };
 
     pub const CAROL: EmployeeFixture = EmployeeFixture {
         id: 2,
         name: "Carol",
         salary: 7200,
-        blinding_factor: 789,
+        blinding_factor: 189,
     };
 
     pub const DAVID: EmployeeFixture = EmployeeFixture {
@@ -78,7 +78,7 @@ pub mod fixtures {
         id: 5,
         name: "Frank",
         salary: 5500,
-        blinding_factor: 333,
+        blinding_factor: 233,
     };
 
     // ── Address Derivation ───────────────────────────────────────────────────
@@ -89,17 +89,16 @@ pub mod fixtures {
     /// Not secure for production — fixtures only.
     pub fn address_from_seed(env: &Env, seed: u8) -> Address {
         let mut bytes = [0u8; 32];
-        bytes[0] = seed;
-        Address::from_contract_id(&BytesN::from_array(env, &bytes))
+        bytes[31] = seed;
+        let strkey = stellar_strkey::Strkey::Contract(stellar_strkey::Contract(bytes)).to_string();
+        Address::from_string(&soroban_sdk::String::from_str(env, &strkey))
     }
 
     /// Generate a deterministic 32-byte blinding factor.
-    pub fn blinding_bytes(factor: u8) -> BytesN<32> {
+    pub fn blinding_bytes(env: &Env, factor: u8) -> BytesN<32> {
         let mut bytes = [0u8; 32];
         bytes[31] = factor;
-        // BytesN::from_array requires an &Env, so callers must construct this
-        // Cannot be done in const context without env
-        bytes
+        BytesN::from_array(env, &bytes)
     }
 
     // ── Payroll Period Fixtures ──────────────────────────────────────────────
@@ -194,12 +193,15 @@ pub mod fixtures {
 
         #[test]
         fn test_blinding_bytes() {
-            let bytes_123 = blinding_bytes(123);
-            assert_eq!(bytes_123[31], 123);
-            assert_eq!(bytes_123[0], 0);
+            let env = soroban_sdk::Env::default();
+            let bytes_123 = blinding_bytes(&env, 123);
+            let array: [u8; 32] = (&bytes_123).into();
+            assert_eq!(array[31], 123);
+            assert_eq!(array[0], 0);
 
-            let bytes_255 = blinding_bytes(255);
-            assert_eq!(bytes_255[31], 255);
+            let bytes_255 = blinding_bytes(&env, 255);
+            let array255: [u8; 32] = (&bytes_255).into();
+            assert_eq!(array255[31], 255);
         }
     }
 }

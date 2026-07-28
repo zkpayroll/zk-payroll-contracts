@@ -195,14 +195,15 @@ mod upgrade_simulation {
 
         // A second company verifies CompanySequence increments correctly
         // and that its storage key does not alias company 0.
-        let company_id_2 = registry.register_company(&admin, &treasury);
+        let admin2 = Address::generate(&env);
+        let company_id_2 = registry.register_company(&admin2, &treasury);
         assert_ne!(
             company_id, company_id_2,
             "UP-03: Sequential IDs must be unique"
         );
         let info_2 = registry.get_company(&company_id_2);
         assert_eq!(
-            info_2.admin, admin,
+            info_2.admin, admin2,
             "UP-03: Second company key must be intact"
         );
     }
@@ -408,6 +409,43 @@ mod upgrade_simulation {
         assert_eq!(
             stored_bob, bob_commitment,
             "UP-07: Bob's commitment must survive Alice's removal"
+        );
+    }
+
+    // ── UP-08: Storage key versioning and migration validation ────────────────
+
+    /// UP-08: Validates that versioned storage keys maintain schema version
+    /// indicator (DataKey::StorageVersion) allowing contracts to verify data schema
+    /// compatibility during upgrades and migrations.
+    #[test]
+    fn up08_storage_key_versioning_and_migration() {
+        use payment_executor::{ContractAddresses, PaymentExecutor, PaymentExecutorClient};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor = PaymentExecutorClient::new(&env, &executor_id);
+
+        let registry = env.register_contract(None, PayrollRegistry);
+        let commitment = env.register_contract(None, SalaryCommitmentContract);
+        let verifier = env.register_contract(None, ProofVerifier);
+        let token = Address::generate(&env);
+
+        let addrs = ContractAddresses {
+            registry,
+            commitment,
+            verifier,
+            token,
+        };
+
+        executor.initialize(&addrs);
+
+        // Verify storage schema version is set to version 1
+        assert_eq!(
+            executor.get_storage_version(),
+            1,
+            "UP-08: Storage version must equal 1 upon initialization"
         );
     }
 }
