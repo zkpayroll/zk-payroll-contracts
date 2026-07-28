@@ -1,17 +1,18 @@
 #![no_std]
 
+use pause_manager::PauseManagerClient;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
 // Operational roles
 //
 // The salary commitment contract separates four operational roles:
-//   HR_ADMIN    — Registered in `initialize()`. Authorizes all writes
+//   HR_ADMIN    â€” Registered in `initialize()`. Authorizes all writes
 //                 (store / update / revoke commitment, record nullifier).
-//   PAYROLL_OP  — An address delegated to execute payroll (record nullifiers
+//   PAYROLL_OP  â€” An address delegated to execute payroll (record nullifiers
 //                 only). Set via `set_payroll_operator`.
-//   AUDITOR     — Grant access via the audit_module (view keys).
-//   TREASURY    — Does NOT interact with this contract; payment source lives
+//   AUDITOR     â€” Grant access via the audit_module (view keys).
+//   TREASURY    â€” Does NOT interact with this contract; payment source lives
 //                 in payment_executor.
 //
 // Unauthorized role actions fail with `require_auth()` / explicit role checks.
@@ -47,7 +48,16 @@ pub struct CommitmentSnapshot {
     pub rotated_at: u64,
 }
 
-/// Storage keys
+/// Pending two-step role-rotation request (issue #192).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingRotation {
+    pub new_holder: Address,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+    /// Storage keys
 #[contracttype]
 pub enum DataKey {
     Commitment(Address),
@@ -63,6 +73,14 @@ pub enum DataKey {
     EmployeeReferenceId(Address),
     /// Reverse mapping to detect collisions (ref_id -> employee).
     ReferenceIdIndex(soroban_sdk::String),
+    /// When true, the employee's commitment is locked and cannot be updated.
+    /// Set by the admin via `lock_commitment_updates` and cleared via
+    /// `unlock_commitment_updates`.
+    CommitmentLock(Address),
+    /// Pause manager address (issue #193).
+    PauseManager,
+    /// Pending admin rotation proposal (issue #192).
+    PendingAdminRotation,
 }
 
 #[contract]
@@ -83,10 +101,56 @@ impl SalaryCommitmentContract {
     /// Set a delegated payroll operator that may record nullifiers
     /// (required for batch payroll execution). Only the admin may call.
     pub fn set_payroll_operator(env: Env, operator: Address) {
+        Self::require_not_paused(&env);
         Self::require_admin(&env);
         env.storage()
             .persistent()
             .set(&DataKey::PayrollOperator, &operator);
+    }
+
+    /// Lock an employee's commitment to prevent updates via `update_commitment`
+    /// or `rotate_commitment`. Both the HR admin and the delegated payroll
+    /// operator may call.
+    ///
+    /// The lock is meant to be set when a payroll draft is finalized or a
+    /// payroll run is executed, ensuring the commitment cannot be silently
+    /// altered after approval or audit review.
+    pub fn lock_commitment_updates(env: Env, employee: Address) {
+        Self::require_not_paused(&env);
+        Self::require_admin_or_operator(&env);
+        let key = DataKey::CommitmentLock(employee.clone());
+        if env.storage().persistent().has(&key) {
+            panic!("Commitment is already locked");
+        }
+        env.storage().persistent().set(&key, &true);
+
+        env.events().publish(
+            (Symbol::new(&env, "CommitmentLocked"), employee),
+            (),
+        );
+    }
+
+    /// Unlock an employee's commitment so it can be updated again.
+    /// Only the HR admin may call.
+    pub fn unlock_commitment_updates(env: Env, employee: Address) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        let key = DataKey::CommitmentLock(employee.clone());
+        if !env.storage().persistent().has(&key) {
+            panic!("Commitment is not locked");
+        }
+        env.storage().persistent().remove(&key);
+
+        env.events().publish(
+            (Symbol::new(&env, "CommitmentUnlocked"), employee),
+            (),
+        );
+    }
+
+    /// Check if an employee's commitment is currently locked.
+    pub fn is_commitment_locked(env: Env, employee: Address) -> bool {
+        let key = DataKey::CommitmentLock(employee);
+        env.storage().persistent().has(&key)
     }
 
     /// Get the stored admin address.
@@ -109,6 +173,7 @@ impl SalaryCommitmentContract {
         employee: Address,
         commitment: BytesN<32>,
     ) -> SalaryCommitment {
+        Self::require_not_paused(&env);
         Self::require_admin(&env);
 
         let timestamp = env.ledger().timestamp();
@@ -141,12 +206,20 @@ impl SalaryCommitmentContract {
     /// The previous commitment is archived in CommitmentHistory so it remains
     /// auditable. The new commitment replaces the active record and the version
     /// is incremented.
+    ///
+    /// Fails if the employee's commitment is currently locked (see
+    /// `lock_commitment_updates` / `unlock_commitment_updates`).
     pub fn update_commitment(
         env: Env,
         employee: Address,
         new_commitment: BytesN<32>,
     ) -> SalaryCommitment {
+        Self::require_not_paused(&env);
         Self::require_admin(&env);
+
+        if Self::is_commitment_locked(env.clone(), employee.clone()) {
+            panic!("Commitment is locked: cannot update until unlocked by admin");
+        }
 
         let key = DataKey::Commitment(employee.clone());
         let existing: SalaryCommitment = env
@@ -182,12 +255,20 @@ impl SalaryCommitmentContract {
     /// and store the new one. Old commitments CANNOT be used for future payroll
     /// proofs (see `is_commitment_active`).
     /// Only the HR admin may call.
+    ///
+    /// Fails if the employee's commitment is currently locked (see
+    /// `lock_commitment_updates` / `unlock_commitment_updates`).
     pub fn rotate_commitment(
         env: Env,
         employee: Address,
         new_commitment: BytesN<32>,
     ) -> SalaryCommitment {
+        Self::require_not_paused(&env);
         Self::require_admin(&env);
+
+        if Self::is_commitment_locked(env.clone(), employee.clone()) {
+            panic!("Commitment is locked: cannot rotate until unlocked by admin");
+        }
 
         let key = DataKey::Commitment(employee.clone());
         let mut existing: SalaryCommitment = env
@@ -272,6 +353,7 @@ impl SalaryCommitmentContract {
         employee: Address,
         reference_id: soroban_sdk::String,
     ) {
+        Self::require_not_paused(&env);
         Self::require_admin(&env);
 
         // Validate reference ID is not empty and reasonable length (< 256 chars)
@@ -335,6 +417,7 @@ impl SalaryCommitmentContract {
     /// Record a payment nullifier (prevents double payment).
     /// Authorized for both the HR admin and the delegated payroll operator.
     pub fn record_nullifier(env: Env, nullifier: BytesN<32>) {
+        Self::require_not_paused(&env);
         Self::require_admin_or_operator(&env);
 
         let key = DataKey::Nullifier(nullifier.clone());
@@ -412,6 +495,122 @@ impl SalaryCommitmentContract {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    // ── Issue #192: two-step admin rotation ──────────────────────────────────
+
+    /// Propose a new admin (step 1 of 2).
+    pub fn propose_admin_rotation(env: Env, current_admin: Address, new_admin: Address) {
+        Self::require_not_paused(&env);
+        let stored: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if current_admin != stored {
+            panic!("Unauthorized: caller is not the current admin");
+        }
+        current_admin.require_auth();
+
+        if env.storage().persistent().has(&DataKey::PendingAdminRotation) {
+            panic!("A pending admin rotation already exists");
+        }
+
+        let proposal = PendingRotation {
+            new_holder: new_admin.clone(),
+            proposed_by: current_admin.clone(),
+            proposed_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdminRotation, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminRotationProposed"), current_admin),
+            (new_admin,),
+        );
+    }
+
+    /// Accept a pending admin rotation (step 2 of 2).
+    pub fn accept_admin_rotation(env: Env, new_admin: Address) {
+        Self::require_not_paused(&env);
+        let proposal: PendingRotation = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdminRotation)
+            .expect("No pending admin rotation");
+
+        if new_admin != proposal.new_holder {
+            panic!("Unauthorized: caller is not the proposed admin");
+        }
+        new_admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingAdminRotation);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminRotationAccepted"), new_admin),
+            (),
+        );
+    }
+
+    /// Cancel a pending admin rotation proposal.
+    pub fn cancel_admin_rotation(env: Env, current_admin: Address) {
+        Self::require_not_paused(&env);
+        let stored: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if current_admin != stored {
+            panic!("Unauthorized");
+        }
+        current_admin.require_auth();
+
+        if !env.storage().persistent().has(&DataKey::PendingAdminRotation) {
+            panic!("No pending admin rotation to cancel");
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingAdminRotation);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminRotationCancelled"), current_admin),
+            (),
+        );
+    }
+
+    /// Get the pending admin rotation proposal, if any.
+    pub fn get_pending_admin_rotation(env: Env) -> Option<PendingRotation> {
+        env.storage().persistent().get(&DataKey::PendingAdminRotation)
+    }
+
+    // ── Issue #193: pause support ────────────────────────────────────────────
+
+    /// Set the pause manager contract address (only admin).
+    pub fn set_pause_manager(env: Env, pause_manager: Address) {
+        Self::require_admin(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PauseManager, &pause_manager);
+    }
+
+    fn require_not_paused(env: &Env) {
+        if env.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(env, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Salary commitment operations are paused");
+            }
+        }
+    }
+
     fn archive_commitment(env: &Env, employee: &Address, commitment: &BytesN<32>, version: u32) {
         let mut idx: u32 = 0;
         loop {
@@ -434,7 +633,7 @@ impl SalaryCommitmentContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
-    use soroban_sdk::{Env, Symbol, TryIntoVal};
+    use soroban_sdk::{Env, IntoVal, Symbol, TryIntoVal};
 
     fn setup_with_admin() -> (Env, soroban_sdk::Address, Address) {
         let env = Env::default();
@@ -595,9 +794,334 @@ mod tests {
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
 
-        // No mock_auths — store_commitment should require admin auth and panic
+        // No mock_auths â€” store_commitment should require admin auth and panic
         let employee = Address::generate(&env);
         let commitment = BytesN::from_array(&env, &[99u8; 32]);
         client.store_commitment(&employee, &commitment);
+    }
+
+    // â”€â”€ Issue #171: admin / payroll-operator role-separation tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /// Role separation: a delegated payroll operator may record nullifiers
+    /// but must not be able to perform admin-only writes such as storing a
+    /// new salary commitment.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_payroll_operator_cannot_store_commitment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+
+        let operator = Address::generate(&env);
+        client.set_payroll_operator(&operator);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+        // Narrow auth to exactly the operator signing this call â€” the
+        // operator role must not satisfy the admin-only guard.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &operator,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "store_commitment",
+                args: (employee.clone(), commitment.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.store_commitment(&employee, &commitment);
+    }
+
+    /// Once a payroll operator is delegated, `record_nullifier` only
+    /// accepts the operator's own signature (see `require_admin_or_operator`)
+    /// â€” the admin who delegated the role can no longer authorize this call
+    /// directly. This is a real, non-obvious role-separation property worth
+    /// locking in: delegating the payroll-operator role *transfers* this
+    /// privilege rather than merely adding a second authorized signer.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_admin_cannot_record_nullifier_once_operator_delegated() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+
+        let operator = Address::generate(&env);
+        client.set_payroll_operator(&operator);
+
+        let nullifier = BytesN::from_array(&env, &[2u8; 32]);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "record_nullifier",
+                args: (nullifier.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.record_nullifier(&nullifier);
+    }
+
+    // â”€â”€ Issue #178: commitment update restrictions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn test_lock_commitment_updates_prevents_update() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let initial = BytesN::from_array(&env, &[10u8; 32]);
+        let replacement = BytesN::from_array(&env, &[20u8; 32]);
+
+        client.store_commitment(&employee, &initial);
+        client.lock_commitment_updates(&employee);
+
+        let result = client.try_update_commitment(&employee, &replacement);
+        assert!(result.is_err(), "Locked commitment must reject update");
+    }
+
+    #[test]
+    fn test_lock_commitment_updates_prevents_rotate() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let initial = BytesN::from_array(&env, &[11u8; 32]);
+        let replacement = BytesN::from_array(&env, &[21u8; 32]);
+
+        client.store_commitment(&employee, &initial);
+        client.lock_commitment_updates(&employee);
+
+        let result = client.try_rotate_commitment(&employee, &replacement);
+        assert!(result.is_err(), "Locked commitment must reject rotation");
+    }
+
+    #[test]
+    fn test_unlock_commitment_allows_update_after_lock() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let initial = BytesN::from_array(&env, &[12u8; 32]);
+        let replacement = BytesN::from_array(&env, &[22u8; 32]);
+
+        client.store_commitment(&employee, &initial);
+        client.lock_commitment_updates(&employee);
+        client.unlock_commitment_updates(&employee);
+
+        let result = client.update_commitment(&employee, &replacement);
+        assert_eq!(result.commitment, replacement);
+        assert_eq!(result.version, 2);
+    }
+
+    #[test]
+    fn test_is_commitment_locked_returns_correct_state() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[13u8; 32]);
+        client.store_commitment(&employee, &commitment);
+
+        assert!(!client.is_commitment_locked(&employee));
+
+        client.lock_commitment_updates(&employee);
+        assert!(client.is_commitment_locked(&employee));
+
+        client.unlock_commitment_updates(&employee);
+        assert!(!client.is_commitment_locked(&employee));
+    }
+
+    #[test]
+    fn test_lock_commitment_twice_panics() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[14u8; 32]);
+        client.store_commitment(&employee, &commitment);
+        client.lock_commitment_updates(&employee);
+
+        let result = client.try_lock_commitment_updates(&employee);
+        assert!(result.is_err(), "Double lock must fail");
+    }
+
+    #[test]
+    fn test_unlock_without_lock_panics() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let result = client.try_unlock_commitment_updates(&employee);
+        assert!(result.is_err(), "Unlock without lock must fail");
+    }
+
+    #[test]
+    fn test_store_commitment_not_blocked_by_lock() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let existing_emp = Address::generate(&env);
+        let new_emp = Address::generate(&env);
+        let cmt = BytesN::from_array(&env, &[15u8; 32]);
+
+        client.store_commitment(&existing_emp, &cmt);
+        client.lock_commitment_updates(&existing_emp);
+
+        // A new employee should still be able to get a commitment stored
+        let result = client.store_commitment(&new_emp, &cmt);
+        assert_eq!(result.version, 1);
+        assert_eq!(result.commitment, cmt);
+    }
+
+    /// A stranger who is neither the admin nor the delegated operator must
+    /// not be able to record a nullifier once an operator has been set.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_stranger_cannot_record_nullifier_when_operator_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+
+        let operator = Address::generate(&env);
+        client.set_payroll_operator(&operator);
+
+        let stranger = Address::generate(&env);
+        let nullifier = BytesN::from_array(&env, &[3u8; 32]);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &stranger,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "record_nullifier",
+                args: (nullifier.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.record_nullifier(&nullifier);
+    }
+
+    // ── Issue #190: treasury / auditor role-separation tests ────────────
+    /// A treasury-role address (holds company funds per `payroll_registry`,
+    /// see `CompanyInfo.treasury`) has no admin authority in this contract.
+    /// Treasury never interacts with `salary_commitment` at all — it must
+    /// not be able to write a salary commitment just because it happens to
+    /// be a known, funded address in the system.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_treasury_role_cannot_store_commitment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+        // Represents the company's treasury address (as registered via
+        // `payroll_registry::register_company(admin, treasury)`).
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[3u8; 32]);
+        // Narrow auth to exactly the treasury address signing this call —
+        // the treasury role must not satisfy the admin-only guard.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &treasury,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "store_commitment",
+                args: (employee.clone(), commitment.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.store_commitment(&employee, &commitment);
+    }
+    /// A treasury-role address must not be able to delegate the
+    /// payroll-operator role — that is an admin-only responsibility, and
+    /// treasury has no write access to this contract's role assignments.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_treasury_role_cannot_set_payroll_operator() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+        let treasury = Address::generate(&env);
+        let operator = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &treasury,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_payroll_operator",
+                args: (operator.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_payroll_operator(&operator);
+    }
+    /// An auditor-role address (view-only access via `audit_module`) must
+    /// not be able to record payment nullifiers — that is a payroll
+    /// execution privilege, and read access to audit data must never imply
+    /// write access to payroll execution state.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_auditor_role_cannot_record_nullifier() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+        // Represents an address holding a valid audit_module view key —
+        // read access only, never a payroll-execution role in this contract.
+        let auditor = Address::generate(&env);
+        let nullifier = BytesN::from_array(&env, &[4u8; 32]);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &auditor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "record_nullifier",
+                args: (nullifier.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.record_nullifier(&nullifier);
+    }
+    /// An auditor-role address must not be able to delegate the
+    /// payroll-operator role — audit access is strictly read-only and must
+    /// never grant the ability to assign write-capable roles.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_auditor_role_cannot_set_payroll_operator() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+        let auditor = Address::generate(&env);
+        let operator = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &auditor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_payroll_operator",
+                args: (operator.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_payroll_operator(&operator);
     }
 }

@@ -508,8 +508,6 @@ mod e2e {
         let proof = BytesN::from_array(env, &proof_bytes);
         let salary_commitment = BytesN::from_array(env, &proof_data.salary_commitment);
 
-        ctx.registry_client
-            .register_company(&ctx.admin, &ctx.treasury);
         ctx.commitment_client
             .store_commitment(&ctx.alice, &salary_commitment);
         ctx.registry_client

@@ -16,3 +16,5 @@ salary_commitment = { path = "../salary_commitment" }
 proof_verifier = { path = "../proof_verifier" }
 token = { path = "../token" }
 pause_manager = { path = "../pause_manager" }
+payment_executor = { path = "../payment_executor" }
+stellar-strkey = "0.0.8"

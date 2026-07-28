@@ -230,6 +230,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 name = "audit_module"
 version = "0.1.0"
 dependencies = [
+ "pause_manager",
  "soroban-sdk",
 ]
 
@@ -1384,11 +1385,13 @@ name = "integration_tests"
 version = "0.1.0"
 dependencies = [
  "pause_manager",
+ "payment_executor",
  "payroll",
  "payroll_registry",
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",
+ "stellar-strkey",
  "token",
 ]
 
@@ -1801,6 +1804,7 @@ dependencies = [
 name = "payroll_registry"
 version = "0.1.0"
 dependencies = [
+ "pause_manager",
  "soroban-sdk",
 ]
 
@@ -2139,6 +2143,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "salary_commitment"
 version = "0.1.0"
 dependencies = [
+ "pause_manager",
  "soroban-sdk",
 ]
 

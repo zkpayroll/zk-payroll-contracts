@@ -1,5 +1,6 @@
 #![no_std]
 
+use pause_manager::PauseManagerClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
     Symbol, Vec,
@@ -126,6 +127,8 @@ pub enum DataKey {
     AuditLogCounter(Symbol),
     /// Audit log entry keyed by (company_id, log_index).
     AuditLog(Symbol, u32),
+    /// Pause manager address (issue #167).
+    PauseManager,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,11 +140,33 @@ pub struct AuditModule;
 
 #[contractimpl]
 impl AuditModule {
+    fn require_not_paused(env: &Env) {
+        if env.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(env, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
+        }
+    }
+
+    pub fn set_pause_manager(env: Env, admin: Address, pause_manager: Address) {
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::PauseManager, &pause_manager);
+    }
+
     // -----------------------------------------------------------------------
     // View-key lifecycle
     // -----------------------------------------------------------------------
 
     pub fn generate_view_key(env: Env, auditor: Address, expiration_ledger: u32) -> BytesN<32> {
+        Self::require_not_paused(&env);
         let admin = env.current_contract_address();
 
         let key_bytes = Self::derive_key_bytes(&env, &auditor, expiration_ledger);
@@ -178,6 +203,7 @@ impl AuditModule {
     }
 
     pub fn revoke_view_key(env: Env, admin: Address, auditor: Address) -> Result<(), AuditError> {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let record: ViewKeyRecord = env
