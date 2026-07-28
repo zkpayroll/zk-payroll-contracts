@@ -494,8 +494,10 @@ impl Payroll {
 
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_prepared")),
-            (run_id, expected_total_spend),
+            (run_id, expected_total_spend, addrs.admin.clone(), count),
         );
+        // topics : ("payroll", "run_prepared")
+        // data   : (run_id, total_amount, admin, employee_count)
 
         run_id
     }
@@ -672,8 +674,10 @@ impl Payroll {
 
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_executed")),
-            (run_id, expected_total_spend),
+            (run_id, expected_total_spend, addrs.admin.clone(), count),
         );
+        // topics : ("payroll", "run_executed")
+        // data   : (run_id, total_amount, admin, employee_count)
 
         run_id
     }
@@ -756,85 +760,6 @@ impl Payroll {
         if draft.state != RunDraftState::Pending { panic!("Only pending drafts can be amended"); }
         if new_total_amount <= 0 { panic!("total_amount must be positive"); }
         draft.total_amount=new_total_amount; draft.employee_count=new_employee_count; draft.amendment_count+=1; e.storage().persistent().set(&DataKey::RunDraft(draft_id), &draft); e.events().publish((symbol_short!("payroll"), Symbol::new(&e,"draft_amended")),(draft_id,new_total_amount,draft.amendment_count));
-    }
-
-    /// Update the reconciliation status of a completed payroll run.
-    ///
-    /// Only the `admin` may update the reconciliation status.
-    /// Emits a `reconciliation_updated` event.
-    pub fn update_reconciliation_status(
-    e: Env,
-    admin: Address,
-    run_id: u64,
-    status: ReconciliationStatus,
-) {
-    let addrs: ContractAddresses = e
-        .storage()
-        .persistent()
-        .get(&DataKey::Addresses)
-        .expect("Not initialized");
-
-    if admin != addrs.admin {
-        panic!("Unauthorized");
-    }
-
-    admin.require_auth();
-
-    let run_key = DataKey::PayrollRun(run_id);
-
-    let mut run: PayrollRun = e
-        .storage()
-        .persistent()
-        .get(&run_key)
-        .expect("Payroll run not found");
-
-    run.reconciliation_status = status.clone();
-
-    e.storage().persistent().set(&run_key, &run);
-
-    e.events().publish(
-        (
-            symbol_short!("payroll"),
-            Symbol::new(&e, "reconciliation_updated"),
-        ),
-        (run_id, status),
-    );
-}
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let mut draft: PayrollRunDraft = e
-            .storage()
-            .persistent()
-            .get(&DataKey::RunDraft(draft_id))
-            .expect("Draft not found");
-
-        if draft.state != RunDraftState::Pending {
-            panic!("Only pending drafts can be amended");
-        }
-        if new_total_amount <= 0 {
-            panic!("total_amount must be positive");
-        }
-
-        draft.total_amount = new_total_amount;
-        draft.employee_count = new_employee_count;
-        draft.amendment_count += 1;
-
-        e.storage()
-            .persistent()
-            .set(&DataKey::RunDraft(draft_id), &draft);
-
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "draft_amended")),
-            (draft_id, new_total_amount, draft.amendment_count),
-        );
     }
 
     /// Update the reconciliation status of a completed payroll run.
@@ -1154,8 +1079,8 @@ mod tests {
     use pause_manager::{PauseManager, PauseManagerClient};
     use proof_verifier::{ProofVerifier, VerificationKey};
     use salary_commitment::SalaryCommitmentContract;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Env, IntoVal};
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{Env, IntoVal, TryIntoVal};
 
     fn mock_proof(env: &Env) -> BytesN<256> {
         BytesN::from_array(env, &[0u8; 256])
@@ -2054,14 +1979,14 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Run not found")]
+    #[test]
+    #[should_panic(expected = "Run not found")]
     fn test_update_status_for_invalid_run_panics() {
         let env = Env::default();
         let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
             setup_simple_payroll(&env);
 
-        let new_admin = Address::generate(&env);
-        payroll_client.propose_admin_rotation(&admin, &new_admin);
-        payroll_client.propose_admin_rotation(&admin, &new_admin);
+        // Attempt to update reconciliation status for a non-existent run
         payroll_client.update_reconciliation_status(
             &admin,
             &999u64,
@@ -2164,5 +2089,175 @@ mod tests {
         let (p2, a2, e2) = single_payment_batch(&env, &employee, 1000);
         let result = payroll_client.try_prepare_payroll_run(&p2, &a2, &e2, &1000, &nonce, &None);
         assert!(result.is_err());
+    }
+
+    // ── Event emission tests for payroll run creation ─────────────────────────
+
+    /// Verifies `prepare_payroll_run` emits a `run_prepared` event with
+    /// structured payload: (run_id, total_amount, admin, employee_count).
+    #[test]
+    fn test_prepare_payroll_run_emits_event() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 50),
+            &None,
+        );
+
+        let events = env.events().all();
+        // Expect the last event to be run_prepared
+        let event = events.get(events.len() - 1).unwrap();
+
+        // topics[0] should be symbol_short!("payroll") — event.1 is topics
+        let topics = event.1;
+        let sym0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "payroll"));
+        let sym1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym1, Symbol::new(&env, "run_prepared"));
+
+        // Decode event data as a 4-tuple: (run_id, total_amount, admin, employee_count)
+        let (data_run_id, data_amount, data_admin, data_count): (u64, i128, Address, u32) =
+            event.2.try_into_val(&env).unwrap();
+        assert_eq!(data_run_id, run_id);
+        assert_eq!(data_amount, 1000);
+        assert_eq!(data_admin, admin);
+        assert_eq!(data_count, 1);
+    }
+
+    /// Verifies `batch_process_payroll` emits a `run_executed` event with
+    /// structured payload: (run_id, total_amount, admin, employee_count).
+    #[test]
+    fn test_batch_process_payroll_emits_run_executed_event() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 51),
+            &None,
+        );
+
+        let events = env.events().all();
+        // Expect 3 events: CommitmentUpdated (store_commitment), payment_executed, run_executed
+        // The run_executed event should be the last one
+        let last_event = events.get(events.len() - 1).unwrap();
+
+        let topics = last_event.1;
+        let sym0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "payroll"));
+        let sym1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym1, Symbol::new(&env, "run_executed"));
+
+        // Decode event data as a 4-tuple: (run_id, total_amount, admin, employee_count)
+        let (data_run_id, data_amount, data_admin, data_count): (u64, i128, Address, u32) =
+            last_event.2.try_into_val(&env).unwrap();
+        assert_eq!(data_run_id, run_id);
+        assert_eq!(data_amount, 1000);
+        assert_eq!(data_admin, admin);
+        assert_eq!(data_count, 1);
+    }
+
+    /// Verifies that `create_run_draft` emits a `draft_created` event with
+    /// structured payload: (draft_id, admin, period_label).
+    #[test]
+    fn test_create_run_draft_emits_event() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let label = Symbol::new(&env, "Q2_2025");
+        let draft_id = payroll_client.create_run_draft(&admin, &5_000i128, &10u32, &label);
+
+        let events = env.events().all();
+        let event = events.get(events.len() - 1).unwrap();
+
+        let topics = event.1;
+        let sym0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "payroll"));
+        let sym1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym1, Symbol::new(&env, "draft_created"));
+
+        // Decode event data as a 3-tuple: (draft_id, admin, period_label)
+        let (data_draft_id, data_admin, data_label): (u64, Address, Symbol) =
+            event.2.try_into_val(&env).unwrap();
+        assert_eq!(data_draft_id, draft_id);
+        assert_eq!(data_admin, admin);
+        assert_eq!(data_label, label);
+    }
+
+    /// Verifies that `cancel_payroll_run` emits a `run_cancelled` event with
+    /// structured payload: (run_id, total_amount).
+    #[test]
+    fn test_cancel_payroll_run_emits_event() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 52),
+            &None,
+        );
+
+        payroll_client.cancel_payroll_run(&admin, &run_id);
+
+        let events = env.events().all();
+        let event = events.get(events.len() - 1).unwrap();
+
+        let topics = event.1;
+        let sym0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "payroll"));
+        let sym1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym1, Symbol::new(&env, "run_cancelled"));
+
+        // Decode event data as a 2-tuple: (run_id, total_amount)
+        let (data_run_id, data_amount): (u64, i128) =
+            event.2.try_into_val(&env).unwrap();
+        assert_eq!(data_run_id, run_id);
+        assert_eq!(data_amount, 1000);
+    }
+
+    /// Verifies that the `draft_finalized` event is emitted when a draft is finalized.
+    #[test]
+    fn test_finalize_run_draft_emits_event() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let label = Symbol::new(&env, "Q3_2025");
+        let draft_id = payroll_client.create_run_draft(&admin, &5_000i128, &10u32, &label);
+        payroll_client.finalize_run_draft(&admin, &draft_id);
+
+        let events = env.events().all();
+        let event = events.get(events.len() - 1).unwrap();
+
+        let topics = event.1;
+        let sym0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "payroll"));
+        let sym1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(sym1, Symbol::new(&env, "draft_finalized"));
+
+        // Decode event data as a 3-tuple: (draft_id, total_amount, amendment_count)
+        let (data_draft_id, data_amount, data_amendments): (u64, i128, u32) =
+            event.2.try_into_val(&env).unwrap();
+        assert_eq!(data_draft_id, draft_id);
+        assert_eq!(data_amount, 5_000);
+        assert_eq!(data_amendments, 0);
     }
 }

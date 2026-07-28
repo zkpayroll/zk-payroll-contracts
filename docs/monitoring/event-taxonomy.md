@@ -108,6 +108,27 @@ Notes:
 - The corresponding nullifier is recorded in `salary_commitment` storage in the same
   transaction; a `payment_executed` event without a recorded nullifier indicates a bug.
 
+### `run_prepared`
+
+Emitted by `payroll` when a pending payroll run is prepared via
+`prepare_payroll_run`. The run is stored as a `PendingPayrollRun` and can
+either be finalized or cancelled.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| topic[0] | `Symbol` | `"payroll"` |
+| topic[1] | `Symbol` | `"run_prepared"` |
+| data[0] | `u64` | Run ID (monotonically increasing, starts at 1) |
+| data[1] | `i128` | Total authorised spend for this run |
+| data[2] | `Address` | Admin address that prepared the run |
+| data[3] | `u32` | Number of employees in this batch |
+
+Notes:
+- A prepared run does not transfer any funds. Funds are only transferred
+  when the run is executed via `batch_process_payroll`.
+- The `PendingPayrollRun` is queryable via `get_pending_run(run_id)` until
+  cancelled.
+
 ### `run_executed`
 
 Emitted by `payroll` once per `batch_process_payroll` call after all individual
@@ -119,6 +140,8 @@ payments succeed.
 | topic[1] | `Symbol` | `"run_executed"` |
 | data[0] | `u64` | Run ID (monotonically increasing, starts at 1) |
 | data[1] | `i128` | Total amount transferred in this run |
+| data[2] | `Address` | Admin that executed the run |
+| data[3] | `u32` | Number of employees paid in this run |
 
 Notes:
 - Run IDs are contiguous and monotonically increasing. A gap in run IDs signals a

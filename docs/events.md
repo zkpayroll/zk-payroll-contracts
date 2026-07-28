@@ -122,7 +122,7 @@ topics[1]  Address auditor
 data       (Symbol company_id, u64 period_start, u64 period_end)
 ```
 
-## payroll (legacy)
+## payroll
 
 ### payment_executed
 
@@ -132,6 +132,71 @@ Emitted per employee in a batch payroll run.
 topics[0]  Symbol("payroll")
 topics[1]  Symbol("payment_executed")
 data       (Address employee, i128 amount)
+```
+
+### run_prepared
+
+Emitted when a pending payroll run is prepared via `prepare_payroll_run`.
+The run is not yet executed — it must be finalized or cancelled later.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_prepared")
+data       (u64 run_id, i128 total_amount, Address admin, u32 employee_count)
+```
+
+### run_executed
+
+Emitted after a successful `batch_process_payroll` call completes all
+individual payments. The run is stored on-chain with `ReconciliationStatus::Unreconciled`.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_executed")
+data       (u64 run_id, i128 total_amount, Address admin, u32 employee_count)
+```
+
+### run_cancelled
+
+Emitted when a pending payroll run is cancelled via `cancel_payroll_run`.
+The run is removed from storage and no funds are transferred.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_cancelled")
+data       (u64 run_id, i128 total_amount)
+```
+
+### draft_created
+
+Emitted when a payroll run draft is created via `create_run_draft`.
+The draft starts in `Pending` state and may be amended before finalization.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_created")
+data       (u64 draft_id, Address admin, Symbol period_label)
+```
+
+### draft_amended
+
+Emitted when a pending draft is amended via `amend_run_draft`.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_amended")
+data       (u64 draft_id, i128 new_total_amount, u32 amendment_count)
+```
+
+### draft_finalized
+
+Emitted when a pending draft is finalized via `finalize_run_draft`.
+Finalized drafts are immutable and serve as the canonical audit record.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_finalized")
+data       (u64 draft_id, i128 total_amount, u32 amendment_count)
 ```
 
 ## Consumption Expectations
