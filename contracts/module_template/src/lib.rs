@@ -32,11 +32,6 @@ pub enum ModuleError {
     Unauthorized = 3,
 }
 
-#[contracttype]
-pub enum DataKey {
-    Admin,
-}
-
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 /// One variant per logical storage slot.

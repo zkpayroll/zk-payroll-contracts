@@ -161,41 +161,40 @@ impl<'a> PauseManagerClient<'a> {
     }
 
     pub fn initialize(&self, operator: &Address) {
+        let mut args = soroban_sdk::Vec::new(self.0);
+        args.push_back(operator.clone().into());
         self.0.invoke_contract(
             &self.1,
             &Symbol::new(self.0, "initialize"),
-            (operator.clone(),),
+            args,
         );
     }
 
     pub fn pause(&self) {
+        let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(self.0);
         self.0
-            .invoke_contract(&self.1, &Symbol::new(self.0, "pause"), ());
+            .invoke_contract(&self.1, &Symbol::new(self.0, "pause"), args);
     }
 
     pub fn unpause(&self) {
+        let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(self.0);
         self.0
-            .invoke_contract(&self.1, &Symbol::new(self.0, "unpause"), ());
+            .invoke_contract(&self.1, &Symbol::new(self.0, "unpause"), args);
     }
 
     pub fn is_paused(&self) -> bool {
+        let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::Vec::new(self.0);
         self.0
-            .invoke_contract(&self.1, &Symbol::new(self.0, "is_paused"), ())
+            .invoke_contract(&self.1, &Symbol::new(self.0, "is_paused"), args)
     }
 
-    pub fn propose_operator_rotation(&self, current_operator: &Address, new_operator: &Address) {
+    pub fn set_operator(&self, new_operator: &Address) {
+        let mut args = soroban_sdk::Vec::new(self.0);
+        args.push_back(new_operator.clone().into());
         self.0.invoke_contract(
             &self.1,
-            &Symbol::new(self.0, "propose_operator_rotation"),
-            (current_operator.clone(), new_operator.clone()),
-        );
-    }
-
-    pub fn accept_operator_rotation(&self, new_operator: &Address) {
-        self.0.invoke_contract(
-            &self.1,
-            &Symbol::new(self.0, "accept_operator_rotation"),
-            (new_operator.clone(),),
+            &Symbol::new(self.0, "set_operator"),
+            args,
         );
     }
 

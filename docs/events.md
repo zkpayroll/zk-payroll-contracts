@@ -546,15 +546,7 @@ topics[1]  Address auditor
 data       (Symbol company_id, u64 period_start, u64 period_end)
 ```
 
-> 📌 `company_id` here is the audit-module `Symbol` form (string-coerced
-> identifier), which differs from the `u64` integer ID used by
-> `payroll_registry` and `payment_executor`.
-
-| Severity | Consumers |
-|----------|-----------|
-| `INFO` | Compliance dashboards, period-aggregators |
-
----
+## payroll
 
 ### `AuditSummaryExported` — `audit_module`
 
@@ -568,154 +560,78 @@ topics[1]  Address auditor
 data       (Symbol company_id, u64 period_start, u64 period_end, u32 total_entries)
 ```
 
-| Severity | Consumers |
-|----------|-----------|
-| `LOW` | External compliance integrations, evidence-collectors |
+### run_prepared
 
----
+Emitted when a pending payroll run is prepared via `prepare_payroll_run`.
+The run is not yet executed — it must be finalized or cancelled later.
 
-## Proof Events
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_prepared")
+data       (u64 run_id, i128 total_amount, Address admin, u32 employee_count)
+```
 
-`proof_verifier` is a storage-only contract; it does not emit events directly.
-However, `payment_executor.execute_payment` integrates proof verification
-into the settlement path, and the **success or failure** of a payment is the
-public signal that a Groth16 proof was or was not verified.
+### run_executed
 
-> A failed proof verification causes a Soroban transaction reversion
-> (`"Invalid payment proof"`); it does NOT emit an explicit event. Off-chain
-> monitors must listen for failed transactions and read the diagnostic
-> string from the host envelope.
+Emitted after a successful `batch_process_payroll` call completes all
+individual payments. The run is stored on-chain with `ReconciliationStatus::Unreconciled`.
 
-### Proof success — `PayrollProcessed`
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_executed")
+data       (u64 run_id, i128 total_amount, Address admin, u32 employee_count)
+```
 
-Every `PayrollProcessed` event (§ Payroll Events) is also an implicit
-**proof-verification success**: the contract only emits it after
-`proof_verifier.verify` returned `true` and the asset allowlist passed.
+### run_cancelled
 
-**Cross-domain signal contract:**
+Emitted when a pending payroll run is cancelled via `cancel_payroll_run`.
+The run is removed from storage and no funds are transferred.
 
-| Proof result | On-chain signal | Consumer guidance |
-|--------------|-----------------|-------------------|
-| Success | `PayrollProcessed` event in same tx | Indexers may treat as authoritative proof-acceptance |
-| Failure (`CommitmentMismatch`, malformed proof, etc.) | Transaction reverts with host diagnostic | Detect via failed-tx monitoring; see [event-severity-mappings.md](./monitoring/event-severity-mappings.md) Exceptional Conditions |
-| Stale proof (`ProofExpired`, > 7 days) | `PaymentError::ProofExpired` reversion | Detect via failed-tx monitoring; § Operational Impact |
-| Replay attempt | `PaymentError::ProofAlreadyUsed` reversion | `CRITICAL` alert (see [alert-rules.md](./monitoring/alert-rules.md) § 2) |
-| Payment in closed period | `PaymentError::PeriodClosed` reversion | `MEDIUM` alert (see [alert-rules.md](./monitoring/alert-rules.md) § 6) |
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_cancelled")
+data       (u64 run_id, i128 total_amount)
+```
 
-| Severity | Consumers |
-|----------|-----------|
-| See `PayrollProcessed` for success | See `PayrollProcessed` |
+### draft_created
 
----
+Emitted when a payroll run draft is created via `create_run_draft`.
+The draft starts in `Pending` state and may be amended before finalization.
 
-## Consumer Matrix
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_created")
+data       (u64 draft_id, Address admin, Symbol period_label)
+```
 
-Quick-reference: which consumer types should subscribe to which domain.
+### draft_amended
 
-| Consumer | Employee | Payroll | Treasury | Audit | Proof |
-|----------|:--------:|:-------:|:--------:|:-----:|:-----:|
-| HR/Employee UI | ✓ | – | – | – | – |
-| Payroll operator UI | ✓ | ✓ | ✓ | – | – |
-| Payment indexer | ✓ | ✓ | ✓ | – | ✓ |
-| Reconciliation tool | – | ✓ | ✓ | ✓ | ✓ |
-| Treasury dashboard | – | ✓ | ✓ | – | – |
-| Compliance dashboard | – | ✓ | – | ✓ | – |
-| Audit-trace builder | ✓ | – | – | ✓ | ✓ |
-| Incident-response alerts | ✓ (locks) | ✓ | ✓ (pause) | ✓ (revokes) | ✓ (failed-tx) |
-| External compliance export | – | – | – | ✓ | – |
-| Identity provider / HR-system bridge | ✓ (`ReferenceIdSet`) | – | – | – | – |
+Emitted when a pending draft is amended via `amend_run_draft`.
 
----
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_amended")
+data       (u64 draft_id, i128 new_total_amount, u32 amendment_count)
+```
 
-## Indexer Integration Notes
+### draft_finalized
 
-- Subscribe **by contract address and topic discriminant** — multiple
-  contracts emit events that overlap by name (e.g. `CommitmentUpdated` is
-  emitted by both `salary_commitment` and `payroll_registry`).
-- Decode topics and data using `ScVal` (`Symbol`, `Address`, `u32`, `u64`,
-  `i128`, `BytesN<N>`, tuples). The Stellar SDK's `EventFilter` is the
-  recommended subscription mechanism.
-- `i128` amount fields are **raw token units** — divide by the token's
-  decimal precision before storing or displaying.
-- The two payment paths (`payment_executor` and legacy `payroll`) use
-  different topic layouts — normalise records to a common schema keyed on
-  `(company_id, employee, period, amount, ledger_sequence)` to avoid
-  double-counting.
-- `company_id` is a `u64` integer in `payroll_registry` / `payment_executor`,
-  but a `Symbol` string identifier in `audit_module`. Convert both to a
-  stable off-chain UUID namespace when correlating across domains.
-- Failed proof verifications do NOT emit an event — monitor host-level
-  transaction failures and parse reversion diagnostics instead.
+Emitted when a pending draft is finalized via `finalize_run_draft`.
+Finalized drafts are immutable and serve as the canonical audit record.
 
----
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_finalized")
+data       (u64 draft_id, i128 total_amount, u32 amendment_count)
+```
 
-## Compatibility & Versioning
+## Consumption Expectations
 
-- This document covers the v0 event surface emitted by `master`. Older
-  deployments may emit the legacy `payment_executed` and `ViewKeyRevoked`
-  names — see [interop/proof-schema-version-negotiation.md](./interop/proof-schema-version-negotiation.md)
-  for the negotiation protocol used when older and newer clients coexist.
-- New events MUST be added here AND in [event-taxonomy.md](./monitoring/event-taxonomy.md)
-  AND [event-severity-mappings.md](./monitoring/event-severity-mappings.md)
-  before a release ships.
-- Renaming an event is a **breaking change** — use topic aliases during
-  deprecation windows, and document the migration window in release notes.
-
----
-
-## Quick Schema Tables (one-page crib sheet)
-
-### Topics-only (no data)
-
-| Event | Contract | topics |
-|-------|----------|--------|
-| `EmployeeRemoved` | `payroll_registry` | `("EmployeeRemoved", u64 company_id, Address employee)` |
-| `CommitmentLocked` | `salary_commitment` | `("CommitmentLocked", Address employee)` |
-| `CommitmentUnlocked` | `salary_commitment` | `("CommitmentUnlocked", Address employee)` |
-| `AdminRotationAccepted` | `salary_commitment` | `("AdminRotationAccepted", Address new_admin)` |
-| `AdminRotationCancelled` | `salary_commitment` | `("AdminRotationCancelled", Address current_admin)` |
-| `PauseManager / paused` | `pause_manager` | `("PauseManager", "paused")` |
-| `PauseManager / unpaused` | `pause_manager` | `("PauseManager", "unpaused")` |
-
-### Tuples by topic shape
-
-| Event | Contract | topics | data |
-|-------|----------|--------|------|
-| `EmployeeAdded` | `payroll_registry` | `(company_id, employee)` | `(commitment,)` |
-| `CommitmentUpdated` | `salary_commitment` | `(employee)` | `(commitment,)` |
-| `CommitmentUpdated` | `payroll_registry` | `(company_id, employee)` | `(new_commitment,)` |
-| `CommitmentRotated` | `salary_commitment` | `(employee)` | `(old, new)` |
-| `ReferenceIdSet` | `salary_commitment` | `(employee)` | `(reference_id,)` |
-| `AdminRotationProposed` | `salary_commitment` | `(current_admin)` | `(new_admin,)` |
-| `CompanyRegistered` | `payroll_registry` | `(company_id)` | `(admin, treasury)` |
-| `PeriodCreated` | `payment_executor` | `(company_id)` | `(period_id,)` |
-| `PeriodClosed` | `payment_executor` | `(company_id)` | `(period_id,)` |
-| `PayrollProcessed` | `payment_executor` | `(company_id)` | `(employee, amount, period_id)` |
-| `ViewKeyGenerated` | `audit_module` | `(auditor)` | `(key_bytes, expiration_ledger)` |
-| `AuditAccessRevoked` | `audit_module` | `(admin, auditor)` | `(timestamp,)` |
-| `AuditSuccessful` | `audit_module` | `(auditor)` | `(scope, keyed_stored)` |
-| `AggregateAuditGenerated` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end)` |
-| `AuditSummaryExported` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end, total)` |
-| `PauseManager / op_proposed` | `pause_manager` | `("PauseManager", "op_proposed")` | `(current_operator, new_operator)` |
-| `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address — single-value data)* |
-| `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address — single-value data)* |
-
----
-
-## Related Resources
-
-| Reference | Path |
-|-----------|------|
-| Event taxonomy (canonical categories) | [docs/monitoring/event-taxonomy.md](./monitoring/event-taxonomy.md) |
-| Event severity mappings | [docs/monitoring/event-severity-mappings.md](./monitoring/event-severity-mappings.md) |
-| Alert rules | [docs/monitoring/alert-rules.md](./monitoring/alert-rules.md) |
-| Payload examples | [docs/payload-examples.md](./payload-examples.md) |
-| SLA operational targets | [docs/SLA_OPERATIONAL_TARGETS.md](./SLA_OPERATIONAL_TARGETS.md) |
-| Health metrics | [docs/monitoring/health-metrics-observability.md](./monitoring/health-metrics-observability.md) |
-| `payroll_registry` contract | `contracts/payroll_registry/src/lib.rs` |
-| `salary_commitment` contract | `contracts/salary_commitment/src/lib.rs` |
-| `payment_executor` contract | `contracts/payment_executor/src/lib.rs` |
-| `audit_module` contract | `contracts/audit_module/src/lib.rs` |
-| `pause_manager` contract | `contracts/pause_manager/src/lib.rs` |
-| `proof_verifier` contract | `contracts/proof_verifier/src/lib.rs` |
-| Legacy `payroll` contract | `contracts/payroll/src/lib.rs` |
+- **Indexers** should filter by `topics[0]` for the event name and
+  `topics[1]` for the primary identifier (company, employee, or auditor).
+- **Dashboards** can reconstruct payment history by joining `PayrollProcessed`
+  events with off-chain employee metadata.
+- **Audit tooling** should listen for `ViewKeyGenerated` and `ViewKeyRevoked`
+  to track key lifecycle, and `AuditSuccessful` for compliance logs.
+- **Analytics** can track onboarding velocity via `CompanyRegistered` and
+  `EmployeeAdded` rates.
