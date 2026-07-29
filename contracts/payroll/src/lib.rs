@@ -5,6 +5,7 @@ use soroban_sdk::{
 };
 
 use pause_manager::PauseManagerClient;
+use payroll_registry::PayrollRegistryClient;
 use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
 
@@ -742,6 +743,9 @@ impl Payroll {
     ///
     /// Cancellation emits an event for audit trails. Finalized runs cannot be
     /// cancelled retroactively.
+    ///
+    /// Issue #218: Added explicit validation that the run is still pending
+    /// and proper state cleanup to prevent cancel-after-submit race conditions.
     pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
@@ -760,6 +764,13 @@ impl Payroll {
             .persistent()
             .get(&pending_key)
             .expect("Pending run not found");
+
+        // Issue #218: Check if run has already been finalized
+        // Once a run is executed, it cannot be cancelled
+        let run_key = DataKey::PayrollRun(run_id);
+        if e.storage().persistent().has(&run_key) {
+            panic!("Cannot cancel: run has already been executed");
+        }
 
         // Remove the pending run from storage
         e.storage().persistent().remove(&pending_key);
@@ -944,6 +955,14 @@ impl Payroll {
             let proof = proofs.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
             let employee = employees.get(i).unwrap();
+
+            // Issue #61: Check employee eligibility before processing payment
+            // This ensures deactivated employees cannot receive payroll
+            let registry_client = PayrollRegistryClient::new(&e, &addrs.registry);
+            let company_id: u64 = 1; // TODO: Pass company_id as parameter
+            if !registry_client.is_eligible(&company_id, &employee) {
+                panic!("Employee {} is not eligible for payroll (inactive or incomplete)", i);
+            }
 
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
@@ -1406,6 +1425,42 @@ impl Payroll {
         e.storage()
             .persistent()
             .get(&DataKey::PendingTreasuryRotation)
+    }
+
+    // ── Issue #177: metadata hash verification ──────────────────────────────
+
+    /// Return the metadata hash bound to a completed payroll run.
+    ///
+    /// Returns the raw `BytesN<32>` stored in the run record. The zero hash
+    /// indicates no metadata has been bound yet.
+    pub fn get_metadata_hash(e: Env, run_id: u64) -> BytesN<32> {
+        let run: PayrollRun = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollRun(run_id))
+            .expect("Run not found");
+        run.metadata_hash
+    }
+
+    /// Verify that the metadata hash stored on-chain for a payroll run matches
+    /// the expected value.
+    ///
+    /// This is a read-only verification function: it retrieves the
+    /// `metadata_hash` from the completed `PayrollRun` record and compares it
+    /// byte-for-byte against `expected_hash`. Returns `true` if they match,
+    /// `false` otherwise.
+    ///
+    /// Use cases:
+    ///   - Off-chain auditors can call this to confirm the on-chain state
+    ///     aligns with their locally computed metadata hash.
+    ///   - Other contracts can call this for cross-contract verification.
+    pub fn verify_metadata_hash(e: Env, run_id: u64, expected_hash: BytesN<32>) -> bool {
+        let run: PayrollRun = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollRun(run_id))
+            .expect("Run not found");
+        run.metadata_hash == expected_hash
     }
 }
 
@@ -3075,6 +3130,157 @@ mod tests {
         assert!(result.is_err());
     }
 
+// ── Issue #177: metadata hash verification tests ─────────────────────────
+
+    #[test]
+    fn test_verify_metadata_hash_returns_true_on_match() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs, &amounts, &employees, &1000, &test_nonce(&env, 60), &None,
+        );
+
+        let meta_hash = BytesN::from_array(&env, &[0xaau8; 32]);
+        payroll_client.commit_metadata_hash(&admin, &meta_hash);
+        payroll_client.set_run_metadata(&admin, &run_id, &meta_hash);
+
+        assert!(payroll_client.verify_metadata_hash(&run_id, &meta_hash));
+    }
+
+    #[test]
+    fn test_verify_metadata_hash_returns_false_on_mismatch() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs, &amounts, &employees, &1000, &test_nonce(&env, 61), &None,
+        );
+
+        let meta_hash = BytesN::from_array(&env, &[0xbbu8; 32]);
+        payroll_client.commit_metadata_hash(&admin, &meta_hash);
+        payroll_client.set_run_metadata(&admin, &run_id, &meta_hash);
+
+        let wrong_hash = BytesN::from_array(&env, &[0xccu8; 32]);
+        assert!(!payroll_client.verify_metadata_hash(&run_id, &wrong_hash));
+    }
+
+    #[test]
+    #[should_panic(expected = "Run not found")]
+    fn test_verify_metadata_hash_nonexistent_run_panics() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let hash = BytesN::from_array(&env, &[0xddu8; 32]);
+        payroll_client.verify_metadata_hash(&999u64, &hash);
+    }
+
+    #[test]
+    fn test_verify_metadata_hash_unbound_defaults_to_zero() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs, &amounts, &employees, &1000, &test_nonce(&env, 62), &None,
+        );
+
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        assert!(payroll_client.verify_metadata_hash(&run_id, &zero));
+    }
+
+    #[test]
+    fn test_get_metadata_hash_returns_bound_value() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs, &amounts, &employees, &1000, &test_nonce(&env, 63), &None,
+        );
+
+        let meta_hash = BytesN::from_array(&env, &[0xeeu8; 32]);
+        payroll_client.commit_metadata_hash(&admin, &meta_hash);
+        payroll_client.set_run_metadata(&admin, &run_id, &meta_hash);
+
+        let stored = payroll_client.get_metadata_hash(&run_id);
+        assert_eq!(stored, meta_hash);
+    }
+
+    #[test]
+    fn test_commit_metadata_hash_event_emitted() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let meta_hash = BytesN::from_array(&env, &[0xffu8; 32]);
+        let before = env.events().all().len();
+        payroll_client.commit_metadata_hash(&admin, &meta_hash);
+        let after = env.events().all().len();
+        assert!(after > before);
+    }
+
+    #[test]
+    fn test_metadata_hash_verification_after_commit_bind_cycle() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let hash_a = BytesN::from_array(&env, &[0x11u8; 32]);
+        let hash_b = BytesN::from_array(&env, &[0x22u8; 32]);
+
+        payroll_client.commit_metadata_hash(&admin, &hash_a);
+        payroll_client.commit_metadata_hash(&admin, &hash_b);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs, &amounts, &employees, &1000, &test_nonce(&env, 64), &None,
+        );
+
+        payroll_client.set_run_metadata(&admin, &run_id, &hash_a);
+
+        assert!(payroll_client.verify_metadata_hash(&run_id, &hash_a));
+        assert!(!payroll_client.verify_metadata_hash(&run_id, &hash_b));
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_commit_metadata_hash_rejects_non_admin() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let attacker = Address::generate(&env);
+        let meta_hash = BytesN::from_array(&env, &[0x33u8; 32]);
+        payroll_client.commit_metadata_hash(&attacker, &meta_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_set_run_metadata_rejects_non_admin() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs, &amounts, &employees, &1000, &test_nonce(&env, 65), &None,
+        );
+
+        let meta_hash = BytesN::from_array(&env, &[0x44u8; 32]);
+        payroll_client.commit_metadata_hash(&admin, &meta_hash);
+
+        let attacker = Address::generate(&env);
+        payroll_client.set_run_metadata(&attacker, &run_id, &meta_hash);
+    }
+
     // ── Idempotent Retry & Replay Protection ─────────────────────────────────
 
     /// Retrying the exact same batch with the same nonce must return the same
@@ -3088,7 +3294,6 @@ mod tests {
         let nonce = test_nonce(&env, 90);
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
 
-        // First execution
         let run_id_1 = payroll_client.batch_process_payroll(
             &proofs,
             &amounts,
@@ -3098,7 +3303,6 @@ mod tests {
             &None,
         );
 
-        // Idempotent retry with identical payload
         let run_id_2 = payroll_client.batch_process_payroll(
             &proofs,
             &amounts,
@@ -3111,8 +3315,6 @@ mod tests {
         assert_eq!(run_id_1, run_id_2, "Idempotent retry must return same run_id");
     }
 
-    /// Submitting a different payload with the same nonce must be rejected as
-    /// a conflicting replay (malicious replay detection).
     #[test]
     #[should_panic(expected = "Conflicting replay detected")]
     fn test_conflicting_replay_with_modified_payload_is_rejected() {
@@ -3123,7 +3325,6 @@ mod tests {
         let nonce = test_nonce(&env, 91);
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
 
-        // First execution with nonce
         payroll_client.batch_process_payroll(
             &proofs,
             &amounts,
@@ -3133,19 +3334,17 @@ mod tests {
             &None,
         );
 
-        // Conflicting replay: same nonce, different amount
         let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 2000);
         payroll_client.batch_process_payroll(
             &proofs2,
             &amounts2,
             &employees2,
             &2000,
-            &nonce, // same nonce but different payload
+            &nonce,
             &None,
         );
     }
 
-    /// Idempotent retry with prepare_payroll_run must also return same run_id.
     #[test]
     fn test_prepare_payroll_run_idempotent_retry() {
         let env = Env::default();
@@ -3164,7 +3363,6 @@ mod tests {
             &None,
         );
 
-        // Idempotent retry with same payload
         let run_id_2 = payroll_client.prepare_payroll_run(
             &proofs,
             &amounts,
@@ -3177,7 +3375,6 @@ mod tests {
         assert_eq!(run_id_1, run_id_2, "Prepare idempotent retry must return same run_id");
     }
 
-    /// Conflicting replay on prepare_payroll_run must be rejected.
     #[test]
     #[should_panic(expected = "Conflicting replay detected")]
     fn test_prepare_payroll_run_rejects_conflicting_replay() {
@@ -3197,7 +3394,6 @@ mod tests {
             &None,
         );
 
-        // Conflicting replay: same nonce, different amount
         let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 2000);
         payroll_client.prepare_payroll_run(
             &proofs2,
@@ -3209,16 +3405,10 @@ mod tests {
         );
     }
 
-    /// Distinct nonces with the same payload on separate contract instances
-    /// must produce distinct run IDs. This also demonstrates cross-company
-    /// collision safety: the same nonce value used on different contract
-    /// instances (different companies) does not interfere.
     #[test]
     fn test_distinct_nonces_with_same_payload_are_distinct_runs() {
         let env = Env::default();
 
-        // Use two completely separate contract setups (same pattern as
-        // test_distinct_nonces_allow_multiple_runs).
         let (client1, _a1, _t1, _to1, emp1) = setup_simple_payroll(&env);
         let (p1, a1, e1) = single_payment_batch(&env, &emp1, 500);
         let id1 = client1.batch_process_payroll(&p1, &a1, &e1, &500, &test_nonce(&env, 94), &None);
@@ -3232,14 +3422,10 @@ mod tests {
         assert!(id2 > 0);
     }
 
-    /// Cross-company collision safety: the same nonce byte sequence used on
-    /// two completely separate contract instances must both succeed because
-    /// each contract has its own independent RunNonce storage namespace.
     #[test]
     fn test_cross_company_same_nonce_does_not_collide() {
         let env = Env::default();
 
-        // Two payroll setups with the exact same nonce value.
         let shared_nonce = test_nonce(&env, 99);
 
         let (client1, _a1, _t1, _to1, emp1) = setup_simple_payroll(&env);
@@ -3250,8 +3436,6 @@ mod tests {
         let (p2, a2, e2) = single_payment_batch(&env, &emp2, 1000);
         let id2 = client2.batch_process_payroll(&p2, &a2, &e2, &1000, &shared_nonce, &None);
 
-        // Both must succeed independently — different contract instances
-        // have independent RunNonce storage.
         assert!(id1 > 0);
         assert!(id2 > 0);
         assert_ne!(id1, id2, "Same nonce on different contract instances must not collide");

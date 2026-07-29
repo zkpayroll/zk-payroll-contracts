@@ -529,6 +529,47 @@ impl AuditModule {
         Ok(summary)
     }
 
+    // ── Issue #177: metadata hash verification via audit scope ───────────────
+
+    /// Verify that an off-chain metadata hash matches the expected value,
+    /// recorded under an authorized auditor view key.
+    ///
+    /// The auditor supplies the `stored_hash` (from on-chain payroll run
+    /// records) and the `expected_hash` (their locally computed value). This
+    /// function compares them byte-for-byte and records the outcome as an
+    /// audit log entry.
+    ///
+    /// Returns `Ok(true)` when hashes match, `Ok(false)` when they differ,
+    /// or an `AuditError` if the auditor is not authorised.
+    pub fn verify_payroll_metadata(
+        env: Env,
+        auditor: Address,
+        stored_hash: BytesN<32>,
+        expected_hash: BytesN<32>,
+        scope: AuditScope,
+    ) -> Result<bool, AuditError> {
+        Self::authorize_auditor(&env, auditor.clone())?;
+        Self::verify_scope_for_commitment(scope)?;
+
+        let matched = stored_hash == expected_hash;
+
+        Self::record_audit_log(&env, &auditor, scope, matched);
+
+        if matched {
+            env.events().publish(
+                (Symbol::new(&env, "MetadataVerified"), auditor.clone()),
+                (stored_hash, scope),
+            );
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "MetadataMismatch"), auditor.clone()),
+                (stored_hash, expected_hash),
+            );
+        }
+
+        Ok(matched)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------

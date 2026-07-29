@@ -11,6 +11,7 @@ This document defines the canonical interface and storage model for the
 | `add_employee` | `company_id: u64`, `employee: Address`, `commitment: BytesN<32>` | `()` | `require_auth(admin)` |
 | `remove_employee` | `company_id: u64`, `employee: Address` | `()` | `require_auth(admin)` |
 | `update_commitment` | `company_id: u64`, `employee: Address`, `new_commitment: BytesN<32>` | `()` | `require_auth(admin)` |
+| `set_employee_status` | `company_id: u64`, `employee: Address`, `status: EmployeeStatus` | `()` | `require_auth(admin)` |
 
 ## Rust Interface Definitions
 
@@ -21,6 +22,7 @@ The contract interface is defined by the Rust trait:
   - `fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>)`
   - `fn remove_employee(env: Env, company_id: u64, employee: Address)`
   - `fn update_commitment(env: Env, company_id: u64, employee: Address, new_commitment: BytesN<32>)`
+  - `fn set_employee_status(env: Env, company_id: u64, employee: Address, status: EmployeeStatus)`
 
 ## Storage Types and Keys
 
@@ -48,3 +50,6 @@ The `CompanyInfo` struct definition in Rust:
 | `EmployeeAdded` | `add_employee` |
 | `EmployeeRemoved` | `remove_employee` |
 | `CommitmentUpdated` | `update_commitment` |
+| `EmployeeDeactivated` | `set_employee_status(..., EmployeeStatus::Inactive)` |
+| `EmployeeReactivated` | `set_employee_status(..., EmployeeStatus::Active)` |
+| `EmployeeStatusUpdated` | `set_employee_status(..., EmployeeStatus::Incomplete)` |

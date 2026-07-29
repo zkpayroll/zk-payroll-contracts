@@ -32,11 +32,6 @@ pub enum ModuleError {
     Unauthorized = 3,
 }
 
-#[contracttype]
-pub enum DataKey {
-    Admin,
-}
-
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 /// One variant per logical storage slot.
@@ -99,29 +94,6 @@ impl ModuleTemplate {
             .ok_or(ModuleError::NotInitialized)
     }
 }
-
-
-    // TODO: implement module-specific entry-points below.
-    //
-    // Pattern for admin-gated mutation:
-    //
-    //   pub fn some_action(e: Env, admin: Address, ...) -> Result<(), ModuleError> {
-    //       let stored: Address = e
-    //           .storage()
-    //           .persistent()
-    //           .get(&DataKey::Admin)
-    //           .ok_or(ModuleError::NotInitialized)?;
-    //       if admin != stored { return Err(ModuleError::Unauthorized); }
-    //       admin.require_auth();
-    //
-    //       // ... mutate state ...
-    //
-    //       e.events().publish(
-    //           (symbol_short!("module"), Symbol::new(&e, "some_action")),
-    //           /* event data */,
-    //       );
-    //       Ok(())
-    //   }
 
 // TODO: implement module-specific entry-points below.
 //

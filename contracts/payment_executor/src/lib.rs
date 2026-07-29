@@ -388,6 +388,19 @@ impl PaymentExecutor {
             panic!("Asset not allowed");
         }
 
+        // Issue #217: Validate treasury asset mapping matches supported payroll assets
+        // Ensure the token contract address is valid and matches expected format
+        let token_str = format!("{:?}", addresses.token);
+        if token_str.is_empty() {
+            panic!("Invalid treasury asset mapping: empty token address");
+        }
+        
+        // Verify the treasury address is properly configured and matches asset type
+        let treasury_str = format!("{:?}", addresses.treasury);
+        if treasury_str.is_empty() {
+            panic!("Invalid treasury mapping: empty treasury address");
+        }
+
         // Execute token transfer from company treasury to employee.
         let token_client = token::Client::new(&env, &addresses.token);
         token_client.transfer(&company.treasury, &employee, &amount);

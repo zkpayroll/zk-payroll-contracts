@@ -111,6 +111,77 @@ data       ()
 
 ---
 
+### `EmployeeDeactivated` — `payroll_registry`
+
+Emitted when a registered employee is marked `Inactive` via
+`set_employee_status`. Deactivated employees remain in storage but are not
+eligible for payroll execution until reactivated.
+
+```
+topics[0]  Symbol("EmployeeDeactivated")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+| Field | Meaning |
+|-------|---------|
+| `previous_status` | Status observed before the update. |
+| `new_status` | Always `EmployeeStatus::Inactive`. |
+| `ledger_sequence` | Ledger sequence at which the lifecycle change was recorded. |
+| `timestamp` | Ledger timestamp for ordering history views. |
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` | HR UIs, payroll eligibility caches, audit-log indexers |
+
+---
+
+### `EmployeeReactivated` — `payroll_registry`
+
+Emitted when a registered employee is marked `Active` via
+`set_employee_status`. Reactivated employees become eligible for payroll
+execution once other client-side checks pass.
+
+```
+topics[0]  Symbol("EmployeeReactivated")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+| Field | Meaning |
+|-------|---------|
+| `previous_status` | Status observed before the update. |
+| `new_status` | Always `EmployeeStatus::Active`. |
+| `ledger_sequence` | Ledger sequence at which the lifecycle change was recorded. |
+| `timestamp` | Ledger timestamp for ordering history views. |
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` | HR UIs, payroll eligibility caches, audit-log indexers |
+
+---
+
+### `EmployeeStatusUpdated` — `payroll_registry`
+
+Emitted when a registered employee is moved to `Incomplete`. This state is
+used when required registration data is missing and should be treated as
+ineligible until corrected.
+
+```
+topics[0]  Symbol("EmployeeStatusUpdated")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | HR UIs, roster validation jobs |
+
+---
+
 ### `CommitmentUpdated` — `salary_commitment`
 
 Emitted when a new commitment is stored (`store_commitment`) or an existing

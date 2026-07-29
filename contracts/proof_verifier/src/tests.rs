@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Env, Vec};
+use soroban_sdk::{Env, IntoVal, Vec};
 
 fn mock_verification_key(env: &Env) -> VerificationKey {
     VerificationKey {
@@ -141,13 +141,21 @@ fn test_unauthorized_initialize_verifier_wrong_caller() {
     let admin = soroban_sdk::Address::generate(&env);
     client.init_verifier_admin(&admin);
 
-    // A different address tries to initialize — should be rejected.
+    // A different address tries to initialize — should be rejected because
+    // only the imposter signature is present, while the contract requires the
+    // stored admin signature.
     let imposter = soroban_sdk::Address::generate(&env);
-    env.mock_all_auths();
-    // Override auth so only imposter is authenticated, not the real admin.
-    env.budget().reset_default();
-
     let vk = mock_verification_key(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &imposter,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize_verifier",
+            args: (vk.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
     client.initialize_verifier(&vk);
 }
 

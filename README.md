@@ -221,6 +221,11 @@ execution, and audit access — with sample payloads and input/output tables.
 See [docs/events.md](docs/events.md) for the full event schema reference and
 consumption expectations.
 
+## Contract Error Handling
+
+See [docs/errors.md](docs/errors.md) for common contract failure modes,
+retryability guidance, and suggested SDK/dashboard recovery messages.
+
 
 ## Contributing
 
