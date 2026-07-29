@@ -1563,6 +1563,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "migration_tests"
+version = "0.1.0"
+dependencies = [
+ "audit_module",
+ "pause_manager",
+ "payment_executor",
+ "payroll",
+ "payroll_registry",
+ "proof_verifier",
+ "salary_commitment",
+ "soroban-sdk",
+ "stellar-strkey",
+ "token",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"

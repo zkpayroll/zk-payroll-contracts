@@ -7,6 +7,7 @@ use salary_commitment::SalaryCommitmentContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env,
 };
+use soroban_sdk::xdr::ToXdr;
 
 /// Maximum age for a proof relative to its period creation time (7 days in seconds).
 /// Proofs must be submitted within this window to prevent replay attacks using stale proofs.
@@ -388,19 +389,6 @@ impl PaymentExecutor {
             panic!("Asset not allowed");
         }
 
-        // Issue #217: Validate treasury asset mapping matches supported payroll assets
-        // Ensure the token contract address is valid and matches expected format
-        let token_str = format!("{:?}", addresses.token);
-        if token_str.is_empty() {
-            panic!("Invalid treasury asset mapping: empty token address");
-        }
-        
-        // Verify the treasury address is properly configured and matches asset type
-        let treasury_str = format!("{:?}", addresses.treasury);
-        if treasury_str.is_empty() {
-            panic!("Invalid treasury mapping: empty treasury address");
-        }
-
         // Execute token transfer from company treasury to employee.
         let token_client = token::Client::new(&env, &addresses.token);
         token_client.transfer(&company.treasury, &employee, &amount);
@@ -496,7 +484,7 @@ impl PaymentExecutor {
             }
         }
 
-        env.crypto().sha256(&hash_input)
+        env.crypto().sha256(&hash_input).into()
     }
 
     /// Execute batch payroll for multiple employees.
@@ -575,7 +563,7 @@ impl PaymentExecutor {
         env.storage().persistent().set(&batch_key, &true);
         env.storage()
             .persistent()
-            .set(&DataKey::BatchExecutionRecords(fingerprint), &records);
+            .set(&DataKey::BatchExecutionRecords(fingerprint.clone()), &records);
 
         env.events().publish(
             (
@@ -1485,8 +1473,7 @@ mod tests {
                 &proofs_c,
                 &nullifiers,
                 &1,
-            )
-            .unwrap();
+            );
         assert_eq!(records1.len(), 1);
         assert_eq!(token_client.balance(&treasury), 9_000);
         assert_eq!(token_client.balance(&employee), 1_000);
@@ -1502,8 +1489,7 @@ mod tests {
                 &proofs_c,
                 &nullifiers,
                 &1,
-            )
-            .unwrap();
+            );
         assert_eq!(records2.len(), 1);
 
         // Verify state unchanged (no duplicate transfer)
@@ -1564,8 +1550,7 @@ mod tests {
                 &proofs_c1,
                 &nullifiers1,
                 &1,
-            )
-            .unwrap();
+            );
         assert_eq!(r1.len(), 1);
 
         // Batch 2: pay Bob in a new period
@@ -1592,8 +1577,7 @@ mod tests {
                 &proofs_c2,
                 &nullifiers2,
                 &2,
-            )
-            .unwrap();
+            );
         assert_eq!(r2.len(), 1);
 
         // Both payments should be reflected

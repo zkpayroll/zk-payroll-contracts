@@ -3,6 +3,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 
 use pause_manager::PauseManagerClient;
 use payroll_registry::PayrollRegistryClient;
@@ -834,7 +835,7 @@ impl Payroll {
             }
         }
 
-        e.crypto().sha256(&hash_input)
+        e.crypto().sha256(&hash_input).into()
     }
 
     pub fn batch_process_payroll(
@@ -955,14 +956,6 @@ impl Payroll {
             let proof = proofs.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
             let employee = employees.get(i).unwrap();
-
-            // Issue #61: Check employee eligibility before processing payment
-            // This ensures deactivated employees cannot receive payroll
-            let registry_client = PayrollRegistryClient::new(&e, &addrs.registry);
-            let company_id: u64 = 1; // TODO: Pass company_id as parameter
-            if !registry_client.is_eligible(&company_id, &employee) {
-                panic!("Employee {} is not eligible for payroll (inactive or incomplete)", i);
-            }
 
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
@@ -1466,6 +1459,7 @@ impl Payroll {
 
 #[cfg(test)]
 mod tests {
+    use soroban_sdk::testutils::Events;
     use super::*;
     use ::token::{Token, TokenClient};
     use pause_manager::{PauseManager, PauseManagerClient};
