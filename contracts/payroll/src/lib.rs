@@ -6,7 +6,6 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 
 use pause_manager::PauseManagerClient;
-use payroll_registry::PayrollRegistryClient;
 use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
 
@@ -1092,13 +1091,39 @@ impl Payroll {
         new_employee_count: u32,
     ) {
         Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e.storage().persistent().get(&DataKey::Addresses).expect("Not initialized");
-        if admin != addrs.admin { panic!("Unauthorized"); }
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
         admin.require_auth();
-        let mut draft: PayrollRunDraft = e.storage().persistent().get(&DataKey::RunDraft(draft_id)).expect("Draft not found");
-        if draft.state != RunDraftState::Pending { panic!("Only pending drafts can be amended"); }
-        if new_total_amount <= 0 { panic!("total_amount must be positive"); }
-        draft.total_amount=new_total_amount; draft.employee_count=new_employee_count; draft.amendment_count+=1; e.storage().persistent().set(&DataKey::RunDraft(draft_id), &draft); e.events().publish((symbol_short!("payroll"), Symbol::new(&e,"draft_amended")),(draft_id,new_total_amount,draft.amendment_count));
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+        if draft.state != RunDraftState::Pending {
+            panic!("Only pending drafts can be amended");
+        }
+        if new_total_amount <= 0 {
+            panic!("total_amount must be positive");
+        }
+        draft.total_amount = new_total_amount;
+        draft.employee_count = new_employee_count;
+        draft.amendment_count += 1;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "draft_amended"),
+            ),
+            (draft_id, new_total_amount, draft.amendment_count),
+        );
     }
 
     /// Update the reconciliation status of a completed payroll run.
