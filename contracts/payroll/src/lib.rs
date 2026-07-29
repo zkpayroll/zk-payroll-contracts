@@ -794,6 +794,7 @@ impl Payroll {
     /// This fingerprint is stored alongside the nonce so that idempotent
     /// retries (same nonce, same payload) can be distinguished from
     /// malicious replays (same nonce, different payload).
+    #[allow(clippy::cast_sign_loss)]
     fn compute_batch_fingerprint(
         e: &Env,
         proofs: &Vec<BytesN<256>>,

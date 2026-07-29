@@ -22,8 +22,6 @@ pub struct ContractAddresses {
     pub commitment: Address,
     pub treasury: Address,
     pub treasury_owner: Address,
-        registry: Address,
-    pub registry: Address,
 }
 
 /// Reconciliation status for completed payroll runs.
@@ -180,7 +178,6 @@ impl Payroll {
         commitment: Address,
         treasury: Address,
         treasury_owner: Address,
-        registry: Address,
     ) {
         let key = DataKey::Addresses;
         if e.storage().persistent().has(&key) {
@@ -193,7 +190,6 @@ impl Payroll {
             commitment,
             treasury,
             treasury_owner: treasury_owner.clone(),
-            registry,
         };
         e.storage().persistent().set(&key, &addrs);
         e.storage()
@@ -305,7 +301,6 @@ impl Payroll {
     pub fn request_emergency_withdrawal(
         e: Env,
         treasury_owner: Address,
-        registry: Address,
         amount: i128,
         recipient: Address,
     ) {

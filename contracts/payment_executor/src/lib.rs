@@ -101,6 +101,7 @@ pub struct PaymentExecutor;
 
 #[contractimpl]
 impl PaymentExecutor {
+    #[allow(clippy::cast_sign_loss)]
     fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
         if amount < 0 {
             panic!("Amount must be non-negative");
@@ -438,6 +439,7 @@ impl PaymentExecutor {
     /// This gives us a canonical execution identity that detects any change in
     /// the batch composition. Two identical batches always produce the same
     /// fingerprint; any modification changes the fingerprint.
+    #[allow(clippy::cast_sign_loss)]
     fn compute_batch_fingerprint(
         env: &Env,
         company_id: u64,
