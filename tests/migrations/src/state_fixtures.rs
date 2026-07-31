@@ -30,22 +30,20 @@
 
 use payroll_registry::{CompanyInfo, EmployeeStatus, PendingCompanyRotation};
 use salary_commitment::{CommitmentSnapshot, PaymentNullifier, SalaryCommitment};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+use soroban_sdk::{Address, BytesN, Env};
 
 use payroll::{
-    ContractAddresses as PayrollContractAddresses,
-    EmergencyWithdrawalRequest,
-    PayrollRun,
-    PendingPayrollRun,
-    ReconciliationStatus,
-    DataKey as PayrollDataKey,
+    ContractAddresses as PayrollContractAddresses, DataKey as PayrollDataKey,
+    EmergencyWithdrawalRequest, PayrollRun, PendingPayrollRun, ReconciliationStatus,
 };
 use payroll_registry::DataKey as RegistryDataKey;
 use salary_commitment::DataKey as CommitmentDataKey;
 // Audit permissions are set up via contract client APIs in the main test flow.
 // Direct storage fixtures for audit are avoided because the DataKey enum
 // serialization is internal to the audit_module crate.
-use payment_executor::{ContractAddresses as ExecutorContractAddresses, DataKey as ExecutorDataKey};
+use payment_executor::{
+    ContractAddresses as ExecutorContractAddresses, DataKey as ExecutorDataKey,
+};
 
 // ── Address generators ──────────────────────────────────────────────────────
 
@@ -80,7 +78,11 @@ pub struct CompanyFixture {
 }
 
 /// Write a v1 company fixture directly into contract storage.
-pub fn write_v1_company_fixture(env: &Env, registry_id: &Address, company_id: u64) -> CompanyFixture {
+pub fn write_v1_company_fixture(
+    env: &Env,
+    registry_id: &Address,
+    company_id: u64,
+) -> CompanyFixture {
     let admin = seed_address(env, 0xCA);
     let treasury = seed_address(env, 0xCB);
 
@@ -90,12 +92,22 @@ pub fn write_v1_company_fixture(env: &Env, registry_id: &Address, company_id: u6
     };
 
     env.as_contract(registry_id, || {
-        env.storage().persistent().set(&RegistryDataKey::CompanySequence, &(company_id + 1));
-        env.storage().persistent().set(&RegistryDataKey::Company(company_id), &info);
-        env.storage().persistent().set(&RegistryDataKey::CompanyAdmin(admin.clone()), &company_id);
+        env.storage()
+            .persistent()
+            .set(&RegistryDataKey::CompanySequence, &(company_id + 1));
+        env.storage()
+            .persistent()
+            .set(&RegistryDataKey::Company(company_id), &info);
+        env.storage()
+            .persistent()
+            .set(&RegistryDataKey::CompanyAdmin(admin.clone()), &company_id);
     });
 
-    CompanyFixture { admin, treasury, company_id }
+    CompanyFixture {
+        admin,
+        treasury,
+        company_id,
+    }
 }
 
 // ── Employee Fixtures ───────────────────────────────────────────────────────
@@ -148,7 +160,12 @@ pub fn write_v1_employee_fixture(
         );
     });
 
-    EmployeeFixture { employee, commitment: salary_commitment, status, company_id }
+    EmployeeFixture {
+        employee,
+        commitment: salary_commitment,
+        status,
+        company_id,
+    }
 }
 
 // ── Payroll Run Fixtures ────────────────────────────────────────────────────
@@ -183,7 +200,9 @@ pub fn write_v1_payroll_run_fixture(
     };
 
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(&PayrollDataKey::PayrollRun(run_id), &run);
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::PayrollRun(run_id), &run);
     });
 
     PayrollRunFixture { run_id, run }
@@ -211,7 +230,9 @@ pub fn write_v1_pending_run_fixture(
     };
 
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(&PayrollDataKey::PendingRun(run_id), &pending);
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::PendingRun(run_id), &pending);
     });
 }
 
@@ -220,7 +241,9 @@ pub fn write_v1_pending_run_fixture(
 /// Write a v1 run counter into payroll contract storage.
 pub fn write_v1_run_counter(env: &Env, payroll_id: &Address, count: u64) {
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(&PayrollDataKey::RunCounter, &count);
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::RunCounter, &count);
     });
 }
 
@@ -229,7 +252,9 @@ pub fn write_v1_run_counter(env: &Env, payroll_id: &Address, count: u64) {
 /// Write a v1 consumed run nonce into payroll contract storage.
 pub fn write_v1_run_nonce(env: &Env, payroll_id: &Address, nonce: &BytesN<32>, run_id: u64) {
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(&PayrollDataKey::RunNonce(nonce.clone()), &run_id);
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::RunNonce(nonce.clone()), &run_id);
     });
 }
 
@@ -312,10 +337,9 @@ pub fn write_v1_pending_admin_rotation(
     };
 
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(
-            &PayrollDataKey::PendingAdminRotation,
-            &proposal,
-        );
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::PendingAdminRotation, &proposal);
     });
 }
 
@@ -360,10 +384,9 @@ pub fn write_v1_emergency_withdrawal(
     };
 
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(
-            &PayrollDataKey::EmergencyRequest,
-            &request,
-        );
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::EmergencyRequest, &request);
     });
 }
 
@@ -372,10 +395,9 @@ pub fn write_v1_emergency_withdrawal(
 /// Write a v1 treasury owner into payroll contract storage.
 pub fn write_v1_treasury_owner(env: &Env, payroll_id: &Address, owner: &Address) {
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(
-            &PayrollDataKey::TreasuryOwner,
-            owner,
-        );
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::TreasuryOwner, owner);
     });
 }
 
@@ -388,7 +410,9 @@ pub fn write_v1_payroll_addresses(
     addrs: &PayrollContractAddresses,
 ) {
     env.as_contract(payroll_id, || {
-        env.storage().persistent().set(&PayrollDataKey::Addresses, addrs);
+        env.storage()
+            .persistent()
+            .set(&PayrollDataKey::Addresses, addrs);
     });
 }
 
@@ -397,7 +421,9 @@ pub fn write_v1_payroll_addresses(
 /// Initialize a v1 admin in salary_commitment contract.
 pub fn write_v1_commitment_admin(env: &Env, commitment_id: &Address, admin: &Address) {
     env.as_contract(commitment_id, || {
-        env.storage().persistent().set(&CommitmentDataKey::Admin, admin);
+        env.storage()
+            .persistent()
+            .set(&CommitmentDataKey::Admin, admin);
     });
 }
 
@@ -406,7 +432,9 @@ pub fn write_v1_commitment_admin(env: &Env, commitment_id: &Address, admin: &Add
 /// Write a v1 payroll operator into salary_commitment contract.
 pub fn write_v1_payroll_operator(env: &Env, commitment_id: &Address, operator: &Address) {
     env.as_contract(commitment_id, || {
-        env.storage().persistent().set(&CommitmentDataKey::PayrollOperator, operator);
+        env.storage()
+            .persistent()
+            .set(&CommitmentDataKey::PayrollOperator, operator);
     });
 }
 
@@ -415,10 +443,9 @@ pub fn write_v1_payroll_operator(env: &Env, commitment_id: &Address, operator: &
 /// Write a v1 commitment lock (locked = true) for an employee.
 pub fn write_v1_commitment_lock(env: &Env, commitment_id: &Address, employee: &Address) {
     env.as_contract(commitment_id, || {
-        env.storage().persistent().set(
-            &CommitmentDataKey::CommitmentLock(employee.clone()),
-            &true,
-        );
+        env.storage()
+            .persistent()
+            .set(&CommitmentDataKey::CommitmentLock(employee.clone()), &true);
     });
 }
 
@@ -443,7 +470,9 @@ pub fn write_v1_executor_addresses(
     addrs: &ExecutorContractAddresses,
 ) {
     env.as_contract(executor_id, || {
-        env.storage().persistent().set(&ExecutorDataKey::Addresses, addrs);
+        env.storage()
+            .persistent()
+            .set(&ExecutorDataKey::Addresses, addrs);
     });
 }
 
@@ -468,7 +497,9 @@ pub fn write_v1_storage_version(env: &Env, executor_id: &Address, version: u32) 
 /// Write a v1 total paid accumulator for a company.
 pub fn write_v1_total_paid(env: &Env, executor_id: &Address, company_id: u64, total: i128) {
     env.as_contract(executor_id, || {
-        env.storage().persistent().set(&ExecutorDataKey::TotalPaid(company_id), &total);
+        env.storage()
+            .persistent()
+            .set(&ExecutorDataKey::TotalPaid(company_id), &total);
     });
 }
 
@@ -486,17 +517,20 @@ pub fn write_v1_payroll_period(
         period_id,
         company_id,
         start_ledger: env.ledger().sequence(),
-        end_ledger: if closed { env.ledger().sequence() + 100 } else { 0 },
+        end_ledger: if closed {
+            env.ledger().sequence() + 100
+        } else {
+            0
+        },
         created_at: env.ledger().timestamp(),
         closed,
         payment_count: 0,
     };
 
     env.as_contract(executor_id, || {
-        env.storage().persistent().set(
-            &ExecutorDataKey::Period(company_id, period_id),
-            &period,
-        );
+        env.storage()
+            .persistent()
+            .set(&ExecutorDataKey::Period(company_id, period_id), &period);
         env.storage().persistent().set(
             &ExecutorDataKey::PeriodSequence(company_id),
             &(period_id + 1),
@@ -521,11 +555,8 @@ pub fn write_v1_payment_record(
     };
 
     env.as_contract(executor_id, || {
-        env.storage().persistent().set(
-            &ExecutorDataKey::Payment(employee.clone(), period),
-            &record,
-        );
+        env.storage()
+            .persistent()
+            .set(&ExecutorDataKey::Payment(employee.clone(), period), &record);
     });
 }
-
-

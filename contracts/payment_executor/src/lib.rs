@@ -7,6 +7,7 @@ use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
@@ -92,6 +93,10 @@ pub enum DataKey {
     AllowedAsset(Address),
     /// Storage key schema version (issue #174)
     StorageVersion,
+    /// Batch execution fingerprint → whether this exact batch was already processed.
+    BatchExecution(BytesN<32>),
+    /// Batch execution result (stored PaymentRecord vector for idempotent retries).
+    BatchExecutionRecords(BytesN<32>),
 }
 
 #[contract]
@@ -99,6 +104,7 @@ pub struct PaymentExecutor;
 
 #[contractimpl]
 impl PaymentExecutor {
+    #[allow(clippy::cast_sign_loss)]
     fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
         if amount < 0 {
             panic!("Amount must be non-negative");
@@ -149,7 +155,6 @@ impl PaymentExecutor {
         );
     }
 
-
     /// Set the executor-level admin (one-time, protected by auth).
     pub fn set_executor_admin(env: Env, admin: Address) {
         if env.storage().persistent().has(&DataKey::ExecutorAdmin) {
@@ -187,10 +192,7 @@ impl PaymentExecutor {
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
-                asset,
-            ),
+            (Symbol::new(&env, "TreasuryAssetAllowedUpdated"), asset),
             (allowed, env.ledger().timestamp()),
         );
     }
@@ -418,7 +420,6 @@ impl PaymentExecutor {
         if treasury_str.is_empty() {
             panic!("Invalid treasury mapping: empty treasury address");
         }
-
         // Execute token transfer from company treasury to employee.
         let token_client = token::Client::new(&env, &addresses.token);
         token_client.transfer(&company.treasury, &employee, &amount);
@@ -458,7 +459,74 @@ impl PaymentExecutor {
         Ok(record)
     }
 
-    /// Execute batch payroll for multiple employees
+    /// Compute a deterministic fingerprint for a batch execution payload.
+    ///
+    /// The fingerprint is a SHA-256 hash of the concatenated batch parameters:
+    ///   - company_id (8 bytes, big-endian)
+    ///   - period (4 bytes, big-endian)
+    ///   - For each employee: employee address XDR bytes + amount (16 bytes BE) + nullifier bytes
+    ///
+    /// This gives us a canonical execution identity that detects any change in
+    /// the batch composition. Two identical batches always produce the same
+    /// fingerprint; any modification changes the fingerprint.
+    #[allow(clippy::cast_sign_loss)]
+    fn compute_batch_fingerprint(
+        env: &Env,
+        company_id: u64,
+        employees: &soroban_sdk::Vec<Address>,
+        amounts: &soroban_sdk::Vec<i128>,
+        nullifiers: &soroban_sdk::Vec<BytesN<32>>,
+        period: u32,
+    ) -> BytesN<32> {
+        let mut hash_input: soroban_sdk::Bytes = soroban_sdk::Bytes::new(env);
+
+        // Encode company_id as 8 bytes big-endian
+        let cid_bytes = company_id.to_be_bytes();
+        for &b in &cid_bytes {
+            hash_input.push_back(b);
+        }
+
+        // Encode period as 4 bytes big-endian
+        let period_bytes = period.to_be_bytes();
+        for &b in &period_bytes {
+            hash_input.push_back(b);
+        }
+
+        let count = employees.len();
+        for i in 0..count {
+            let emp = employees.get(i).unwrap();
+            let amt = amounts.get(i).unwrap();
+            let null = nullifiers.get(i).unwrap();
+
+            // Employee address XDR bytes (first 32 bytes)
+            let emp_xdr: soroban_sdk::Bytes = emp.to_xdr(env);
+            for j in 0..32 {
+                hash_input.push_back(emp_xdr.get(j).unwrap_or(0));
+            }
+
+            // Amount as 16 bytes big-endian
+            let amt_bytes = (amt as u128).to_be_bytes();
+            for &b in &amt_bytes {
+                hash_input.push_back(b);
+            }
+
+            // Nullifier (32 bytes)
+            for j in 0..32 {
+                hash_input.push_back(null.get(j).unwrap_or(0));
+            }
+        }
+
+        env.crypto().sha256(&hash_input).into()
+    }
+
+    /// Execute batch payroll for multiple employees.
+    ///
+    /// This function now includes execution idempotency protection:
+    /// - A batch fingerprint is computed from all input parameters.
+    /// - If the exact same batch was already executed successfully, this
+    ///   returns the stored records without re-executing (idempotent retry).
+    /// - If a batch with the same fingerprint but different parameters was
+    ///   already processed, this is detected as a conflicting replay.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_batch_payroll(
         env: Env,
@@ -482,6 +550,30 @@ impl PaymentExecutor {
             return Err(PaymentError::ArrayLengthMismatch);
         }
 
+        // ── Idempotency check ───────────────────────────────────────────
+        // Compute the batch fingerprint and check if this exact batch has
+        // been executed before. If so, return the stored records without
+        // re-executing (safe idempotent retry).
+        let fingerprint = Self::compute_batch_fingerprint(
+            &env,
+            company_id,
+            &employees,
+            &amounts,
+            &nullifiers,
+            period,
+        );
+
+        let batch_key = DataKey::BatchExecution(fingerprint.clone());
+        if env.storage().persistent().has(&batch_key) {
+            // Idempotent retry — return stored records.
+            let records_key = DataKey::BatchExecutionRecords(fingerprint);
+            return Ok(env
+                .storage()
+                .persistent()
+                .get(&records_key)
+                .expect("Batch execution flag set but records not found"));
+        }
+
         let mut records = soroban_sdk::Vec::new(&env);
 
         for i in 0..count {
@@ -498,6 +590,18 @@ impl PaymentExecutor {
             )?;
             records.push_back(record);
         }
+
+        // ── Record batch execution for idempotency ──────────────────────
+        env.storage().persistent().set(&batch_key, &true);
+        env.storage().persistent().set(
+            &DataKey::BatchExecutionRecords(fingerprint.clone()),
+            &records,
+        );
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "BatchExecuted"), company_id),
+            (fingerprint, period),
+        );
 
         Ok(records)
     }
@@ -653,8 +757,8 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 1_000);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 5);
-        let event = events.get(4).unwrap();
+        assert_eq!(events.len(), 6);
+        let event = events.get(5).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
@@ -941,8 +1045,8 @@ mod tests {
         assert_eq!(client.get_total_paid(&company_id), 2_500);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 5);
-        let event = events.get(4).unwrap();
+        assert_eq!(events.len(), 6);
+        let event = events.get(5).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));
@@ -1351,6 +1455,160 @@ mod tests {
         assert_eq!(client.get_storage_version(), 1);
     }
 
+    // ── Batch Execution Idempotency ─────────────────────────────────────────
+
+    /// Retry the exact same batch — should return the same records without
+    /// re-executing (idempotent).
+    #[test]
+    fn test_execute_batch_idempotent_retry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+
+        let employees = soroban_sdk::Vec::from_array(&env, [employee.clone()]);
+        let amounts = soroban_sdk::Vec::from_array(&env, [1000i128]);
+        let proofs_a = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[1u8; 64])]);
+        let proofs_b = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[2u8; 128])]);
+        let proofs_c = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[3u8; 64])]);
+        let nullifiers = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[4u8; 32])]);
+
+        // First execution
+        let records1 = client.execute_batch_payroll(
+            &company_id,
+            &employees,
+            &amounts,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &1,
+        );
+        assert_eq!(records1.len(), 1);
+        assert_eq!(token_client.balance(&treasury), 9_000);
+        assert_eq!(token_client.balance(&employee), 1_000);
+
+        // Idempotent retry — same batch, should return same records
+        let records2 = client.execute_batch_payroll(
+            &company_id,
+            &employees,
+            &amounts,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &1,
+        );
+        assert_eq!(records2.len(), 1);
+
+        // Verify state unchanged (no duplicate transfer)
+        assert_eq!(token_client.balance(&treasury), 9_000);
+        assert_eq!(token_client.balance(&employee), 1_000);
+    }
+
+    /// Different batches (different employees) must have different execution
+    /// identities and both execute successfully.
+    #[test]
+    fn test_different_batches_have_distinct_identities() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&alice, &commitment);
+        commitment_client.store_commitment(&bob, &commitment);
+        registry_client.add_employee(&company_id, &alice, &commitment);
+        registry_client.add_employee(&company_id, &bob, &commitment);
+        token_client.mint(&treasury, &100_000);
+
+        let _ = client.create_period(&company_id);
+
+        // Batch 1: pay Alice
+        let employees1 = soroban_sdk::Vec::from_array(&env, [alice.clone()]);
+        let amounts1 = soroban_sdk::Vec::from_array(&env, [5000i128]);
+        let proofs_a1 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[10u8; 64])]);
+        let proofs_b1 =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 128])]);
+        let proofs_c1 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[12u8; 64])]);
+        let nullifiers1 =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[13u8; 32])]);
+
+        let r1 = client.execute_batch_payroll(
+            &company_id,
+            &employees1,
+            &amounts1,
+            &proofs_a1,
+            &proofs_b1,
+            &proofs_c1,
+            &nullifiers1,
+            &1,
+        );
+        assert_eq!(r1.len(), 1);
+
+        // Batch 2: pay Bob in a new period
+        client.create_period(&company_id);
+
+        let employees2 = soroban_sdk::Vec::from_array(&env, [bob.clone()]);
+        let amounts2 = soroban_sdk::Vec::from_array(&env, [3000i128]);
+        let proofs_a2 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[20u8; 64])]);
+        let proofs_b2 =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[21u8; 128])]);
+        let proofs_c2 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[22u8; 64])]);
+        let nullifiers2 =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[23u8; 32])]);
+
+        let r2 = client.execute_batch_payroll(
+            &company_id,
+            &employees2,
+            &amounts2,
+            &proofs_a2,
+            &proofs_b2,
+            &proofs_c2,
+            &nullifiers2,
+            &2,
+        );
+        assert_eq!(r2.len(), 1);
+
+        // Both payments should be reflected
+        assert_eq!(token_client.balance(&treasury), 92_000);
+        assert_eq!(token_client.balance(&alice), 5_000);
+        assert_eq!(token_client.balance(&bob), 3_000);
+        assert_eq!(client.get_total_paid(&company_id), 8_000);
+    }
+
     #[test]
     fn test_asset_allowed_emits_events() {
         let env = Env::default();
@@ -1365,7 +1623,12 @@ mod tests {
         assert_eq!(after_init, before_init + 1);
 
         let init_event = env.events().all().get(after_init - 1).unwrap();
-        let sym0: Symbol = init_event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        let sym0: Symbol = init_event
+            .1
+            .get(0)
+            .unwrap()
+            .try_into_val(&env.clone())
+            .unwrap();
         assert_eq!(sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
 
         let executor_admin = Address::generate(&env);
@@ -1378,8 +1641,12 @@ mod tests {
         assert_eq!(after_set, before_set + 1);
 
         let set_event = env.events().all().get(after_set - 1).unwrap();
-        let set_sym0: Symbol = set_event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        let set_sym0: Symbol = set_event
+            .1
+            .get(0)
+            .unwrap()
+            .try_into_val(&env.clone())
+            .unwrap();
         assert_eq!(set_sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
     }
 }
-

@@ -244,8 +244,8 @@ mod e2e {
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            6,
-            "Expected 6 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + CommitmentLocked + payment_executed + run_executed"
+            7,
+            "Expected 7 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + CommitmentLocked + payment_executed + run_state + run_executed"
         );
 
         // Event tuple is (contract, topics, data) - access topics via .1
@@ -278,7 +278,14 @@ mod e2e {
         assert_eq!(sym5a, Symbol::new(env, "payroll"));
         let val5_1 = topics5.get(1).unwrap();
         let sym5b: Symbol = val5_1.try_into_val(&env.clone()).unwrap();
-        assert_eq!(sym5b, Symbol::new(env, "run_executed"));
+        assert_eq!(sym5b, Symbol::new(env, "run_state"));
+        let topics6 = events.get(6).unwrap().1;
+        let val6_0 = topics6.get(0).unwrap();
+        let sym6a: Symbol = val6_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym6a, Symbol::new(env, "payroll"));
+        let val6_1 = topics6.get(1).unwrap();
+        let sym6b: Symbol = val6_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym6b, Symbol::new(env, "run_executed"));
     }
 
     /// Paying an employee who has no commitment on-chain must panic.
@@ -533,7 +540,6 @@ mod e2e {
             .verify_metadata_hash(&run_id, &wrong_hash));
     }
 
-
     /// Issue #201: Verify end-to-end failed payroll execution rollback across all contracts.
     /// Ensures partial state is not retained in SalaryCommitment, Registry, Token, or Payroll.
     #[test]
@@ -642,4 +648,3 @@ mod e2e {
         assert!(ctx.commitment_client.is_commitment_locked(&ctx.alice));
     }
 }
-

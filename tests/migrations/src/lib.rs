@@ -28,6 +28,6 @@
 //! 3. Write the test in `migration_tests` following the `mg_*` naming convention.
 //! 4. Document the invariants the test verifies.
 
-pub mod state_fixtures;
 pub mod migration_helpers;
 pub mod migration_tests;
+pub mod state_fixtures;

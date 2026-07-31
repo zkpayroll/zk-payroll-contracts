@@ -159,6 +159,9 @@ pub enum DataKey {
     PendingTreasuryRotation,
     /// Marks a run nonce as consumed. Value is the run_id that used it (#103).
     RunNonce(BytesN<32>),
+    /// Stores the batch fingerprint alongside a consumed nonce for idempotent
+    /// retry detection. Value is (run_id, batch_fingerprint).
+    NonceFingerprint(BytesN<32>),
     /// Pre-committed draft hash bound before execution (#102).
     DraftCommitment(BytesN<32>),
     /// Pending emergency withdrawal request (#104).

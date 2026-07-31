@@ -57,7 +57,7 @@ pub struct PendingRotation {
     pub proposed_at: u64,
 }
 
-    /// Storage keys
+/// Storage keys
 #[contracttype]
 pub enum DataKey {
     Commitment(Address),
@@ -124,10 +124,8 @@ impl SalaryCommitmentContract {
         }
         env.storage().persistent().set(&key, &true);
 
-        env.events().publish(
-            (Symbol::new(&env, "CommitmentLocked"), employee),
-            (),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "CommitmentLocked"), employee), ());
     }
 
     /// Unlock an employee's commitment so it can be updated again.
@@ -141,10 +139,8 @@ impl SalaryCommitmentContract {
         }
         env.storage().persistent().remove(&key);
 
-        env.events().publish(
-            (Symbol::new(&env, "CommitmentUnlocked"), employee),
-            (),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "CommitmentUnlocked"), employee), ());
     }
 
     /// Check if an employee's commitment is currently locked.
@@ -510,7 +506,11 @@ impl SalaryCommitmentContract {
         }
         current_admin.require_auth();
 
-        if env.storage().persistent().has(&DataKey::PendingAdminRotation) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingAdminRotation)
+        {
             panic!("A pending admin rotation already exists");
         }
 
@@ -543,17 +543,13 @@ impl SalaryCommitmentContract {
         }
         new_admin.require_auth();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
         env.storage()
             .persistent()
             .remove(&DataKey::PendingAdminRotation);
 
-        env.events().publish(
-            (Symbol::new(&env, "AdminRotationAccepted"), new_admin),
-            (),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "AdminRotationAccepted"), new_admin), ());
     }
 
     /// Cancel a pending admin rotation proposal.
@@ -569,7 +565,11 @@ impl SalaryCommitmentContract {
         }
         current_admin.require_auth();
 
-        if !env.storage().persistent().has(&DataKey::PendingAdminRotation) {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingAdminRotation)
+        {
             panic!("No pending admin rotation to cancel");
         }
         env.storage()
@@ -584,7 +584,9 @@ impl SalaryCommitmentContract {
 
     /// Get the pending admin rotation proposal, if any.
     pub fn get_pending_admin_rotation(env: Env) -> Option<PendingRotation> {
-        env.storage().persistent().get(&DataKey::PendingAdminRotation)
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingAdminRotation)
     }
 
     // ── Issue #193: pause support ────────────────────────────────────────────

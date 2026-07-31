@@ -2,8 +2,7 @@ use super::*;
 use soroban_sdk::testutils::{Address as _, Events};
 use soroban_sdk::{Env, IntoVal, String, Symbol, TryIntoVal};
 
-const VALID_EMPLOYEE_WALLET: &str =
-    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const VALID_EMPLOYEE_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const BAD_CHECKSUM_EMPLOYEE_WALLET: &str =
     "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHA";
 
@@ -840,4 +839,3 @@ fn test_cancel_treasury_rotation_emits_event() {
     let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
     assert_eq!(comp_id, company_id);
 }
-

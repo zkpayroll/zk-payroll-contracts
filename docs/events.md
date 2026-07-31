@@ -761,6 +761,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `CompanyRegistered` | `payroll_registry` | `(company_id)` | `(admin, treasury)` |
 | `PeriodCreated` | `payment_executor` | `(company_id)` | `(period_id,)` |
 | `PeriodClosed` | `payment_executor` | `(company_id)` | `(period_id,)` |
+| `BatchExecuted` | `payment_executor` | `(company_id)` | `(fingerprint, period_id)` |
 | `PayrollProcessed` | `payment_executor` | `(company_id)` | `(employee, amount, period_id)` |
 | `ViewKeyGenerated` | `audit_module` | `(auditor)` | `(key_bytes, expiration_ledger)` |
 | `AuditAccessRevoked` | `audit_module` | `(admin, auditor)` | `(timestamp,)` |
