@@ -30,7 +30,7 @@ light-poseidon = "0.2"
 hex = "0.4"
 
 # Cross-platform home directory (~/.zk-payroll)
-dirs = "5"
+dirs = "6"
 
 # Ergonomic error propagation for CLI binaries
 anyhow = "1"
