@@ -7,10 +7,10 @@ use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
-use soroban_sdk::xdr::ToXdr;
 
 /// Maximum age for a proof relative to its period creation time (7 days in seconds).
 /// Proofs must be submitted within this window to prevent replay attacks using stale proofs.
@@ -155,7 +155,6 @@ impl PaymentExecutor {
         );
     }
 
-
     /// Set the executor-level admin (one-time, protected by auth).
     pub fn set_executor_admin(env: Env, admin: Address) {
         if env.storage().persistent().has(&DataKey::ExecutorAdmin) {
@@ -193,10 +192,7 @@ impl PaymentExecutor {
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
-                asset,
-            ),
+            (Symbol::new(&env, "TreasuryAssetAllowedUpdated"), asset),
             (allowed, env.ledger().timestamp()),
         );
     }
@@ -597,15 +593,13 @@ impl PaymentExecutor {
 
         // ── Record batch execution for idempotency ──────────────────────
         env.storage().persistent().set(&batch_key, &true);
-        env.storage()
-            .persistent()
-            .set(&DataKey::BatchExecutionRecords(fingerprint.clone()), &records);
+        env.storage().persistent().set(
+            &DataKey::BatchExecutionRecords(fingerprint.clone()),
+            &records,
+        );
 
         env.events().publish(
-            (
-                soroban_sdk::Symbol::new(&env, "BatchExecuted"),
-                company_id,
-            ),
+            (soroban_sdk::Symbol::new(&env, "BatchExecuted"), company_id),
             (fingerprint, period),
         );
 
@@ -1499,33 +1493,31 @@ mod tests {
         let nullifiers = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[4u8; 32])]);
 
         // First execution
-        let records1 = client
-            .execute_batch_payroll(
-                &company_id,
-                &employees,
-                &amounts,
-                &proofs_a,
-                &proofs_b,
-                &proofs_c,
-                &nullifiers,
-                &1,
-            );
+        let records1 = client.execute_batch_payroll(
+            &company_id,
+            &employees,
+            &amounts,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &1,
+        );
         assert_eq!(records1.len(), 1);
         assert_eq!(token_client.balance(&treasury), 9_000);
         assert_eq!(token_client.balance(&employee), 1_000);
 
         // Idempotent retry — same batch, should return same records
-        let records2 = client
-            .execute_batch_payroll(
-                &company_id,
-                &employees,
-                &amounts,
-                &proofs_a,
-                &proofs_b,
-                &proofs_c,
-                &nullifiers,
-                &1,
-            );
+        let records2 = client.execute_batch_payroll(
+            &company_id,
+            &employees,
+            &amounts,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &1,
+        );
         assert_eq!(records2.len(), 1);
 
         // Verify state unchanged (no duplicate transfer)
@@ -1567,26 +1559,23 @@ mod tests {
         // Batch 1: pay Alice
         let employees1 = soroban_sdk::Vec::from_array(&env, [alice.clone()]);
         let amounts1 = soroban_sdk::Vec::from_array(&env, [5000i128]);
-        let proofs_a1 =
-            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[10u8; 64])]);
+        let proofs_a1 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[10u8; 64])]);
         let proofs_b1 =
             soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 128])]);
-        let proofs_c1 =
-            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[12u8; 64])]);
+        let proofs_c1 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[12u8; 64])]);
         let nullifiers1 =
             soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[13u8; 32])]);
 
-        let r1 = client
-            .execute_batch_payroll(
-                &company_id,
-                &employees1,
-                &amounts1,
-                &proofs_a1,
-                &proofs_b1,
-                &proofs_c1,
-                &nullifiers1,
-                &1,
-            );
+        let r1 = client.execute_batch_payroll(
+            &company_id,
+            &employees1,
+            &amounts1,
+            &proofs_a1,
+            &proofs_b1,
+            &proofs_c1,
+            &nullifiers1,
+            &1,
+        );
         assert_eq!(r1.len(), 1);
 
         // Batch 2: pay Bob in a new period
@@ -1594,26 +1583,23 @@ mod tests {
 
         let employees2 = soroban_sdk::Vec::from_array(&env, [bob.clone()]);
         let amounts2 = soroban_sdk::Vec::from_array(&env, [3000i128]);
-        let proofs_a2 =
-            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[20u8; 64])]);
+        let proofs_a2 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[20u8; 64])]);
         let proofs_b2 =
             soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[21u8; 128])]);
-        let proofs_c2 =
-            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[22u8; 64])]);
+        let proofs_c2 = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[22u8; 64])]);
         let nullifiers2 =
             soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[23u8; 32])]);
 
-        let r2 = client
-            .execute_batch_payroll(
-                &company_id,
-                &employees2,
-                &amounts2,
-                &proofs_a2,
-                &proofs_b2,
-                &proofs_c2,
-                &nullifiers2,
-                &2,
-            );
+        let r2 = client.execute_batch_payroll(
+            &company_id,
+            &employees2,
+            &amounts2,
+            &proofs_a2,
+            &proofs_b2,
+            &proofs_c2,
+            &nullifiers2,
+            &2,
+        );
         assert_eq!(r2.len(), 1);
 
         // Both payments should be reflected
@@ -1637,7 +1623,12 @@ mod tests {
         assert_eq!(after_init, before_init + 1);
 
         let init_event = env.events().all().get(after_init - 1).unwrap();
-        let sym0: Symbol = init_event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        let sym0: Symbol = init_event
+            .1
+            .get(0)
+            .unwrap()
+            .try_into_val(&env.clone())
+            .unwrap();
         assert_eq!(sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
 
         let executor_admin = Address::generate(&env);
@@ -1650,8 +1641,12 @@ mod tests {
         assert_eq!(after_set, before_set + 1);
 
         let set_event = env.events().all().get(after_set - 1).unwrap();
-        let set_sym0: Symbol = set_event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        let set_sym0: Symbol = set_event
+            .1
+            .get(0)
+            .unwrap()
+            .try_into_val(&env.clone())
+            .unwrap();
         assert_eq!(set_sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
     }
 }
-

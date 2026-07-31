@@ -5,6 +5,7 @@
 ///
 /// All fixtures are deterministic and documented in `docs/fixtures-guide.md`.
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 pub mod fixtures {
     use soroban_sdk::{Address, BytesN, Env};
 
@@ -33,6 +34,7 @@ pub mod fixtures {
     // ── Employee Fixtures ────────────────────────────────────────────────────
 
     pub struct EmployeeFixture {
+        #[allow(dead_code)]
         pub id: u8,
         pub name: &'static str,
         pub salary: u64,
@@ -60,6 +62,7 @@ pub mod fixtures {
         blinding_factor: 189,
     };
 
+    #[allow(dead_code)]
     pub const DAVID: EmployeeFixture = EmployeeFixture {
         id: 3,
         name: "David",
@@ -67,6 +70,7 @@ pub mod fixtures {
         blinding_factor: 111,
     };
 
+    #[allow(dead_code)]
     pub const EMMA: EmployeeFixture = EmployeeFixture {
         id: 4,
         name: "Emma",
@@ -74,6 +78,7 @@ pub mod fixtures {
         blinding_factor: 222,
     };
 
+    #[allow(dead_code)]
     pub const FRANK: EmployeeFixture = EmployeeFixture {
         id: 5,
         name: "Frank",
@@ -104,9 +109,12 @@ pub mod fixtures {
     // ── Payroll Period Fixtures ──────────────────────────────────────────────
 
     pub struct PayrollPeriodFixture {
+        #[allow(dead_code)]
         pub label: &'static str,
         pub company_id: u64,
+        #[allow(dead_code)]
         pub start_date: &'static str, // YYYY-MM-DD
+        #[allow(dead_code)]
         pub end_date: &'static str,
         pub is_active: bool,
     }
@@ -161,11 +169,12 @@ pub mod fixtures {
         }
 
         #[test]
+        #[allow(clippy::assertions_on_constants)]
         fn test_payroll_period_fixtures() {
             assert_eq!(Q1_2024_ACME.company_id, 0);
-            assert_eq!(Q1_2024_ACME.is_active, false);
+            assert!(!Q1_2024_ACME.is_active);
 
-            assert_eq!(Q2_2024_ACME.is_active, true);
+            assert!(Q2_2024_ACME.is_active);
             assert_eq!(FEB_2024_GLOBALPAY.company_id, 2);
         }
 

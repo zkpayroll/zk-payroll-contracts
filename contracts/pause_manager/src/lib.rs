@@ -221,7 +221,6 @@ impl<'a> PauseManagerClient<'a> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

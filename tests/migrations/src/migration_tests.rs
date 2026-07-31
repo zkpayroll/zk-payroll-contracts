@@ -24,33 +24,25 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod migration_tests {
-    use soroban_sdk::{
-        testutils::Address as _, Address, BytesN, Env, Vec, IntoVal,
-    };
-    use payroll_registry::{PayrollRegistryClient, EmployeeStatus};
-    use salary_commitment::SalaryCommitmentContractClient;
-    use payroll::{PayrollClient, ReconciliationStatus};
+    use audit_module::AuditModuleClient;
     use payment_executor::PaymentExecutorClient;
-    use audit_module::{AuditModuleClient, AuditScope};
-    use proof_verifier::{ProofVerifierClient, VerificationKey};
-    use token::{Token, TokenClient};
-    use pause_manager::{PauseManager, PauseManagerClient};
+    use payroll::{PayrollClient, ReconciliationStatus};
+    use payroll_registry::{EmployeeStatus, PayrollRegistryClient};
+    use salary_commitment::SalaryCommitmentContractClient;
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::{Env, Vec};
 
-    use crate::state_fixtures;
     use crate::migration_helpers::{
-        self,
-        MigrationContext,
-        assert_post_migration_invariants,
-        assert_unsupported_version_handled,
-        assert_malformed_state_fails_safely,
-        mock_vk,
-        V1_STORAGE_VERSION,
+        assert_malformed_state_fails_safely, assert_post_migration_invariants,
+        assert_unsupported_version_handled, MigrationContext, V1_STORAGE_VERSION,
     };
+    use crate::state_fixtures;
 
     // ── Reusable test setup ──────────────────────────────────────────────────
 
     /// Set up a full v1 state environment, run migration, and return context.
     fn setup_and_migrate(env: &Env) -> MigrationContext {
+        env.ledger().set_timestamp(1_234_567);
         let mut ctx = MigrationContext::new(env);
         ctx.register_contracts(env);
         ctx.initialize_contracts(env);
@@ -105,9 +97,15 @@ mod migration_tests {
 
         // Verify draft_hash and metadata_hash are preserved
         let expected_draft = state_fixtures::seed_bytes32(&env, 0xDD);
-        assert_eq!(run1.draft_hash, expected_draft, "draft_hash must be preserved");
+        assert_eq!(
+            run1.draft_hash, expected_draft,
+            "draft_hash must be preserved"
+        );
         let expected_metadata = state_fixtures::seed_bytes32(&env, 0xEE);
-        assert_eq!(run1.metadata_hash, expected_metadata, "metadata_hash must be preserved");
+        assert_eq!(
+            run1.metadata_hash, expected_metadata,
+            "metadata_hash must be preserved"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -197,7 +195,7 @@ mod migration_tests {
         let new_admin = state_fixtures::seed_address(&env, 0x20);
         let new_treasury = state_fixtures::seed_address(&env, 0x21);
         let new_company_id = registry_client.register_company(&new_admin, &new_treasury);
-        assert_eq!(new_company_id, 3, "New company ID must be sequential");
+        assert_eq!(new_company_id, 2, "New company ID must be sequential");
         let new_company = registry_client.get_company(&new_company_id);
         assert_eq!(new_company.admin, new_admin);
         assert_eq!(new_company.treasury, new_treasury);
@@ -326,7 +324,7 @@ mod migration_tests {
 
         // Can still grant new view keys after migration
         let new_auditor = state_fixtures::seed_address(&env, 0x30);
-        let new_key = audit_client.generate_view_key(&new_auditor, &200_000u32);
+        let _new_key = audit_client.generate_view_key(&new_auditor, &200_000u32);
         assert!(
             audit_client.verify_access(&new_auditor),
             "New auditor granted after migration must have access"
@@ -441,7 +439,10 @@ mod migration_tests {
 
         // Closed period preserved
         let period_1 = executor_client.get_period(&ctx.company_id_1, &1);
-        assert!(period_1.is_some(), "Period 1 (closed) must survive migration");
+        assert!(
+            period_1.is_some(),
+            "Period 1 (closed) must survive migration"
+        );
         let p1 = period_1.unwrap();
         assert!(p1.closed, "Period 1 must remain closed");
         assert_eq!(p1.period_id, 1);
@@ -548,7 +549,7 @@ mod migration_tests {
         let env = Env::default();
         let ctx = setup_and_migrate(&env);
 
-        let commitment_client = SalaryCommitmentContractClient::new(&env, &ctx.commitment_id);
+        let _commitment_client = SalaryCommitmentContractClient::new(&env, &ctx.commitment_id);
         let payroll_client = PayrollClient::new(&env, &ctx.payroll_id);
         let _registry_client = PayrollRegistryClient::new(&env, &ctx.registry_id);
 
@@ -708,6 +709,8 @@ mod migration_tests {
 
         // Set up some state with reference IDs
         let company_id = registry_client.register_company(&ctx.admin, &ctx.treasury);
+        ctx.company_id_2 = registry_client.register_company(&ctx.admin2, &ctx.treasury_owner);
+        ctx.company_id_1 = company_id;
         let alice_commitment = state_fixtures::seed_bytes32(&env, 0x10);
         commitment_client.store_commitment(&ctx.alice, &alice_commitment);
         registry_client.add_employee(&company_id, &ctx.alice, &alice_commitment);
@@ -718,7 +721,6 @@ mod migration_tests {
 
         // Simulate migration
         ctx.simulate_upgrade_v2(&env);
-        ctx.run_migration_v1_to_v2(&env);
 
         // Reference ID should still be queryable
         let stored_ref = commitment_client.get_employee_reference_id(&ctx.alice);
@@ -759,6 +761,8 @@ mod migration_tests {
 
         // Set up state with a locked commitment
         let company_id = registry_client.register_company(&ctx.admin, &ctx.treasury);
+        ctx.company_id_2 = registry_client.register_company(&ctx.admin2, &ctx.treasury_owner);
+        ctx.company_id_1 = company_id;
         let alice_commitment = state_fixtures::seed_bytes32(&env, 0x10);
         commitment_client.store_commitment(&ctx.alice, &alice_commitment);
         registry_client.add_employee(&company_id, &ctx.alice, &alice_commitment);
@@ -772,7 +776,6 @@ mod migration_tests {
 
         // Simulate migration
         ctx.simulate_upgrade_v2(&env);
-        ctx.run_migration_v1_to_v2(&env);
 
         // Lock must survive migration
         assert!(

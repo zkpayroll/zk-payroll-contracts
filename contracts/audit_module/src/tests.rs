@@ -708,8 +708,7 @@ fn test_revoked_key_cannot_generate_aggregate_report() {
     let admin = contract_id.clone();
     client.revoke_view_key(&admin, &auditor);
 
-    let result =
-        client.try_generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
+    let result = client.try_generate_aggregate_report(&auditor, &company_id, &now, &(now + 86_400));
     assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
 }
 
@@ -986,4 +985,3 @@ fn test_verify_payroll_metadata_revoked_auditor_rejected() {
         client.try_verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::FullCompany);
     assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
 }
-

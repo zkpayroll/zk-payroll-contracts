@@ -540,7 +540,6 @@ mod e2e {
             .verify_metadata_hash(&run_id, &wrong_hash));
     }
 
-
     /// Issue #201: Verify end-to-end failed payroll execution rollback across all contracts.
     /// Ensures partial state is not retained in SalaryCommitment, Registry, Token, or Payroll.
     #[test]
@@ -649,4 +648,3 @@ mod e2e {
         assert!(ctx.commitment_client.is_commitment_locked(&ctx.alice));
     }
 }
-

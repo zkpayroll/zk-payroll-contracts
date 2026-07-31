@@ -22,17 +22,17 @@
 //! assert_post_migration_invariants(&env, &ctx);
 //! ```
 
-use soroban_sdk::{
-    testutils::Address as _, Address, BytesN, Env, Symbol, Vec, IntoVal,
-};
-use payroll_registry::{PayrollRegistry, PayrollRegistryClient, CompanyInfo, EmployeeStatus, PendingCompanyRotation};
-use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient, SalaryCommitment};
-use payroll::{Payroll, PayrollClient, PayrollRun, ReconciliationStatus, ContractAddresses as PayrollContractAddresses};
-use payment_executor::{PaymentExecutor, PaymentExecutorClient, ContractAddresses as ExecutorContractAddresses};
-use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
-use audit_module::{AuditModule, AuditModuleClient, AuditScope, ViewKeyRecord};
-use token::{Token, TokenClient};
+use audit_module::{AuditModule, AuditModuleClient};
 use pause_manager::{PauseManager, PauseManagerClient};
+use payment_executor::{
+    ContractAddresses as ExecutorContractAddresses, PaymentExecutor, PaymentExecutorClient,
+};
+use payroll::{Payroll, PayrollClient, ReconciliationStatus};
+use payroll_registry::{EmployeeStatus, PayrollRegistry, PayrollRegistryClient};
+use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
+use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
+use token::{Token, TokenClient};
 
 use crate::state_fixtures;
 
@@ -171,7 +171,12 @@ impl MigrationContext {
 
         // Initialize token & mint to treasury
         let token_client = TokenClient::new(env, &self.token_id);
-        token_client.initialize(&self.admin, &7, &soroban_sdk::String::from_str(env, "USD"), &soroban_sdk::String::from_str(env, "USD"));
+        token_client.initialize(
+            &self.admin,
+            &7,
+            &soroban_sdk::String::from_str(env, "USD"),
+            &soroban_sdk::String::from_str(env, "USD"),
+        );
         token_client.mint(&self.treasury, &1_000_000i128);
         token_client.mint(&self.treasury_owner, &1_000_000i128);
 
@@ -229,18 +234,27 @@ impl MigrationContext {
         let carol_commitment = state_fixtures::seed_bytes32(env, 0x12);
         commitment_client.store_commitment(&self.carol, &carol_commitment);
         registry_client.add_employee(&self.company_id_1, &self.carol, &carol_commitment);
-        registry_client.set_employee_status(&self.company_id_1, &self.carol, &EmployeeStatus::Inactive);
+        registry_client.set_employee_status(
+            &self.company_id_1,
+            &self.carol,
+            &EmployeeStatus::Inactive,
+        );
 
         // David: Incomplete employee (no explicit status set means Incomplete)
         let david_commitment = state_fixtures::seed_bytes32(env, 0x13);
         commitment_client.store_commitment(&self.david, &david_commitment);
         registry_client.add_employee(&self.company_id_1, &self.david, &david_commitment);
-        registry_client.set_employee_status(&self.company_id_1, &self.david, &EmployeeStatus::Incomplete);
+        registry_client.set_employee_status(
+            &self.company_id_1,
+            &self.david,
+            &EmployeeStatus::Incomplete,
+        );
 
         // ── Commitment history for Alice (simulate rotation) ─────────────
-        let old_commitment = state_fixtures::seed_bytes32(env, 0xAA);
+        let _old_commitment = state_fixtures::seed_bytes32(env, 0xAA);
         let new_commitment = state_fixtures::seed_bytes32(env, 0xBB);
         commitment_client.update_commitment(&self.alice, &new_commitment);
+        registry_client.update_commitment(&self.company_id_1, &self.alice, &new_commitment);
         self.has_commitment_history = true;
 
         // ── Nullifiers ───────────────────────────────────────────────────
@@ -251,7 +265,7 @@ impl MigrationContext {
         self.has_nullifiers = true;
 
         // ── Payroll runs ─────────────────────────────────────────────────
-        let payroll_client = PayrollClient::new(env, &self.payroll_id);
+        let _payroll_client = PayrollClient::new(env, &self.payroll_id);
 
         // Historical run 1: Reconciled
         // We directly write to simulate pre-existing runs with specific statuses
@@ -322,10 +336,7 @@ impl MigrationContext {
 
         // ── Audit permissions ────────────────────────────────────────────
         let audit_client = AuditModuleClient::new(env, &self.audit_id);
-        let _ = audit_client.generate_view_key(
-            &self.auditor,
-            &100_000u32,
-        );
+        let _ = audit_client.generate_view_key(&self.auditor, &100_000u32);
         self.has_audit_permissions = true;
 
         // ── Payment executor state ───────────────────────────────────────
@@ -349,11 +360,14 @@ impl MigrationContext {
         // Re-deploy all contracts as if new WASM was uploaded.
         // This simulates upgrading to a new contract version while preserving
         // existing storage (old keys remain).
-        let new_registry_id = env.register_contract(&Some(self.registry_id.clone()), PayrollRegistry);
-        let new_commitment_id = env.register_contract(&Some(self.commitment_id.clone()), SalaryCommitmentContract);
+        let new_registry_id =
+            env.register_contract(&Some(self.registry_id.clone()), PayrollRegistry);
+        let new_commitment_id =
+            env.register_contract(&Some(self.commitment_id.clone()), SalaryCommitmentContract);
         let new_verifier_id = env.register_contract(&Some(self.verifier_id.clone()), ProofVerifier);
         let new_payroll_id = env.register_contract(&Some(self.payroll_id.clone()), Payroll);
-        let new_executor_id = env.register_contract(&Some(self.executor_id.clone()), PaymentExecutor);
+        let new_executor_id =
+            env.register_contract(&Some(self.executor_id.clone()), PaymentExecutor);
         let new_audit_id = env.register_contract(&Some(self.audit_id.clone()), AuditModule);
 
         // Update IDs to new instances (same contract IDs, new WASM)
