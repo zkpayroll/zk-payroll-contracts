@@ -873,13 +873,8 @@ fn test_verify_payroll_metadata_match_returns_true() {
     client.generate_view_key(&auditor, &(seq + 1_000));
 
     let hash = BytesN::from_array(&env, &[0xAA; 32]);
-    let result = client.verify_payroll_metadata(
-        &auditor,
-        &hash,
-        &hash,
-        &AuditScope::FullCompany,
-    );
-    assert!(result.unwrap());
+    let result = client.verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::FullCompany);
+    assert!(result);
 }
 
 #[test]
@@ -893,13 +888,9 @@ fn test_verify_payroll_metadata_mismatch_returns_false() {
 
     let stored = BytesN::from_array(&env, &[0xBB; 32]);
     let expected = BytesN::from_array(&env, &[0xCC; 32]);
-    let result = client.verify_payroll_metadata(
-        &auditor,
-        &stored,
-        &expected,
-        &AuditScope::FullCompany,
-    );
-    assert!(!result.unwrap());
+    let result =
+        client.verify_payroll_metadata(&auditor, &stored, &expected, &AuditScope::FullCompany);
+    assert!(!result);
 }
 
 #[test]
@@ -913,12 +904,7 @@ fn test_verify_payroll_metadata_records_audit_log() {
 
     let hash = BytesN::from_array(&env, &[0xDD; 32]);
     let before = client.get_audit_log_count(&Symbol::new(&env, "default"));
-    let _ = client.verify_payroll_metadata(
-        &auditor,
-        &hash,
-        &hash,
-        &AuditScope::FullCompany,
-    );
+    let _ = client.verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::FullCompany);
     let after = client.get_audit_log_count(&Symbol::new(&env, "default"));
     assert!(after > before);
 }
@@ -934,12 +920,7 @@ fn test_verify_payroll_metadata_emits_match_event() {
 
     let hash = BytesN::from_array(&env, &[0xEE; 32]);
     let before = env.events().all().len();
-    let _ = client.verify_payroll_metadata(
-        &auditor,
-        &hash,
-        &hash,
-        &AuditScope::FullCompany,
-    );
+    let _ = client.verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::FullCompany);
     let after = env.events().all().len();
     assert!(after > before);
 }
@@ -956,12 +937,7 @@ fn test_verify_payroll_metadata_emits_mismatch_event() {
     let stored = BytesN::from_array(&env, &[0x11; 32]);
     let expected = BytesN::from_array(&env, &[0x22; 32]);
     let before = env.events().all().len();
-    let _ = client.verify_payroll_metadata(
-        &auditor,
-        &stored,
-        &expected,
-        &AuditScope::FullCompany,
-    );
+    let _ = client.verify_payroll_metadata(&auditor, &stored, &expected, &AuditScope::FullCompany);
     let after = env.events().all().len();
     assert!(after > before);
 }
@@ -973,12 +949,8 @@ fn test_verify_payroll_metadata_requires_valid_key() {
 
     let stranger = soroban_sdk::Address::generate(&env);
     let hash = BytesN::from_array(&env, &[0x33; 32]);
-    let result = client.try_verify_payroll_metadata(
-        &stranger,
-        &hash,
-        &hash,
-        &AuditScope::FullCompany,
-    );
+    let result =
+        client.try_verify_payroll_metadata(&stranger, &hash, &hash, &AuditScope::FullCompany);
     assert!(result.is_err());
 }
 
@@ -992,12 +964,8 @@ fn test_verify_payroll_metadata_rejects_aggregate_only_scope() {
     client.generate_view_key(&auditor, &(seq + 1_000));
 
     let hash = BytesN::from_array(&env, &[0x44; 32]);
-    let result = client.try_verify_payroll_metadata(
-        &auditor,
-        &hash,
-        &hash,
-        &AuditScope::AggregateOnly,
-    );
+    let result =
+        client.try_verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::AggregateOnly);
     assert!(result.is_err());
 }
 
@@ -1014,11 +982,8 @@ fn test_verify_payroll_metadata_revoked_auditor_rejected() {
     client.revoke_view_key(&admin, &auditor);
 
     let hash = BytesN::from_array(&env, &[0x55; 32]);
-    let result = client.try_verify_payroll_metadata(
-        &auditor,
-        &hash,
-        &hash,
-        &AuditScope::FullCompany,
-    );
+    let result =
+        client.try_verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::FullCompany);
     assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
 }
+

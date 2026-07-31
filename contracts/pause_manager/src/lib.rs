@@ -92,7 +92,10 @@ impl PauseManager {
             .set(&DataKey::PendingOperator, &proposal);
 
         e.events().publish(
-            (Symbol::new(&e, "PauseManager"), Symbol::new(&e, "op_proposed")),
+            (
+                Symbol::new(&e, "PauseManager"),
+                Symbol::new(&e, "op_proposed"),
+            ),
             (current_operator, new_operator),
         );
     }
@@ -112,12 +115,13 @@ impl PauseManager {
         e.storage()
             .persistent()
             .set(&DataKey::Operator, &new_operator);
-        e.storage()
-            .persistent()
-            .remove(&DataKey::PendingOperator);
+        e.storage().persistent().remove(&DataKey::PendingOperator);
 
         e.events().publish(
-            (Symbol::new(&e, "PauseManager"), Symbol::new(&e, "op_rotated")),
+            (
+                Symbol::new(&e, "PauseManager"),
+                Symbol::new(&e, "op_rotated"),
+            ),
             new_operator,
         );
     }
@@ -136,12 +140,13 @@ impl PauseManager {
         if !e.storage().persistent().has(&DataKey::PendingOperator) {
             panic!("No pending operator rotation to cancel");
         }
-        e.storage()
-            .persistent()
-            .remove(&DataKey::PendingOperator);
+        e.storage().persistent().remove(&DataKey::PendingOperator);
 
         e.events().publish(
-            (Symbol::new(&e, "PauseManager"), Symbol::new(&e, "op_cancelled")),
+            (
+                Symbol::new(&e, "PauseManager"),
+                Symbol::new(&e, "op_cancelled"),
+            ),
             current_operator,
         );
     }
@@ -208,14 +213,14 @@ impl<'a> PauseManagerClient<'a> {
     }
 
     pub fn get_pending_operator_rotation(&self) -> Option<PendingOperatorRotation> {
-        self.0
-            .invoke_contract(
-                &self.1,
-                &Symbol::new(self.0, "get_pending_operator_rotation"),
-                (),
-            )
+        self.0.invoke_contract(
+            &self.1,
+            &Symbol::new(self.0, "get_pending_operator_rotation"),
+            (),
+        )
     }
 }
+
 
 #[cfg(test)]
 mod tests {

@@ -565,3 +565,186 @@ fn test_retry_multiple_employees_detects_duplicates() {
     // Final verification: total paid unchanged
     assert_eq!(executor.get_total_paid(&company_id), 800);
 }
+
+// ============================================================================
+// Failed Execution Rollback Tests (Issue #201)
+// ============================================================================
+
+/// Acceptance Criteria: Failed Batch Execution Rollback
+/// - Verify that if a batch payment fails mid-execution (e.g., due to duplicate/reused proof),
+///   no partial payment state is recorded for any employee in the batch,
+///   total paid remains unchanged, and token balances are completely unmutated.
+/// - Verify that after the rollback, valid payments can be successfully retried.
+#[test]
+fn test_failed_batch_execution_rolls_back_partial_state() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, token, company_id, _admin, treasury) =
+        setup_system(&env);
+
+    let employee_a = Address::generate(&env);
+    let employee_b = Address::generate(&env);
+
+    let commitment_a = BytesN::from_array(&env, &[130u8; 32]);
+    let commitment_b = BytesN::from_array(&env, &[131u8; 32]);
+
+    commitment_client.store_commitment(&employee_a, &commitment_a);
+    commitment_client.store_commitment(&employee_b, &commitment_b);
+    registry.add_employee(&company_id, &employee_a, &commitment_a);
+    registry.add_employee(&company_id, &employee_b, &commitment_b);
+
+    // Pre-pay employee B to force a failure when employee B is processed in batch
+    let proof_a_b_init = BytesN::from_array(&env, &[132u8; 64]);
+    let proof_b_b_init = BytesN::from_array(&env, &[133u8; 128]);
+    let proof_c_b_init = BytesN::from_array(&env, &[134u8; 64]);
+    let nullifier_b_init = BytesN::from_array(&env, &[135u8; 32]);
+
+    executor.execute_payment(
+        &company_id,
+        &employee_b,
+        &400,
+        &proof_a_b_init,
+        &proof_b_b_init,
+        &proof_c_b_init,
+        &nullifier_b_init,
+        &1,
+    );
+
+    let initial_treasury_balance = token.balance(&treasury);
+    assert_eq!(executor.get_total_paid(&company_id), 400);
+
+    // Now construct a batch for [employee_a, employee_b].
+    // Employee A is valid, but Employee B is already paid in period 1.
+    let mut employees = Vec::new(&env);
+    employees.push_back(employee_a.clone());
+    employees.push_back(employee_b.clone());
+
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(500i128);
+    amounts.push_back(400i128);
+
+    let proof_a_1 = BytesN::from_array(&env, &[140u8; 64]);
+    let proof_b_1 = BytesN::from_array(&env, &[141u8; 128]);
+    let proof_c_1 = BytesN::from_array(&env, &[142u8; 64]);
+    let nullifier_1 = BytesN::from_array(&env, &[143u8; 32]);
+
+    let mut proofs_a = Vec::new(&env);
+    proofs_a.push_back(proof_a_1.clone());
+    proofs_a.push_back(proof_a_b_init.clone());
+
+    let mut proofs_b = Vec::new(&env);
+    proofs_b.push_back(proof_b_1.clone());
+    proofs_b.push_back(proof_b_b_init.clone());
+
+    let mut proofs_c = Vec::new(&env);
+    proofs_c.push_back(proof_c_1.clone());
+    proofs_c.push_back(proof_c_b_init.clone());
+
+    let mut nullifiers = Vec::new(&env);
+    nullifiers.push_back(nullifier_1.clone());
+    nullifiers.push_back(nullifier_b_init.clone());
+
+    // Batch execution must fail
+    let batch_result = executor.try_execute_batch_payroll(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &1,
+    );
+    assert!(batch_result.is_err());
+
+    // Verify rollback: Employee A was NOT recorded as paid in period 1
+    assert!(!executor.is_paid(&employee_a, &1));
+
+    // Verify rollback: Total paid for company remains at initial 400
+    assert_eq!(executor.get_total_paid(&company_id), 400);
+
+    // Verify rollback: Treasury balance unchanged
+    assert_eq!(token.balance(&treasury), initial_treasury_balance);
+
+    // Verify rollback: Employee A token balance is still 0
+    assert_eq!(token.balance(&employee_a), 0);
+
+    // Verify retry: Employee A can be paid in a clean single execution
+    executor.execute_payment(
+        &company_id,
+        &employee_a,
+        &500,
+        &proof_a_1,
+        &proof_b_1,
+        &proof_c_1,
+        &nullifier_1,
+        &1,
+    );
+    assert!(executor.is_paid(&employee_a, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 900);
+}
+
+/// Acceptance Criteria: Failed Execution Does Not Leave Partial State or Reusable Invalid Commitments
+/// - Verify that execution failure due to invalid/closed period does not mutate storage or consume commitments.
+/// - Verify that valid commitments remain active and reusable for valid executions after failure,
+///   while invalid commitments fail consistently without leaving residue.
+#[test]
+fn test_failed_execution_leaves_commitments_reusable_and_unmutated() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, token, company_id, _admin, treasury) =
+        setup_system(&env);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[150u8; 32]);
+
+    commitment_client.store_commitment(&employee, &commitment);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    let initial_treasury = token.balance(&treasury);
+
+    let proof_a = BytesN::from_array(&env, &[151u8; 64]);
+    let proof_b = BytesN::from_array(&env, &[152u8; 128]);
+    let proof_c = BytesN::from_array(&env, &[153u8; 64]);
+    let nullifier = BytesN::from_array(&env, &[154u8; 32]);
+
+    // Attempt payment for non-existent period (period 99)
+    let invalid_period_res = executor.try_execute_payment(
+        &company_id,
+        &employee,
+        &1000,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &nullifier,
+        &99,
+    );
+    assert_eq!(
+        invalid_period_res.unwrap_err().unwrap(),
+        PaymentError::PeriodNotFound
+    );
+
+    // Verify state was completely unmutated
+    assert!(!executor.is_paid(&employee, &1));
+    assert!(!executor.is_paid(&employee, &99));
+    assert_eq!(executor.get_total_paid(&company_id), 0);
+    assert_eq!(token.balance(&treasury), initial_treasury);
+    assert_eq!(token.balance(&employee), 0);
+
+    // Commitment is intact and active
+    assert!(commitment_client.is_commitment_active(&employee));
+
+    // Valid payment for period 1 succeeds using the exact same commitment and proof
+    executor.execute_payment(
+        &company_id,
+        &employee,
+        &1000,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &nullifier,
+        &1,
+    );
+
+    assert!(executor.is_paid(&employee, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+    assert_eq!(token.balance(&employee), 1000);
+}

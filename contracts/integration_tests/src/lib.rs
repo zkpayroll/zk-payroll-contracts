@@ -244,8 +244,8 @@ mod e2e {
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            6,
-            "Expected 6 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + CommitmentLocked + payment_executed + run_executed"
+            7,
+            "Expected 7 events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + CommitmentLocked + payment_executed + run_state + run_executed"
         );
 
         // Event tuple is (contract, topics, data) - access topics via .1
@@ -278,7 +278,14 @@ mod e2e {
         assert_eq!(sym5a, Symbol::new(env, "payroll"));
         let val5_1 = topics5.get(1).unwrap();
         let sym5b: Symbol = val5_1.try_into_val(&env.clone()).unwrap();
-        assert_eq!(sym5b, Symbol::new(env, "run_executed"));
+        assert_eq!(sym5b, Symbol::new(env, "run_state"));
+        let topics6 = events.get(6).unwrap().1;
+        let val6_0 = topics6.get(0).unwrap();
+        let sym6a: Symbol = val6_0.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym6a, Symbol::new(env, "payroll"));
+        let val6_1 = topics6.get(1).unwrap();
+        let sym6b: Symbol = val6_1.try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym6b, Symbol::new(env, "run_executed"));
     }
 
     /// Paying an employee who has no commitment on-chain must panic.
@@ -516,7 +523,8 @@ mod e2e {
 
         // ── PHASE 4: Commit and bind metadata hash ───────────────────────────
         let meta_hash = BytesN::from_array(env, &[0xAB; 32]);
-        ctx.payroll_client.commit_metadata_hash(&ctx.admin, &meta_hash);
+        ctx.payroll_client
+            .commit_metadata_hash(&ctx.admin, &meta_hash);
         ctx.payroll_client
             .set_run_metadata(&ctx.admin, &run_id, &meta_hash);
 
@@ -527,6 +535,118 @@ mod e2e {
 
         // ── PHASE 6: Verify mismatch detection ───────────────────────────────
         let wrong_hash = BytesN::from_array(env, &[0xCD; 32]);
-        assert!(!ctx.payroll_client.verify_metadata_hash(&run_id, &wrong_hash));
+        assert!(!ctx
+            .payroll_client
+            .verify_metadata_hash(&run_id, &wrong_hash));
+    }
+
+
+    /// Issue #201: Verify end-to-end failed payroll execution rollback across all contracts.
+    /// Ensures partial state is not retained in SalaryCommitment, Registry, Token, or Payroll.
+    #[test]
+    fn test_e2e_failed_payroll_execution_rollback() {
+        let ctx = setup();
+        let env = &ctx.env;
+
+        // Onboard Alice
+        let alice_commitment = alice_salary_commitment(&ctx.commitment_client);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &alice_commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &ctx.alice, &alice_commitment);
+
+        // Mint treasury tokens
+        let initial_treasury: i128 = 10_000;
+        ctx.token_client.mint(&ctx.treasury, &initial_treasury);
+
+        // Create an un-onboarded employee Bob
+        let bob = Address::generate(env);
+
+        // Build a batch targeting [Alice, Bob]
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        proofs.push_back(mock_proof(env));
+
+        let mut amounts = Vec::new(env);
+        amounts.push_back(5_000i128);
+        amounts.push_back(5_000i128);
+
+        let mut employees = Vec::new(env);
+        employees.push_back(ctx.alice.clone());
+        employees.push_back(bob.clone());
+
+        let nonce = test_nonce(env, 201);
+
+        // Execution fails because Bob has no commitment stored
+        let res = ctx.payroll_client.try_batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &10_000i128,
+            &nonce,
+            &None,
+        );
+        assert!(
+            res.is_err(),
+            "Batch processing must fail when Bob is missing commitment"
+        );
+
+        // 1. Treasury balance remains completely unchanged
+        assert_eq!(
+            ctx.token_client.balance(&ctx.treasury),
+            initial_treasury,
+            "Treasury balance must be unchanged after failed run"
+        );
+
+        // 2. Alice balance is still 0
+        assert_eq!(
+            ctx.token_client.balance(&ctx.alice),
+            0,
+            "Alice balance must be 0 after failed run"
+        );
+
+        // 3. Alice's nullifier was not recorded as used
+        let alice_nullifier = BytesN::from_array(env, &[0u8; 32]);
+        assert!(
+            !ctx.commitment_client.is_nullifier_used(&alice_nullifier),
+            "Alice's nullifier must not be used after failed run"
+        );
+
+        // 4. Alice's commitment updates were not locked
+        assert!(
+            !ctx.commitment_client.is_commitment_locked(&ctx.alice),
+            "Alice's commitment updates must not be locked after failed run"
+        );
+
+        // 5. Retrying with a valid batch for Alice succeeds completely
+        let mut valid_proofs = Vec::new(env);
+        valid_proofs.push_back(mock_proof(env));
+        let mut valid_amounts = Vec::new(env);
+        valid_amounts.push_back(5_000i128);
+        let mut valid_employees = Vec::new(env);
+        valid_employees.push_back(ctx.alice.clone());
+
+        let run_id = ctx.payroll_client.batch_process_payroll(
+            &valid_proofs,
+            &valid_amounts,
+            &valid_employees,
+            &5_000i128,
+            &nonce,
+            &None,
+        );
+        assert!(
+            run_id > 0,
+            "Valid payroll run must succeed after previous failure rollback"
+        );
+
+        // Verify post-retry success states
+        assert_eq!(ctx.token_client.balance(&ctx.alice), 5_000i128);
+        assert_eq!(
+            ctx.token_client.balance(&ctx.treasury),
+            initial_treasury - 5_000i128
+        );
+        assert!(ctx.commitment_client.is_nullifier_used(&alice_nullifier));
+        assert!(ctx.commitment_client.is_commitment_locked(&ctx.alice));
     }
 }
+

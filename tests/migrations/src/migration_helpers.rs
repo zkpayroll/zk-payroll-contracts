@@ -200,9 +200,7 @@ impl MigrationContext {
             &self.treasury_owner,
         );
 
-        // Initialize audit module
-        let audit_client = AuditModuleClient::new(env, &self.audit_id);
-        audit_client.initialize(&self.admin);
+        // Audit module requires no initialization.
     }
 
     /// Write full v1 state: companies, employees, payroll runs, audit permissions, etc.
@@ -351,12 +349,12 @@ impl MigrationContext {
         // Re-deploy all contracts as if new WASM was uploaded.
         // This simulates upgrading to a new contract version while preserving
         // existing storage (old keys remain).
-        let new_registry_id = env.register_contract(Some(self.registry_id.clone()), PayrollRegistry);
-        let new_commitment_id = env.register_contract(Some(self.commitment_id.clone()), SalaryCommitmentContract);
-        let new_verifier_id = env.register_contract(Some(self.verifier_id.clone()), ProofVerifier);
-        let new_payroll_id = env.register_contract(Some(self.payroll_id.clone()), Payroll);
-        let new_executor_id = env.register_contract(Some(self.executor_id.clone()), PaymentExecutor);
-        let new_audit_id = env.register_contract(Some(self.audit_id.clone()), AuditModule);
+        let new_registry_id = env.register_contract(&Some(self.registry_id.clone()), PayrollRegistry);
+        let new_commitment_id = env.register_contract(&Some(self.commitment_id.clone()), SalaryCommitmentContract);
+        let new_verifier_id = env.register_contract(&Some(self.verifier_id.clone()), ProofVerifier);
+        let new_payroll_id = env.register_contract(&Some(self.payroll_id.clone()), Payroll);
+        let new_executor_id = env.register_contract(&Some(self.executor_id.clone()), PaymentExecutor);
+        let new_audit_id = env.register_contract(&Some(self.audit_id.clone()), AuditModule);
 
         // Update IDs to new instances (same contract IDs, new WASM)
         // In Soroban, register_contract with Some(id) deploys to the same address.

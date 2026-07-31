@@ -450,14 +450,18 @@ pub fn write_v1_executor_addresses(
 /// Write v1 executor admin.
 pub fn write_v1_executor_admin(env: &Env, executor_id: &Address, admin: &Address) {
     env.as_contract(executor_id, || {
-        env.storage().persistent().set(&ExecutorDataKey::ExecutorAdmin, admin);
+        env.storage()
+            .persistent()
+            .set(&ExecutorDataKey::ExecutorAdmin, admin);
     });
 }
 
 /// Write v1 storage version.
 pub fn write_v1_storage_version(env: &Env, executor_id: &Address, version: u32) {
     env.as_contract(executor_id, || {
-        env.storage().persistent().set(&ExecutorDataKey::StorageVersion, &version);
+        env.storage()
+            .persistent()
+            .set(&ExecutorDataKey::StorageVersion, &version);
     });
 }
 

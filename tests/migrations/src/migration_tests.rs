@@ -454,9 +454,7 @@ mod migration_tests {
         assert!(!p2.closed, "Period 2 must remain open");
 
         // New periods can be created post-migration
-        let new_period = executor_client.create_period(&ctx.company_id_2);
-        assert!(new_period.is_ok(), "New period creation must work after migration");
-        let new_p = new_period.unwrap();
+        let new_p = executor_client.create_period(&ctx.company_id_2);
         assert_eq!(new_p.period_id, 2, "Period sequence must continue");
         assert_eq!(new_p.company_id, ctx.company_id_2);
         assert!(!new_p.closed);

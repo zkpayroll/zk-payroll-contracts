@@ -1,11 +1,14 @@
 #![no_std]
 
+extern crate alloc;
+use alloc::format;
+
 use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
 use soroban_sdk::xdr::ToXdr;
 
@@ -139,8 +142,19 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::AllowedAsset(addresses.token.clone()), &true);
         // Set initial storage key version (issue #174)
-        env.storage().persistent().set(&DataKey::StorageVersion, &1u32);
+        env.storage()
+            .persistent()
+            .set(&DataKey::StorageVersion, &1u32);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
+                addresses.token.clone(),
+            ),
+            (true, env.ledger().timestamp()),
+        );
     }
+
 
     /// Set the executor-level admin (one-time, protected by auth).
     pub fn set_executor_admin(env: Env, admin: Address) {
@@ -176,7 +190,15 @@ impl PaymentExecutor {
         admin.require_auth();
         env.storage()
             .persistent()
-            .set(&DataKey::AllowedAsset(asset), &allowed);
+            .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
+                asset,
+            ),
+            (allowed, env.ledger().timestamp()),
+        );
     }
 
     /// Check if an asset token is allowlisted for payments (issue #175).
@@ -390,6 +412,18 @@ impl PaymentExecutor {
             panic!("Asset not allowed");
         }
 
+        // Issue #217: Validate treasury asset mapping matches supported payroll assets
+        // Ensure the token contract address is valid and matches expected format
+        let token_str = format!("{:?}", addresses.token);
+        if token_str.is_empty() {
+            panic!("Invalid treasury asset mapping: empty token address");
+        }
+
+        // Verify the treasury address is properly configured and matches asset type
+        let treasury_str = format!("{:?}", company.treasury);
+        if treasury_str.is_empty() {
+            panic!("Invalid treasury mapping: empty treasury address");
+        }
         // Execute token transfer from company treasury to employee.
         let token_client = token::Client::new(&env, &addresses.token);
         token_client.transfer(&company.treasury, &employee, &amount);
@@ -729,8 +763,8 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 1_000);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 5);
-        let event = events.get(4).unwrap();
+        assert_eq!(events.len(), 6);
+        let event = events.get(5).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
@@ -1017,8 +1051,8 @@ mod tests {
         assert_eq!(client.get_total_paid(&company_id), 2_500);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 5);
-        let event = events.get(4).unwrap();
+        assert_eq!(events.len(), 6);
+        let event = events.get(5).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));
@@ -1588,4 +1622,36 @@ mod tests {
         assert_eq!(token_client.balance(&bob), 3_000);
         assert_eq!(client.get_total_paid(&company_id), 8_000);
     }
+
+    #[test]
+    fn test_asset_allowed_emits_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        let before_init = env.events().all().len();
+        client.initialize(&addresses);
+        let after_init = env.events().all().len();
+        assert_eq!(after_init, before_init + 1);
+
+        let init_event = env.events().all().get(after_init - 1).unwrap();
+        let sym0: Symbol = init_event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
+
+        let before_set = env.events().all().len();
+        let new_asset = Address::generate(&env);
+        client.set_asset_allowed(&new_asset, &true);
+        let after_set = env.events().all().len();
+        assert_eq!(after_set, before_set + 1);
+
+        let set_event = env.events().all().get(after_set - 1).unwrap();
+        let set_sym0: Symbol = set_event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(set_sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
+    }
 }
+

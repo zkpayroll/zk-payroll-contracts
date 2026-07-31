@@ -67,3 +67,6 @@ soroban contract invoke --id $EXECUTOR_ID --source admin --network testnet -- \
 2. **Add an Employee**: Add a Poseidon commitment for a test employee under the registered company.
 3. **Submit a Payroll Proof**: Invoke the executor's payment method with a valid Groth16 proof, verifying that funds move from the treasury to the employee without errors.
 4. **Replay Protection**: Attempt to submit the exact same proof again and verify it is rejected.
+
+For a step-by-step verification checklist covering contract deployment, network configuration, verifier configuration, treasury setup, admin roles, and post-deploy smoke tests, see [deployment-verification.md](deployment-verification.md).
+

@@ -226,6 +226,10 @@ consumption expectations.
 See [docs/errors.md](docs/errors.md) for common contract failure modes,
 retryability guidance, and suggested SDK/dashboard recovery messages.
 
+## Deployment Verification Checklist
+
+See [docs/deployment-verification.md](docs/deployment-verification.md) for a comprehensive checklist covering contract IDs, target network configuration, ZK verifier parameters, treasury setup, admin roles, and post-deploy smoke tests.
+
 
 ## Contributing
 
