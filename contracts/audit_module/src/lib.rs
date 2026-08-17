@@ -421,12 +421,12 @@ impl AuditModule {
 
         if matched {
             let scope_sym = match scope {
-                AuditScope::FullCompany => Symbol::new(&env, "FullCompany"),
-                AuditScope::TimeRange => Symbol::new(&env, "TimeRange"),
-                AuditScope::EmployeeList => Symbol::new(&env, "EmployeeList"),
-                AuditScope::AggregateOnly => Symbol::new(&env, "AggregateOnly"),
+                AuditScope::FullCompany => Symbol::new(env, "FullCompany"),
+                AuditScope::TimeRange => Symbol::new(env, "TimeRange"),
+                AuditScope::EmployeeList => Symbol::new(env, "EmployeeList"),
+                AuditScope::AggregateOnly => Symbol::new(env, "AggregateOnly"),
             };
-            payroll_events::emit_audit_successful(&env, auditor.clone(), scope_sym);
+            payroll_events::emit_audit_successful(env, auditor.clone(), scope_sym);
         }
 
         matched

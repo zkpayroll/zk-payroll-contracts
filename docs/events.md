@@ -535,13 +535,17 @@ salary values are NEVER emitted, consistent with the privacy boundary.
 
 ### `ViewKeyGenerated` — `audit_module`
 
-Emitted when a view key is generated for an auditor. Includes the raw key
-bytes (auditor-address-bound) and the ledger at which the key expires.
+Emitted when a view key is generated for an auditor. Carries only the
+ledger at which the key expires — the raw key bytes are returned directly
+to the caller from `generate_view_key` but are deliberately **not**
+included in the event, since publishing the key material itself in a
+public event would let anyone perform keyed-commitment checks without ever
+holding a genuine grant.
 
 ```
 topics[0]  Symbol("ViewKeyGenerated")
 topics[1]  Address auditor
-data       (BytesN<32> key_bytes, u32 expiration_ledger)
+data       (u32 expiration_ledger,)
 ```
 
 | Severity | Consumers |
@@ -562,15 +566,17 @@ data       (BytesN<32> key_bytes, u32 expiration_ledger)
 
 ### `AuditAccessRevoked` — `audit_module`
 
-Emitted when a view key is revoked before its expiration. Carries the
-revoking admin, the affected auditor, and the ledger timestamp at which
-the revocation occurred.
+Emitted when a view key is revoked before its expiration. The revoking
+admin and the affected auditor are both carried as topics; there is no
+data payload (only emitted on success — a rejected revocation attempt,
+e.g. wrong granter or unknown auditor, emits no event at all, so this
+event is always a reliable, non-ambiguous "access is now cut off" signal).
 
 ```
 topics[0]  Symbol("AuditAccessRevoked")
 topics[1]  Address admin       // the admin that originally granted the key
 topics[2]  Address auditor     // the auditor losing access
-data       (u64 timestamp,)    // env.ledger().timestamp() at revocation
+data       ()                  // no payload
 ```
 
 | Severity | Consumers |
@@ -762,8 +768,8 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `PeriodCreated` | `payment_executor` | `(company_id)` | `(period_id,)` |
 | `PeriodClosed` | `payment_executor` | `(company_id)` | `(period_id,)` |
 | `PayrollProcessed` | `payment_executor` | `(company_id)` | `(employee, amount, period_id)` |
-| `ViewKeyGenerated` | `audit_module` | `(auditor)` | `(key_bytes, expiration_ledger)` |
-| `AuditAccessRevoked` | `audit_module` | `(admin, auditor)` | `(timestamp,)` |
+| `ViewKeyGenerated` | `audit_module` | `(auditor)` | `(expiration_ledger,)` |
+| `AuditAccessRevoked` | `audit_module` | `(admin, auditor)` | `()` |
 | `AuditSuccessful` | `audit_module` | `(auditor)` | `(scope, keyed_stored)` |
 | `AggregateAuditGenerated` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end)` |
 | `AuditSummaryExported` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end, total)` |
