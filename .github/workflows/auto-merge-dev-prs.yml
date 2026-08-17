@@ -103,13 +103,13 @@ jobs:
 
             let current = await waitForMergeability();
             if (current.mergeable === false || current.mergeable_state === "dirty") {
-              await comment(`${mention} this PR has merge conflicts with `dev`. Please resolve the conflicts, push the fix, and the automation will recheck immediately.`);
+              await comment(`${mention} this PR has merge conflicts with \`dev\`. Please resolve the conflicts, push the fix, and the automation will recheck immediately.`);
               return;
             }
 
             const ci = await waitForCi();
             if (ci.total === 0) {
-              await comment(`${mention} no CI result was found for this PR yet. Please confirm the CI workflow ran for `dev` and push another update if needed.`);
+              await comment(`${mention} no CI result was found for this PR yet. Please confirm the CI workflow ran for \`dev\` and push another update if needed.`);
               return;
             }
             if (ci.pending.length > 0) {
@@ -123,7 +123,7 @@ jobs:
 
             current = await waitForMergeability();
             if (current.mergeable === false || current.mergeable_state === "dirty") {
-              await comment(`${mention} CI passed, but this PR now has merge conflicts with `dev`. Please resolve the conflicts and push again.`);
+              await comment(`${mention} CI passed, but this PR now has merge conflicts with \`dev\`. Please resolve the conflicts and push again.`);
               return;
             }
 
