@@ -248,7 +248,7 @@ impl<'a> PauseManagerClient<'a> {
         self.0.invoke_contract(
             &self.1,
             &Symbol::new(self.0, "get_pending_operator_rotation"),
-            (),
+            Self::empty_args(self.0),
         )
     }
 }

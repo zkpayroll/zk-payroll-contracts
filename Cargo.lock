@@ -18,6 +18,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "admin_config_lock_tests"
+version = "0.1.0"
+dependencies = [
+ "pause_manager",
+ "payroll",
+ "proof_verifier",
+ "salary_commitment",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -408,6 +420,17 @@ dependencies = [
  "crossterm",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "company_state_gate_tests"
+version = "0.1.0"
+dependencies = [
+ "payroll",
+ "proof_verifier",
+ "salary_commitment",
+ "soroban-sdk",
+ "token",
 ]
 
 [[package]]
@@ -1813,6 +1836,7 @@ name = "payroll"
 version = "0.1.0"
 dependencies = [
  "pause_manager",
+ "payroll_events",
  "payroll_registry",
  "proof_verifier",
  "salary_commitment",
