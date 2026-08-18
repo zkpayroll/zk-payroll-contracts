@@ -814,6 +814,103 @@ mod tests {
     }
 
     #[test]
+    fn test_overlapping_active_period_creation_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let first_period = client.create_period(&company_id);
+        assert!(!first_period.closed);
+
+        let overlapping_period = client.try_create_period(&company_id);
+        assert_eq!(
+            overlapping_period.unwrap_err().unwrap(),
+            PaymentError::PeriodAlreadyExists,
+            "a company cannot open period 2 while period 1 is still active"
+        );
+
+        let still_open = client.get_period(&company_id, &1).unwrap();
+        assert!(
+            !still_open.closed,
+            "failed overlap attempt must not close period 1"
+        );
+        assert!(
+            client.get_period(&company_id, &2).is_none(),
+            "failed overlap attempt must not create a second active period"
+        );
+    }
+
+    #[test]
+    fn test_new_period_succeeds_after_prior_period_is_closed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let first_period = client.create_period(&company_id);
+        assert_eq!(first_period.period_id, 1);
+
+        let closed_period = client.close_period(&company_id, &1);
+        assert!(closed_period.closed);
+
+        let second_period = client.create_period(&company_id);
+        assert_eq!(second_period.period_id, 2);
+        assert_eq!(second_period.company_id, company_id);
+        assert!(!second_period.closed);
+        assert_eq!(second_period.end_ledger, 0);
+    }
+
+    #[test]
+    fn test_period_overlap_is_scoped_per_company() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin_a = Address::generate(&env);
+        let treasury_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        let treasury_b = Address::generate(&env);
+        let company_a = registry_client.register_company(&admin_a, &treasury_a);
+        let company_b = registry_client.register_company(&admin_b, &treasury_b);
+
+        let company_a_period = client.create_period(&company_a);
+        assert_eq!(company_a_period.period_id, 1);
+
+        let company_b_period = client.create_period(&company_b);
+        assert_eq!(company_b_period.period_id, 1);
+        assert_eq!(company_b_period.company_id, company_b);
+
+        let company_a_overlap = client.try_create_period(&company_a);
+        assert_eq!(
+            company_a_overlap.unwrap_err().unwrap(),
+            PaymentError::PeriodAlreadyExists,
+            "overlap rejection must apply only within the same company"
+        );
+    }
+
+    #[test]
     fn test_close_period() {
         let env = Env::default();
         env.mock_all_auths();
