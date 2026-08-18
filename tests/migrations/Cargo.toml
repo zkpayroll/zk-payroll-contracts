@@ -1,0 +1,21 @@
+[package]
+name = "migration_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+payroll = { path = "../../contracts/payroll" }
+payroll_registry = { path = "../../contracts/payroll_registry" }
+salary_commitment = { path = "../../contracts/salary_commitment" }
+proof_verifier = { path = "../../contracts/proof_verifier" }
+token = { path = "../../contracts/token" }
+pause_manager = { path = "../../contracts/pause_manager" }
+payment_executor = { path = "../../contracts/payment_executor" }
+audit_module = { path = "../../contracts/audit_module" }
+stellar-strkey = "0.0.8"

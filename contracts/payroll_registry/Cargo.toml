@@ -10,6 +10,12 @@ doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
+payroll_events = { path = "../events" }
+pause_manager = { path = "../pause_manager", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+pause_manager = { path = "../pause_manager", features = ["contract"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]

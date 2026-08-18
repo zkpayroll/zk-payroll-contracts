@@ -5,15 +5,22 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
 soroban-token-sdk = { workspace = true }
+payroll_events = { path = "../events" }
+payroll_registry = { path = "../payroll_registry" }
+proof_verifier = { path = "../proof_verifier" }
+pause_manager = { path = "../pause_manager" }
+salary_commitment = { path = "../salary_commitment" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+payroll_registry = { path = "../payroll_registry" }
+token = { path = "../token" }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

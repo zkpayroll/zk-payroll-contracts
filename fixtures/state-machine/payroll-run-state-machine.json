@@ -1,0 +1,294 @@
+{
+  "version": 1,
+  "issue": 159,
+  "source": "contracts/payroll/src/lib.rs::PayrollRunState",
+  "documentation": "docs/payroll-state-machine.md",
+  "states": [
+    {
+      "name": "draft",
+      "contract_variant": "Draft",
+      "ordinal": 0,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "Payroll inputs are still being assembled off-chain."
+    },
+    {
+      "name": "validating",
+      "contract_variant": "Validating",
+      "ordinal": 1,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "Payroll inputs are being checked before proof work begins."
+    },
+    {
+      "name": "proof_pending",
+      "contract_variant": "ProofPending",
+      "ordinal": 2,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "Required ZK proof or verification artifacts are being produced."
+    },
+    {
+      "name": "ready_to_submit",
+      "contract_variant": "ReadyToSubmit",
+      "ordinal": 3,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "All validation artifacts are present and the run is ready for submission."
+    },
+    {
+      "name": "submitted",
+      "contract_variant": "Submitted",
+      "ordinal": 4,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "The run has been prepared on-chain and is waiting to be executed or cancelled."
+    },
+    {
+      "name": "confirming",
+      "contract_variant": "Confirming",
+      "ordinal": 5,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "Execution has been submitted and clients should wait for final confirmation."
+    },
+    {
+      "name": "completed",
+      "contract_variant": "Completed",
+      "ordinal": 6,
+      "terminal": true,
+      "retryable": false,
+      "user_visible": true,
+      "description": "Payroll completed and reconciliation is final."
+    },
+    {
+      "name": "failed",
+      "contract_variant": "Failed",
+      "ordinal": 7,
+      "terminal": false,
+      "retryable": true,
+      "user_visible": true,
+      "description": "The run failed before a terminal outcome and may be retried or cancelled."
+    },
+    {
+      "name": "cancelled",
+      "contract_variant": "Cancelled",
+      "ordinal": 8,
+      "terminal": true,
+      "retryable": false,
+      "user_visible": true,
+      "description": "The run was intentionally stopped and cannot be reopened."
+    },
+    {
+      "name": "reconciliation_required",
+      "contract_variant": "ReconciliationRequired",
+      "ordinal": 9,
+      "terminal": false,
+      "retryable": false,
+      "user_visible": true,
+      "description": "Payments executed, but reconciliation still needs review or finalization."
+    }
+  ],
+  "terminal_states": ["completed", "cancelled"],
+  "retryable_states": ["failed"],
+  "transitions": [
+    {
+      "from": "draft",
+      "to": "validating",
+      "initiator": "payroll_operator_or_automation",
+      "user_visible": true,
+      "reason": "Start validating a draft run."
+    },
+    {
+      "from": "draft",
+      "to": "cancelled",
+      "initiator": "payroll_operator",
+      "user_visible": true,
+      "reason": "Stop a run before validation."
+    },
+    {
+      "from": "validating",
+      "to": "proof_pending",
+      "initiator": "validation_service",
+      "user_visible": true,
+      "reason": "Inputs passed validation and proof work can start."
+    },
+    {
+      "from": "validating",
+      "to": "failed",
+      "initiator": "validation_service",
+      "user_visible": true,
+      "reason": "Validation failed and the run can be retried."
+    },
+    {
+      "from": "validating",
+      "to": "cancelled",
+      "initiator": "payroll_operator",
+      "user_visible": true,
+      "reason": "Stop a run during validation."
+    },
+    {
+      "from": "proof_pending",
+      "to": "ready_to_submit",
+      "initiator": "proof_service",
+      "user_visible": true,
+      "reason": "Required proof artifacts are ready."
+    },
+    {
+      "from": "proof_pending",
+      "to": "failed",
+      "initiator": "proof_service",
+      "user_visible": true,
+      "reason": "Proof generation or verification failed."
+    },
+    {
+      "from": "proof_pending",
+      "to": "cancelled",
+      "initiator": "payroll_operator",
+      "user_visible": true,
+      "reason": "Stop a run while proofs are pending."
+    },
+    {
+      "from": "ready_to_submit",
+      "to": "submitted",
+      "initiator": "payroll_operator_or_submitter",
+      "user_visible": true,
+      "reason": "Submit the prepared payroll run on-chain."
+    },
+    {
+      "from": "ready_to_submit",
+      "to": "failed",
+      "initiator": "submitter_or_automation",
+      "user_visible": true,
+      "reason": "Submission preparation failed."
+    },
+    {
+      "from": "ready_to_submit",
+      "to": "cancelled",
+      "initiator": "payroll_operator",
+      "user_visible": true,
+      "reason": "Stop a run before on-chain submission."
+    },
+    {
+      "from": "submitted",
+      "to": "confirming",
+      "initiator": "contract_submitter_or_indexer",
+      "user_visible": true,
+      "reason": "Execution has been sent and confirmation is pending."
+    },
+    {
+      "from": "submitted",
+      "to": "failed",
+      "initiator": "contract_submitter_or_indexer",
+      "user_visible": true,
+      "reason": "Submission failed before confirmation."
+    },
+    {
+      "from": "submitted",
+      "to": "cancelled",
+      "initiator": "admin",
+      "user_visible": true,
+      "reason": "Cancel a prepared run before execution."
+    },
+    {
+      "from": "confirming",
+      "to": "completed",
+      "initiator": "contract_or_reconciliation_operator",
+      "user_visible": true,
+      "reason": "Execution and reconciliation are final."
+    },
+    {
+      "from": "confirming",
+      "to": "failed",
+      "initiator": "contract_or_reconciliation_operator",
+      "user_visible": true,
+      "reason": "Confirmation failed before a terminal success."
+    },
+    {
+      "from": "confirming",
+      "to": "reconciliation_required",
+      "initiator": "contract_or_reconciliation_operator",
+      "user_visible": true,
+      "reason": "Execution happened, but reconciliation must be completed."
+    },
+    {
+      "from": "failed",
+      "to": "validating",
+      "initiator": "payroll_operator_or_automation",
+      "user_visible": true,
+      "reason": "Retry from validation."
+    },
+    {
+      "from": "failed",
+      "to": "proof_pending",
+      "initiator": "payroll_operator_or_automation",
+      "user_visible": true,
+      "reason": "Retry from proof generation when inputs remain valid."
+    },
+    {
+      "from": "failed",
+      "to": "cancelled",
+      "initiator": "payroll_operator",
+      "user_visible": true,
+      "reason": "Stop a failed run instead of retrying."
+    },
+    {
+      "from": "reconciliation_required",
+      "to": "completed",
+      "initiator": "reconciliation_operator",
+      "user_visible": true,
+      "reason": "Reconciliation succeeded and the run is final."
+    },
+    {
+      "from": "reconciliation_required",
+      "to": "failed",
+      "initiator": "reconciliation_operator",
+      "user_visible": true,
+      "reason": "Reconciliation failed and the run requires retry handling."
+    }
+  ],
+  "forbidden_examples": [
+    {
+      "from": "draft",
+      "to": "completed",
+      "reason": "A run cannot skip validation, proof, submission, and reconciliation."
+    },
+    {
+      "from": "submitted",
+      "to": "draft",
+      "reason": "Submitted runs cannot move backward to draft."
+    },
+    {
+      "from": "completed",
+      "to": "failed",
+      "reason": "Completed is terminal and immutable."
+    },
+    {
+      "from": "cancelled",
+      "to": "submitted",
+      "reason": "Cancelled is terminal and immutable."
+    }
+  ],
+  "contract_entrypoints": {
+    "prepare_payroll_run": "submitted",
+    "cancel_payroll_run": "cancelled",
+    "batch_process_payroll": "reconciliation_required",
+    "update_reconciliation_status_reconciled": "completed",
+    "update_reconciliation_status_unreconciled": "reconciliation_required",
+    "update_reconciliation_status_failed": "failed",
+    "get_payroll_run_state": "read_only",
+    "transition_payroll_run_state": "admin_only_conformance_transition"
+  },
+  "future_addition_checklist": [
+    "Update PayrollRunState and the transition table in contracts/payroll/src/lib.rs.",
+    "Add positive and negative contract tests for the new behavior.",
+    "Update this fixture for SDK and dashboard mirrors.",
+    "Update docs/payroll-state-machine.md with initiators and user-visible semantics."
+  ]
+}

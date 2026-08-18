@@ -1,0 +1,140 @@
+name: Auto Handle Dev Pull Requests
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - dev
+
+permissions:
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+  statuses: read
+
+jobs:
+  handle-dev-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ github.event.pull_request.draft == false }}
+    steps:
+      - name: Wait before first opened PR check
+        if: ${{ github.event.action == 'opened' }}
+        run: sleep 600
+
+      - name: Check CI, conflicts, and merge when ready
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const mention = `@${pr.assignees?.[0]?.login || pr.user.login}`;
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            async function comment(body) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pr.number,
+                body,
+              });
+            }
+
+            async function getPullRequest() {
+              const { data } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pr.number,
+              });
+              return data;
+            }
+
+            async function waitForMergeability() {
+              let current;
+              for (let attempt = 0; attempt < 12; attempt += 1) {
+                current = await getPullRequest();
+                if (current.mergeable !== null) return current;
+                await sleep(10000);
+              }
+              return current || pr;
+            }
+
+            async function getCiState() {
+              const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+                owner,
+                repo,
+                ref: pr.head.sha,
+                per_page: 100,
+              });
+              const { data: combinedStatus } = await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: pr.head.sha,
+              });
+
+              const relevantCheckRuns = checkRuns.filter((run) => run.name !== "handle-dev-pr");
+              const failingChecks = relevantCheckRuns.filter((run) =>
+                run.status === "completed" &&
+                !["success", "neutral", "skipped"].includes(run.conclusion)
+              );
+              const pendingChecks = relevantCheckRuns.filter((run) => run.status !== "completed");
+              const failingStatuses = combinedStatus.statuses.filter((status) => status.state === "failure" || status.state === "error");
+              const pendingStatuses = combinedStatus.statuses.filter((status) => status.state === "pending");
+
+              return {
+                total: relevantCheckRuns.length + combinedStatus.statuses.length,
+                failing: [...failingChecks.map((run) => run.name), ...failingStatuses.map((status) => status.context)],
+                pending: [...pendingChecks.map((run) => run.name), ...pendingStatuses.map((status) => status.context)],
+              };
+            }
+
+            async function waitForCi() {
+              let state;
+              for (let attempt = 0; attempt < 40; attempt += 1) {
+                state = await getCiState();
+                if (state.total > 0 && state.pending.length === 0) return state;
+                await sleep(30000);
+              }
+              return state || { total: 0, failing: [], pending: [] };
+            }
+
+            let current = await waitForMergeability();
+            if (current.mergeable === false || current.mergeable_state === "dirty") {
+              await comment(`${mention} this PR has merge conflicts with `dev`. Please resolve the conflicts, push the fix, and the automation will recheck immediately.`);
+              return;
+            }
+
+            const ci = await waitForCi();
+            if (ci.total === 0) {
+              await comment(`${mention} no CI result was found for this PR yet. Please confirm the CI workflow ran for `dev` and push another update if needed.`);
+              return;
+            }
+            if (ci.pending.length > 0) {
+              await comment(`${mention} CI is still pending after the automation wait window: ${ci.pending.join(", ")}. Push a new commit when ready and I will recheck immediately.`);
+              return;
+            }
+            if (ci.failing.length > 0) {
+              await comment(`${mention} CI failed on this PR: ${ci.failing.join(", ")}. Please fix the failing checks and push again; I will recheck immediately.`);
+              return;
+            }
+
+            current = await waitForMergeability();
+            if (current.mergeable === false || current.mergeable_state === "dirty") {
+              await comment(`${mention} CI passed, but this PR now has merge conflicts with `dev`. Please resolve the conflicts and push again.`);
+              return;
+            }
+
+            try {
+              await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number: pr.number,
+                merge_method: "squash",
+              });
+            } catch (error) {
+              await comment(`${mention} CI passed, but GitHub could not auto-merge this PR: ${error.message}. Please check branch rules or merge requirements.`);
+              throw error;
+            }
