@@ -443,7 +443,7 @@ impl PaymentExecutor {
         env.storage().persistent().set(&nullifier_key, &true);
 
         // Update total paid
-        let total_key = DataKey::TotalPaid(company_id);
+        let total_key = DataKey::TotalPaid(company_id.clone());
         let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
         env.storage()
             .persistent()
