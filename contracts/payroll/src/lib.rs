@@ -2,6 +2,7 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
 };
 
 use pause_manager::PauseManagerClient;
@@ -311,6 +312,8 @@ pub enum DataKey {
     /// (cancelled). Used to lock unsafe admin configuration changes while a
     /// run is in progress — see `require_no_active_payroll_run`.
     PendingRunCount,
+    /// Allowed asset token for multi-asset treasury management (#175).
+    AllowedAsset(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1034,7 +1037,7 @@ impl Payroll {
     /// does NOT require the system to be unpaused. An admin who can pause the
     /// system can also cancel a pending run while paused, enabling rapid
     /// intervention when a run is discovered to be unsafe.
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64, reason: Symbol) {
+    pub fn cancel_payroll_run_with_reason(e: Env, admin: Address, run_id: u64, reason: Symbol) {
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1792,6 +1795,30 @@ impl Payroll {
     /// Return `true` if the run has been marked as archived, `false` otherwise.
     pub fn is_run_archived(e: Env, run_id: u64) -> bool {
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+    }
+
+    /// Read contract dependency addresses configured during initialization.
+    pub fn get_addresses(e: Env) -> ContractAddresses {
+        e.storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized")
+    }
+
+    /// Read the treasury owner address configured during initialization.
+    pub fn get_treasury_owner(e: Env) -> Address {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TreasuryOwner)
+            .expect("Treasury owner not set")
+    }
+
+    /// Read the current payroll run counter (defaults to 0 on initialization).
+    pub fn get_run_counter(e: Env) -> u64 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::RunCounter)
+            .unwrap_or(0u64)
     }
 }
 
@@ -3008,7 +3035,7 @@ mod tests {
 
         let non_admin = Address::generate(&env);
         let reason = Symbol::new(&env, "attack");
-        payroll_client.cancel_payroll_run(&non_admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&non_admin, &run_id, &reason);
     }
 
     #[test]
@@ -3019,7 +3046,7 @@ mod tests {
             setup_simple_payroll(&env);
 
         let reason = Symbol::new(&env, "no_such_run");
-        payroll_client.cancel_payroll_run(&admin, &999u64, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &999u64, &reason);
     }
 
     // ── Issue #177: payroll run metadata hash checks ──────────────────────────
@@ -3149,8 +3176,8 @@ mod tests {
         );
 
         let reason = Symbol::new(&env, "double_cancel");
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
     }
 
     #[test]
@@ -3166,7 +3193,7 @@ mod tests {
 
         assert!(payroll_client.get_pending_run(&run_id).is_some());
         let reason = Symbol::new(&env, "test_cleanup");
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
 
         assert!(payroll_client.get_pending_run(&run_id).is_none());
     }
@@ -3439,7 +3466,7 @@ mod tests {
         // Failed cancel (wrong caller) should not affect the pending run
         let attacker = Address::generate(&env);
         let reason = Symbol::new(&env, "attack");
-        let cancel_result = payroll_client.try_cancel_payroll_run(&attacker, &run_id, &reason);
+        let cancel_result = payroll_client.try_cancel_payroll_run_with_reason(&attacker, &run_id, &reason);
         assert!(cancel_result.is_err());
 
         // Pending run should still exist
@@ -3725,9 +3752,9 @@ mod tests {
         );
 
         let reason = Symbol::new(&env, "settlement_guard");
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
 
-        let result = payroll_client.try_cancel_payroll_run(&admin, &run_id, &reason);
+        let result = payroll_client.try_cancel_payroll_run_with_reason(&admin, &run_id, &reason);
         assert!(result.is_err());
     }
 
