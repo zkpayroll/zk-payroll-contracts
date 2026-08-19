@@ -623,3 +623,142 @@ fn test_verify_rejects_proof_with_mismatched_vk() {
     // In production: if VK were replaced, the same proof would fail
     // (but contract prevents re-initialization, so this is a theoretical test)
 }
+
+// =========================================================================
+// Issue #278: Accepted / rejected proof digest formats
+//
+// Mirrors the acceptance table in
+// `docs/interop/proof-schema-version-negotiation.md`. The verifier derives
+// the expected public-input count from `vk.ic.len() - 1`; any submission
+// that doesn't match that count is a format rejection, not a cryptographic
+// one, and must return `false` without panicking or writing state.
+// =========================================================================
+
+/// Build a VK whose `ic` has `ic_len` entries, i.e. expects `ic_len - 1`
+/// public inputs.
+fn mock_verification_key_with_ic_len(env: &Env, ic_len: usize) -> VerificationKey {
+    let mut ic = Vec::new(env);
+    for i in 0..ic_len {
+        ic.push_back(BytesN::from_array(env, &[(i as u8).wrapping_add(50); 64]));
+    }
+    VerificationKey {
+        alpha: BytesN::from_array(env, &[1u8; 64]),
+        beta: BytesN::from_array(env, &[2u8; 128]),
+        gamma: BytesN::from_array(env, &[3u8; 128]),
+        delta: BytesN::from_array(env, &[4u8; 128]),
+        ic,
+    }
+}
+
+fn public_inputs_of_len(env: &Env, len: usize) -> Vec<BytesN<32>> {
+    let mut inputs = Vec::new(env);
+    for i in 0..len {
+        inputs.push_back(BytesN::from_array(env, &[(i as u8).wrapping_add(20); 32]));
+    }
+    inputs
+}
+
+#[test]
+fn test_verify_accepts_current_v1_schema_format() {
+    // v1 schema: [commitment, amount] — 2 public inputs, per the schema
+    // registry's "Current / active" row.
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+
+    let proof = mock_snarkjs_proof(&env);
+    let v1_inputs = public_inputs_of_len(&env, 2);
+
+    assert!(client.verify_payment_proof(&proof, &v1_inputs));
+}
+
+#[test]
+fn test_verify_rejects_legacy_v0_three_input_schema() {
+    // v0 legacy schema: [commitment, nullifier, recipient_hash] — 3 public
+    // inputs. Documented as "Deprecated — rejected by v1 verifier" since the
+    // deployed VK's ic.len() (3) only accommodates 2 inputs.
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+
+    let proof = mock_snarkjs_proof(&env);
+    let legacy_v0_inputs = public_inputs_of_len(&env, 3);
+
+    assert!(!client.verify_payment_proof(&proof, &legacy_v0_inputs));
+}
+
+#[test]
+fn test_verify_accepts_exact_expected_input_count_for_varying_vk_sizes() {
+    // The accepted digest format is defined relative to the active VK, not
+    // a hardcoded constant — confirm exact matches are accepted across
+    // several VK sizes.
+    let env = Env::default();
+
+    for ic_len in [2usize, 3, 5, 8] {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProofVerifier);
+        let client = ProofVerifierClient::new(&env, &contract_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        client.init_verifier_admin(&admin);
+        let vk = mock_verification_key_with_ic_len(&env, ic_len);
+        client.initialize_verifier(&vk);
+
+        let proof = mock_snarkjs_proof(&env);
+        let expected_inputs = public_inputs_of_len(&env, ic_len - 1);
+
+        assert!(
+            client.verify_payment_proof(&proof, &expected_inputs),
+            "expected acceptance for ic_len={ic_len}"
+        );
+    }
+}
+
+#[test]
+fn test_verify_rejects_one_fewer_than_expected_input_count() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProofVerifier);
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+    let vk = mock_verification_key_with_ic_len(&env, 5); // expects 4 inputs
+    client.initialize_verifier(&vk);
+
+    let proof = mock_snarkjs_proof(&env);
+    let one_short = public_inputs_of_len(&env, 3);
+
+    assert!(!client.verify_payment_proof(&proof, &one_short));
+}
+
+#[test]
+fn test_verify_rejects_one_more_than_expected_input_count() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ProofVerifier);
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+    let vk = mock_verification_key_with_ic_len(&env, 5); // expects 4 inputs
+    client.initialize_verifier(&vk);
+
+    let proof = mock_snarkjs_proof(&env);
+    let one_extra = public_inputs_of_len(&env, 5);
+
+    assert!(!client.verify_payment_proof(&proof, &one_extra));
+}
+
+#[test]
+fn test_verify_rejected_format_returns_false_without_panicking() {
+    // A rejected digest format must be a clean `false` return — no panic.
+    // (Not wrapped in catch_unwind since this crate is `#![no_std]`; the
+    // test itself failing to return is sufficient proof of a panic.)
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+
+    let proof = mock_snarkjs_proof(&env);
+    let malformed_format_inputs = public_inputs_of_len(&env, 0);
+
+    let is_valid = client.verify_payment_proof(&proof, &malformed_format_inputs);
+    assert!(!is_valid);
+}

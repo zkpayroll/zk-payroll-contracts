@@ -2,6 +2,9 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
+
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
+
 };
 
 use pause_manager::PauseManagerClient;
@@ -122,14 +125,17 @@ pub struct EmergencyWithdrawalRequest {
 
 /// Lifecycle state of a payroll run draft.
 ///
-/// Only `Pending` drafts may be amended. `Finalized` drafts are immutable
-/// and serve as the canonical audit record.
+/// Only `Pending` drafts may be amended. `Finalized` drafts are locked for review.
+/// `Submitted`, `Cancelled`, and `Expired` represent terminal draft states.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum RunDraftState {
     Pending = 0,
     Finalized = 1,
+    Submitted = 2,
+    Cancelled = 3,
+    Expired = 4,
 }
 
 /// An unfinalized payroll run draft that can be corrected before execution.
@@ -306,667 +312,6 @@ pub enum DataKey {
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
     /// Payroll payout asset allowlist (#175).
-    AllowedAsset(Address),
-    // Future upgrade example (issue #196):
-    // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
-}
-
-#[contractimpl]
-impl Payroll {
-    pub fn initialize(
-        e: Env,
-        admin: Address,
-        token: Address,
-        verifier: Address,
-        commitment: Address,
-        treasury: Address,
-        treasury_owner: Address,
-    ) {
-        let key = DataKey::Addresses;
-        if e.storage().persistent().has(&key) {
-            panic!("Already initialized")
-        }
-        let addrs = ContractAddresses {
-            admin,
-            token,
-            verifier,
-            commitment,
-            treasury,
-            treasury_owner: treasury_owner.clone(),
-        };
-        e.storage().persistent().set(&key, &addrs);
-        e.storage()
-            .persistent()
-            .set(&DataKey::AllowedAsset(addrs.token.clone()), &true);
-        e.storage()
-            .persistent()
-            .set(&DataKey::TreasuryOwner, &treasury_owner);
-        e.storage().persistent().set(&DataKey::RunCounter, &0u64);
-
-        payroll_events::emit_payroll_initialized(
-            &e,
-            addrs.admin.clone(),
-            addrs.token.clone(),
-            addrs.verifier.clone(),
-            addrs.commitment.clone(),
-            addrs.treasury.clone(),
-            treasury_owner.clone(),
-        );
-    }
-
-    fn require_not_paused(e: &Env) {
-        if e.storage().persistent().has(&DataKey::PauseManager) {
-            let pm_addr: Address = e
-                .storage()
-                .persistent()
-                .get(&DataKey::PauseManager)
-                .unwrap();
-            let pm_client = PauseManagerClient::new(e, &pm_addr);
-            if pm_client.is_paused() {
-                panic!("Payroll is paused");
-            }
-        }
-    }
-
-    // Issue #147: reject payroll execution for any non-Active company state.
-    // Absent state defaults to Active for backward compatibility with existing
-    // deployments that predate this field.
-    fn require_company_active(e: &Env) {
-        if let Some(state) = e
-            .storage()
-            .persistent()
-            .get::<_, CompanyState>(&DataKey::CompanyState)
-        {
-            match state {
-                CompanyState::Active => {}
-                CompanyState::Paused => {
-                    panic!("Company is paused; payroll execution is not permitted")
-                }
-                CompanyState::Archived => {
-                    panic!("Company is archived; payroll execution is not permitted")
-                }
-                CompanyState::Incomplete => {
-                    panic!("Company setup is incomplete; payroll execution is not permitted")
-                }
-            }
-        }
-    }
-
-    pub fn set_pause_manager(e: Env, pause_manager: Address) {
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        addrs.admin.require_auth();
-        e.storage()
-            .persistent()
-            .set(&DataKey::PauseManager, &pause_manager);
-
-        payroll_events::emit_pause_manager_set(&e, pause_manager);
-    }
-
-    /// Allow or disallow an asset token for payroll payouts.
-    pub fn set_asset_allowed(e: Env, asset: Address, allowed: bool) {
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        addrs.admin.require_auth();
-        e.storage()
-            .persistent()
-            .set(&DataKey::AllowedAsset(asset), &allowed);
-    }
-
-    /// Check if an asset token is allowlisted for payroll payouts.
-    pub fn is_asset_allowed(e: Env, asset: Address) -> bool {
-        e.storage()
-            .persistent()
-            .get(&DataKey::AllowedAsset(asset))
-            .unwrap_or(false)
-    }
-
-    pub fn deposit(e: Env, from: Address, amount: i128, deposit_id: BytesN<32>) {
-        Self::require_not_paused(&e);
-        if amount <= 0 {
-            panic!("Deposit amount must be positive");
-        }
-
-        let nonce_key = DataKey::DepositNonce(deposit_id.clone());
-        if e.storage().persistent().has(&nonce_key) {
-            panic!("Deposit already processed");
-        }
-        e.storage().persistent().set(&nonce_key, &true);
-
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-
-        let treasury_owner: Address = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TreasuryOwner)
-            .expect("Treasury owner not set");
-
-        from.require_auth();
-        treasury_owner.require_auth();
-
-        let token_client = soroban_token::Client::new(&e, &addrs.token);
-        token_client.transfer(&from, &addrs.treasury, &amount);
-
-        // Issue #62: accumulate per-depositor balance for auditability.
-        let balance_key = DataKey::CompanyBalance(from.clone());
-        let prev_balance: i128 = e.storage().persistent().get(&balance_key).unwrap_or(0i128);
-        let new_balance = prev_balance + amount;
-
-        e.storage().persistent().set(&balance_key, &new_balance);
-
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "deposit")),
-            (from, amount, deposit_id, new_balance),
-        );
-    }
-
-    /// Return the accumulated deposit balance for a given depositor address (#62).
-    ///
-    /// This reflects the running total of all successful deposits made by that
-    /// address. It is an accounting record only; actual treasury liquidity is
-    /// held by the token contract at `ContractAddresses.treasury`.
-    pub fn get_treasury_balance(e: Env, depositor: Address) -> i128 {
-        e.storage()
-            .persistent()
-            .get(&DataKey::CompanyBalance(depositor))
-            .unwrap_or(0i128)
-    }
-
-    fn derive_run_id(e: &Env) -> u64 {
-        let counter: u64 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::RunCounter)
-            .unwrap_or(0);
-
-        let run_id = counter + 1;
-        e.storage().persistent().set(&DataKey::RunCounter, &run_id);
-
-        run_id
-    }
-
-    fn is_allowed_payroll_state_transition_internal(
-        from: PayrollRunState,
-        to: PayrollRunState,
-    ) -> bool {
-        match from {
-            PayrollRunState::Draft => {
-                matches!(to, PayrollRunState::Validating | PayrollRunState::Cancelled)
-            }
-            PayrollRunState::Validating => matches!(
-                to,
-                PayrollRunState::ProofPending
-                    | PayrollRunState::Failed
-                    | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::ProofPending => matches!(
-                to,
-                PayrollRunState::ReadyToSubmit
-                    | PayrollRunState::Failed
-                    | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::ReadyToSubmit => matches!(
-                to,
-                PayrollRunState::Submitted | PayrollRunState::Failed | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::Submitted => matches!(
-                to,
-                PayrollRunState::Confirming | PayrollRunState::Failed | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::Confirming => matches!(
-                to,
-                PayrollRunState::Completed
-                    | PayrollRunState::Failed
-                    | PayrollRunState::ReconciliationRequired
-            ),
-            PayrollRunState::Failed => matches!(
-                to,
-                PayrollRunState::Validating
-                    | PayrollRunState::ProofPending
-                    | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::ReconciliationRequired => {
-                matches!(to, PayrollRunState::Completed | PayrollRunState::Failed)
-            }
-            PayrollRunState::Completed | PayrollRunState::Cancelled => false,
-        }
-    }
-
-    fn is_terminal_payroll_state_internal(state: PayrollRunState) -> bool {
-        matches!(
-            state,
-            PayrollRunState::Completed | PayrollRunState::Cancelled
-        )
-    }
-
-    fn is_retryable_payroll_state_internal(state: PayrollRunState) -> bool {
-        matches!(state, PayrollRunState::Failed)
-    }
-
-    fn record_payroll_run_state(e: &Env, run_id: u64, state: PayrollRunState) {
-        e.storage()
-            .persistent()
-            .set(&DataKey::PayrollState(run_id), &state);
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(e, "run_state")),
-            (run_id, state),
-        );
-    }
-
-    fn get_payroll_run_state_internal(e: &Env, run_id: u64) -> PayrollRunState {
-        if let Some(state) = e
-            .storage()
-            .persistent()
-            .get::<_, PayrollRunState>(&DataKey::PayrollState(run_id))
-        {
-            return state;
-        }
-
-        if let Some(run) = e
-            .storage()
-            .persistent()
-            .get::<_, PayrollRun>(&DataKey::PayrollRun(run_id))
-        {
-            return match run.reconciliation_status {
-                ReconciliationStatus::Reconciled => PayrollRunState::Completed,
-                ReconciliationStatus::Unreconciled | ReconciliationStatus::Failed => {
-                    PayrollRunState::ReconciliationRequired
-                }
-            };
-        }
-
-        if e.storage().persistent().has(&DataKey::PendingRun(run_id)) {
-            return PayrollRunState::Submitted;
-        }
-
-        panic!("Payroll run state not found");
-    }
-
-    /// Return whether a transition is allowed by the canonical state machine.
-    pub fn is_state_transition_allowed(
-        _e: Env,
-        from: PayrollRunState,
-        to: PayrollRunState,
-    ) -> bool {
-        Self::is_allowed_payroll_state_transition_internal(from, to)
-    }
-
-    /// Return whether a payroll run state is terminal and immutable.
-    pub fn is_payroll_state_terminal(_e: Env, state: PayrollRunState) -> bool {
-        Self::is_terminal_payroll_state_internal(state)
-    }
-
-    /// Return whether a state should expose a retry action to clients.
-    pub fn is_payroll_state_retryable(_e: Env, state: PayrollRunState) -> bool {
-        Self::is_retryable_payroll_state_internal(state)
-    }
-
-    /// Return the canonical state for a payroll run ID.
-    pub fn get_payroll_run_state(e: Env, run_id: u64) -> PayrollRunState {
-        Self::get_payroll_run_state_internal(&e, run_id)
-    }
-
-    /// Admin-only state transition hook for conformance tests and operations.
-    pub fn transition_payroll_run_state(
-        e: Env,
-        admin: Address,
-        run_id: u64,
-        next_state: PayrollRunState,
-    ) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let current = Self::get_payroll_run_state_internal(&e, run_id);
-        if !Self::is_allowed_payroll_state_transition_internal(current, next_state) {
-            panic!("Invalid payroll state transition");
-        }
-
-        Self::record_payroll_run_state(&e, run_id, next_state);
-    }
-
-    pub fn get_payroll_run(e: Env, run_id: u64) -> PayrollRun {
-        e.storage()
-            .persistent()
-            .get(&DataKey::PayrollRun(run_id))
-            .expect("Run not found")
-    }
-
-    /// Pre-commit an off-chain metadata hash (SHA-256 of payroll period,
-    /// company ID, employee batch hash, and commitment references) that
-    /// will be bound to a payroll run during execution (#177).
-    ///
-    /// Only the admin may call. The commitment is one-time-use: once consumed
-    /// by `set_run_metadata` it is removed from storage.
-    pub fn commit_metadata_hash(e: Env, admin: Address, metadata_hash: BytesN<32>) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let key = DataKey::DraftCommitment(metadata_hash.clone());
-        if e.storage().persistent().has(&key) {
-            panic!("Metadata hash already committed");
-        }
-        e.storage().persistent().set(&key, &true);
-
-        payroll_events::emit_metadata_committed(&e, metadata_hash);
-    }
-
-    /// Bound a pre-committed metadata hash to an existing payroll run.
-    /// Consumes the commitment so it cannot be reused. Only the admin may call.
-    ///
-    /// Must be called with a metadata hash that was previously committed via
-    /// `commit_metadata_hash`. Fails if the hash has not been pre-committed.
-    pub fn set_run_metadata(e: Env, admin: Address, run_id: u64, metadata_hash: BytesN<32>) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        // Verify the metadata hash was pre-committed.
-        let commit_key = DataKey::DraftCommitment(metadata_hash.clone());
-        if !e.storage().persistent().has(&commit_key) {
-            panic!("Metadata hash not pre-committed: call commit_metadata_hash first");
-        }
-        // Consume the commitment.
-        e.storage().persistent().remove(&commit_key);
-
-        // Update the payroll run record.
-        let run_key = DataKey::PayrollRun(run_id);
-        let mut run: PayrollRun = e
-            .storage()
-            .persistent()
-            .get(&run_key)
-            .expect("Run not found");
-        run.metadata_hash = metadata_hash.clone();
-        e.storage().persistent().set(&run_key, &run);
-
-        payroll_events::emit_metadata_bound(&e, run_id, metadata_hash);
-    }
-
-    /// Pre-commit an off-chain draft hash so it can be bound to a future run.
-    ///
-    /// Clients compute `draft_hash` over the payroll preparation artifact
-    /// (employee list, amounts, period metadata) before submitting the batch.
-    /// Calling this function registers the hash on-chain so that
-    /// `batch_process_payroll` can verify it has not been tampered with.
-    ///
-    /// Only the admin may pre-commit a draft. The commitment is one-time-use:
-    /// once consumed by a successful `batch_process_payroll` call it is removed
-    /// from storage (issue #102).
-    pub fn commit_draft(e: Env, admin: Address, draft_hash: BytesN<32>) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let key = DataKey::DraftCommitment(draft_hash.clone());
-        if e.storage().persistent().has(&key) {
-            panic!("Draft already committed");
-        }
-        e.storage().persistent().set(&key, &true);
-
-        payroll_events::emit_draft_committed(&e, draft_hash);
-    }
-
-    /// Request an emergency treasury withdrawal (step 1 of 2 — issue #104).
-    ///
-    /// Only the `treasury_owner` may submit a request. A pending request is
-    /// stored on-chain and must be separately approved by the `admin` via
-    /// `approve_emergency_withdrawal`. At most one pending request may exist at
-    /// any time.
-    pub fn request_emergency_withdrawal(
-        e: Env,
-        treasury_owner: Address,
-        amount: i128,
-        recipient: Address,
-    ) {
-        Self::require_not_paused(&e);
-        if amount <= 0 {
-            panic!("Amount must be positive");
-        }
-        let stored_owner: Address = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TreasuryOwner)
-            .expect("Treasury owner not set");
-        if treasury_owner != stored_owner {
-            panic!("Unauthorized: caller is not treasury owner");
-        }
-        treasury_owner.require_auth();
-
-        if e.storage().persistent().has(&DataKey::EmergencyRequest) {
-            panic!("A pending emergency request already exists");
-        }
-
-        let request = EmergencyWithdrawalRequest {
-            amount,
-            recipient: recipient.clone(),
-            requested_at: e.ledger().timestamp(),
-            approved: false,
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::EmergencyRequest, &request);
-
-        payroll_events::emit_emergency_requested(&e, amount, recipient);
-    }
-
-    /// Approve and execute a pending emergency withdrawal (step 2 of 2 — issue #104).
-    ///
-    /// Only the `admin` may approve. On approval the treasury funds are
-    /// transferred to the recipient specified in the request and the pending
-    /// request is cleared from storage, ensuring it cannot be replayed.
-    pub fn approve_emergency_withdrawal(e: Env, admin: Address) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let request: EmergencyWithdrawalRequest = e
-            .storage()
-            .persistent()
-            .get(&DataKey::EmergencyRequest)
-            .expect("No pending emergency request");
-
-        // Clear before transfer (checks-effects-interactions).
-        e.storage().persistent().remove(&DataKey::EmergencyRequest);
-
-        let token_client = soroban_token::Client::new(&e, &addrs.token);
-        token_client.transfer(&addrs.treasury, &request.recipient, &request.amount);
-
-        payroll_events::emit_emergency_approved(&e, request.amount, request.recipient);
-    }
-
-    /// Cancel a pending emergency withdrawal request.
-    ///
-    /// Either the `treasury_owner` or the `admin` may cancel. Cancellation
-    /// removes the pending request without transferring any funds.
-    pub fn cancel_emergency_withdrawal(e: Env, caller: Address) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        let stored_owner: Address = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TreasuryOwner)
-            .expect("Treasury owner not set");
-
-        let is_admin = caller == addrs.admin;
-        let is_owner = caller == stored_owner;
-        if !is_admin && !is_owner {
-            panic!("Unauthorized: only admin or treasury owner may cancel");
-        }
-        caller.require_auth();
-
-        if !e.storage().persistent().has(&DataKey::EmergencyRequest) {
-            panic!("No pending emergency request to cancel");
-        }
-        e.storage().persistent().remove(&DataKey::EmergencyRequest);
-
-        payroll_events::emit_emergency_cancelled(&e, caller);
-    }
-
-    /// Returns the pending emergency withdrawal request, if any.
-    pub fn get_emergency_request(e: Env) -> Option<EmergencyWithdrawalRequest> {
-        e.storage().persistent().get(&DataKey::EmergencyRequest)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Payroll run cancellation (issue #75)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Prepare a pending payroll run for later finalization or cancellation.
-    ///
-    /// This function validates the batch metadata and reserves the nonce without
-    /// executing any payments. The run can later be finalized (via `finalize_payroll_run`)
-    /// or cancelled (via `cancel_payroll_run`). Only finalized runs are permanent.
-    ///
-    /// This two-step process allows operators to validate configuration before
-    /// committing treasury funds, reducing the risk of executing with incorrect
-    /// inputs.
-    pub fn prepare_payroll_run(
-        e: Env,
-        proofs: Vec<BytesN<256>>,
-        amounts: Vec<i128>,
-        employees: Vec<Address>,
-        expected_total_spend: i128,
-        nonce: BytesN<32>,
-        draft_hash: Option<BytesN<32>>,
-    ) -> u64 {
-        Self::require_company_active(&e);
-        let count = proofs.len();
-
-        if amounts.len() != count || employees.len() != count {
-            panic!("Array length mismatch");
-        }
-
-        if count == 0 {
-            panic!("Empty payroll batch");
-        }
-
-        assert!(count <= MAX_BATCH, "Batch too large");
-
-        // Reject duplicate run nonces before any other work.
-        let nonce_key = DataKey::RunNonce(nonce.clone());
-        if e.storage().persistent().has(&nonce_key) {
-            panic!("Duplicate run nonce: this payroll batch has already been submitted");
-        }
-
-        // If a draft hash is supplied, verify a pre-commitment exists.
-        let resolved_draft_hash: BytesN<32> = if let Some(ref dh) = draft_hash {
-            let commit_key = DataKey::DraftCommitment(dh.clone());
-            if !e.storage().persistent().has(&commit_key) {
-                panic!("Draft hash not pre-committed: call commit_draft first");
-            }
-            dh.clone()
-        } else {
-            BytesN::from_array(&e, &[0u8; 32])
-        };
-
-        let mut total: i128 = 0;
-        for i in 0..count {
-            let amt = amounts.get(i).unwrap();
-            if amt <= 0 {
-                panic!("Amount must be positive");
-            }
-            total += amt;
-        }
-        if total != expected_total_spend {
-            panic!(
-                "Expected spend mismatch: authorised {} but batch totals {}",
-                expected_total_spend, total
-            );
-        }
-
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-
-        addrs.admin.require_auth();
-
-        // Validate treasury asset allowlist
-        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
-            panic!("Asset not allowed");
-        }
-
-        let run_id = Self::derive_run_id(&e);
-
-        // Mark nonce as consumed (store run_id for auditability).
-        e.storage().persistent().set(&nonce_key, &run_id);
-
-        // Store the pending run
-        let pending_run = PendingPayrollRun {
-            run_id,
-            prepared_at: e.ledger().timestamp(),
-            admin: addrs.admin.clone(),
-            total_amount: expected_total_spend,
-            employee_count: count,
-            draft_hash: resolved_draft_hash,
-            nonce: nonce.clone(),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::PendingRun(run_id), &pending_run);
-        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Submitted);
-
-        payroll_events::emit_run_prepared(&e, run_id, expected_total_spend);
-
-        run_id
-    }
-
-    /// Get a pending payroll run, if it exists.
-    pub fn get_pending_run(e: Env, run_id: u64) -> Option<PendingPayrollRun> {
-        e.storage().persistent().get(&DataKey::PendingRun(run_id))
-    }
-
     /// Cancel a pending payroll run without executing any payments (issue #198).
     ///
     /// Only the admin may cancel. The `reason` is recorded in the event for
@@ -979,7 +324,7 @@ impl Payroll {
     /// does NOT require the system to be unpaused. An admin who can pause the
     /// system can also cancel a pending run while paused, enabling rapid
     /// intervention when a run is discovered to be unsafe.
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64, reason: Symbol) {
+    pub fn cancel_payroll_run_with_reason(e: Env, admin: Address, run_id: u64, reason: Symbol) {
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1386,6 +731,117 @@ impl Payroll {
             .expect("Draft not found")
     }
 
+    /// Return whether a draft transition is allowed by the draft state machine.
+    pub fn is_draft_transition_allowed(_e: Env, from: RunDraftState, to: RunDraftState) -> bool {
+        Self::is_allowed_draft_state_transition_internal(from, to)
+    }
+
+    /// Return whether a draft state is terminal and immutable.
+    pub fn is_draft_state_terminal(_e: Env, state: RunDraftState) -> bool {
+        Self::is_terminal_draft_state_internal(state)
+    }
+
+    /// Submit a payroll run draft, transitioning it to `Submitted`.
+    ///
+    /// Only the admin may submit a draft.
+    pub fn submit_run_draft(e: Env, admin: Address, draft_id: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        if !Self::is_allowed_draft_state_transition_internal(draft.state, RunDraftState::Submitted)
+        {
+            panic!("Invalid draft state transition");
+        }
+
+        draft.state = RunDraftState::Submitted;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+
+        payroll_events::emit_draft_submitted(&e, draft_id, admin);
+    }
+
+    /// Cancel a payroll run draft, transitioning it to `Cancelled`.
+    ///
+    /// Only the admin may cancel a draft.
+    pub fn cancel_run_draft(e: Env, admin: Address, draft_id: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        if !Self::is_allowed_draft_state_transition_internal(draft.state, RunDraftState::Cancelled)
+        {
+            panic!("Invalid draft state transition");
+        }
+
+        draft.state = RunDraftState::Cancelled;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+
+        payroll_events::emit_draft_cancelled(&e, draft_id, admin);
+    }
+
+    /// Expire a payroll run draft, transitioning it to `Expired`.
+    ///
+    /// Only the admin may expire a draft.
+    pub fn expire_run_draft(e: Env, admin: Address, draft_id: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        if !Self::is_allowed_draft_state_transition_internal(draft.state, RunDraftState::Expired) {
+            panic!("Invalid draft state transition");
+        }
+
+        draft.state = RunDraftState::Expired;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+
+        payroll_events::emit_draft_expired(&e, draft_id, admin);
+    }
+
     // ── Issue #91: privileged-role rotation ──────────────────────────────────
 
     /// Propose a new admin (step 1 of 2).
@@ -1710,6 +1166,30 @@ impl Payroll {
     /// Return `true` if the run has been marked as archived, `false` otherwise.
     pub fn is_run_archived(e: Env, run_id: u64) -> bool {
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+    }
+
+    /// Read contract dependency addresses configured during initialization.
+    pub fn get_addresses(e: Env) -> ContractAddresses {
+        e.storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized")
+    }
+
+    /// Read the treasury owner address configured during initialization.
+    pub fn get_treasury_owner(e: Env) -> Address {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TreasuryOwner)
+            .expect("Treasury owner not set")
+    }
+
+    /// Read the current payroll run counter (defaults to 0 on initialization).
+    pub fn get_run_counter(e: Env) -> u64 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::RunCounter)
+            .unwrap_or(0u64)
     }
 }
 
@@ -2181,6 +1661,115 @@ mod tests {
 
         let result = payroll_client.try_amend_run_draft(&admin, &id, &9_000i128, &18u32);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_run_draft_transitions_to_submitted() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "MAY"));
+        assert_eq!(
+            payroll_client.get_run_draft(&id).state,
+            RunDraftState::Pending
+        );
+
+        payroll_client.submit_run_draft(&admin, &id);
+        let draft = payroll_client.get_run_draft(&id);
+        assert_eq!(draft.state, RunDraftState::Submitted);
+        assert!(payroll_client.is_draft_state_terminal(&draft.state));
+    }
+
+    #[test]
+    fn test_cancel_run_draft_transitions_to_cancelled() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "JUN"));
+        payroll_client.cancel_run_draft(&admin, &id);
+
+        let draft = payroll_client.get_run_draft(&id);
+        assert_eq!(draft.state, RunDraftState::Cancelled);
+        assert!(payroll_client.is_draft_state_terminal(&draft.state));
+    }
+
+    #[test]
+    fn test_expire_run_draft_transitions_to_expired() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "JUL"));
+        payroll_client.expire_run_draft(&admin, &id);
+
+        let draft = payroll_client.get_run_draft(&id);
+        assert_eq!(draft.state, RunDraftState::Expired);
+        assert!(payroll_client.is_draft_state_terminal(&draft.state));
+    }
+
+    #[test]
+    fn test_terminal_draft_rejects_amendments_and_retransitions() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "AUG"));
+        payroll_client.cancel_run_draft(&admin, &id);
+
+        // Cannot amend a cancelled draft
+        let amend_res = payroll_client.try_amend_run_draft(&admin, &id, &15_000i128, &25u32);
+        assert!(amend_res.is_err());
+
+        // Cannot submit an already cancelled draft
+        let submit_res = payroll_client.try_submit_run_draft(&admin, &id);
+        assert!(submit_res.is_err());
+
+        // Cannot expire an already cancelled draft
+        let expire_res = payroll_client.try_expire_run_draft(&admin, &id);
+        assert!(expire_res.is_err());
+    }
+
+    #[test]
+    fn test_unauthorized_draft_transitions_fail() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+        let attacker = Address::generate(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "SEP"));
+
+        assert!(payroll_client.try_submit_run_draft(&attacker, &id).is_err());
+        assert!(payroll_client.try_cancel_run_draft(&attacker, &id).is_err());
+        assert!(payroll_client.try_expire_run_draft(&attacker, &id).is_err());
+    }
+
+    #[test]
+    fn test_is_draft_state_helpers() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        assert!(payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Pending, &RunDraftState::Submitted));
+        assert!(payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Finalized, &RunDraftState::Cancelled));
+        assert!(!payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Submitted, &RunDraftState::Pending));
+        assert!(!payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Cancelled, &RunDraftState::Submitted));
+
+        assert!(!payroll_client.is_draft_state_terminal(&RunDraftState::Pending));
+        assert!(!payroll_client.is_draft_state_terminal(&RunDraftState::Finalized));
+        assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Submitted));
+        assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Cancelled));
+        assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Expired));
     }
 
     // ── Issue #103: per-payroll run nonce uniqueness ───────────────────────────
@@ -3028,7 +2617,7 @@ mod tests {
 
         let non_admin = Address::generate(&env);
         let reason = Symbol::new(&env, "attack");
-        payroll_client.cancel_payroll_run(&non_admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&non_admin, &run_id, &reason);
     }
 
     #[test]
@@ -3039,7 +2628,7 @@ mod tests {
             setup_simple_payroll(&env);
 
         let reason = Symbol::new(&env, "no_such_run");
-        payroll_client.cancel_payroll_run(&admin, &999u64, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &999u64, &reason);
     }
 
     // ── Issue #177: payroll run metadata hash checks ──────────────────────────
@@ -3169,8 +2758,8 @@ mod tests {
         );
 
         let reason = Symbol::new(&env, "double_cancel");
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
     }
 
     #[test]
@@ -3186,7 +2775,7 @@ mod tests {
 
         assert!(payroll_client.get_pending_run(&run_id).is_some());
         let reason = Symbol::new(&env, "test_cleanup");
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
 
         assert!(payroll_client.get_pending_run(&run_id).is_none());
     }
@@ -3459,7 +3048,7 @@ mod tests {
         // Failed cancel (wrong caller) should not affect the pending run
         let attacker = Address::generate(&env);
         let reason = Symbol::new(&env, "attack");
-        let cancel_result = payroll_client.try_cancel_payroll_run(&attacker, &run_id, &reason);
+        let cancel_result = payroll_client.try_cancel_payroll_run_with_reason(&attacker, &run_id, &reason);
         assert!(cancel_result.is_err());
 
         // Pending run should still exist
@@ -3745,9 +3334,9 @@ mod tests {
         );
 
         let reason = Symbol::new(&env, "settlement_guard");
-        payroll_client.cancel_payroll_run(&admin, &run_id, &reason);
+        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
 
-        let result = payroll_client.try_cancel_payroll_run(&admin, &run_id, &reason);
+        let result = payroll_client.try_cancel_payroll_run_with_reason(&admin, &run_id, &reason);
         assert!(result.is_err());
     }
 

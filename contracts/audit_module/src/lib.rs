@@ -165,6 +165,10 @@ impl AuditModule {
         payroll_events::emit_audit_pause_manager_set(&env, pause_manager);
     }
 
+    pub fn get_pause_manager(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::PauseManager)
+    }
+
     // -----------------------------------------------------------------------
     // View-key lifecycle
     // -----------------------------------------------------------------------
