@@ -431,6 +431,22 @@ data       (u64 run_id, i128 total_amount)
 |----------|-----------|
 | `LOW` | Run-aggregators (track `run_id` sequence for gap detection) |
 
+#### `payroll / run_cancelled`
+
+Emitted when an admin rejects/cancels a prepared payroll run during review.
+The payload deliberately contains only a stable off-chain reason reference;
+indexers MUST NOT expect plaintext rejection text or payroll totals here.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_cancelled")
+data       (u64 run_id, BytesN<32> reason_ref)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` | HR review UIs, audit trails, incident reviewers |
+
 #### `payroll / deposit`
 
 ```
