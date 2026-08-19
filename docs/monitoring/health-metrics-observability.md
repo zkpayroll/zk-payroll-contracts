@@ -53,12 +53,13 @@ Data: (run_id: u64, total_amount: i128)
 **Emitted**: When a pending payroll run is cancelled
 ```
 Event: ("payroll", "run_cancelled")
-Data: (run_id: u64, total_amount: i128)
+Data: (run_id: u64, reason_ref: BytesN<32>)
 ```
 **Signals**:
-- Operator halted a prepared run
-- Budget reservation released
-- Reason implicit (may be paired with off-chain reason logs)
+- Operator halted or rejected a prepared run during review
+- Budget reservation released without disclosing the reserved amount
+- `reason_ref` is a safe reference hash for an off-chain rejection record;
+  plaintext reasons and payroll values must remain off-chain
 
 **Alert Triggers**:
 - Multiple `run_cancelled` events from same admin within 1 hour = possible misconfiguration
