@@ -88,3 +88,51 @@ request:
 Never add a transition out of a terminal state without first changing the
 terminal-state definition and adding tests that prove existing terminal behavior
 is intentionally replaced.
+
+---
+
+## Payroll Draft Lifecycle State Machine (`RunDraftState`)
+
+In addition to the run state machine, `RunDraftState` in `contracts/payroll/src/lib.rs` tracks off-chain payroll preparation drafts before submission.
+
+### Draft States
+
+| State | Contract variant | Terminal | Semantics |
+| --- | --- | --- | --- |
+| `pending` | `Pending` | No | Draft is created or amended and open for corrections. |
+| `finalized` | `Finalized` | No | Draft is locked for review; no further amendments allowed. |
+| `submitted` | `Submitted` | Yes | Draft has been submitted for execution. |
+| `cancelled` | `Cancelled` | Yes | Draft was cancelled before submission. |
+| `expired` | `Expired` | Yes | Draft expired before submission. |
+
+### Allowed Draft Transitions
+
+| From | To | Initiator | User-visible meaning |
+| --- | --- | --- | --- |
+| `pending` | `finalized` | Admin | Finalize draft for review. |
+| `pending` | `submitted` | Admin | Submit draft directly for processing. |
+| `pending` | `cancelled` | Admin | Cancel draft. |
+| `pending` | `expired` | Admin / Automation | Expire stale draft. |
+| `finalized` | `submitted` | Admin | Submit finalized draft for processing. |
+| `finalized` | `cancelled` | Admin | Cancel finalized draft. |
+| `finalized` | `expired` | Admin / Automation | Expire finalized draft. |
+
+`Submitted`, `Cancelled`, and `Expired` are terminal draft states. Transitions out of terminal states are forbidden.
+
+### Draft Contract Entry Points
+
+| Entry point | State effect |
+| --- | --- |
+| `create_run_draft` | Creates a new draft in `Pending` state. |
+| `amend_run_draft` | Updates `total_amount` and `employee_count` for `Pending` draft. |
+| `finalize_run_draft` | Transitions `Pending` draft to `Finalized`. |
+| `submit_run_draft` | Transitions `Pending` or `Finalized` draft to `Submitted`. |
+| `cancel_run_draft` | Transitions `Pending` or `Finalized` draft to `Cancelled`. |
+| `expire_run_draft` | Transitions `Pending` or `Finalized` draft to `Expired`. |
+| `is_draft_transition_allowed` | Returns whether a draft transition is valid. |
+| `is_draft_state_terminal` | Returns whether a draft state is terminal. |
+
+### Privacy Guarantees
+
+All draft state transitions emit events containing only `(draft_id, admin)` identifiers. Individual employee salary values, bank details, and salary commitments remain redacted and unexposed in state logs, telemetry, and contract state.
+

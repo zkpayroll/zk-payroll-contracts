@@ -172,6 +172,30 @@ pub fn emit_draft_finalized(e: &Env, draft_id: u64, total: i128, amendment_count
     );
 }
 
+/// Emitted when a payroll run draft is submitted.
+pub fn emit_draft_submitted(e: &Env, draft_id: u64, admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "draft_submitted")),
+        (draft_id, admin),
+    );
+}
+
+/// Emitted when a payroll run draft is cancelled.
+pub fn emit_draft_cancelled(e: &Env, draft_id: u64, admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "draft_cancelled")),
+        (draft_id, admin),
+    );
+}
+
+/// Emitted when a payroll run draft is expired.
+pub fn emit_draft_expired(e: &Env, draft_id: u64, admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "draft_expired")),
+        (draft_id, admin),
+    );
+}
+
 /// Emitted when a payroll run's reconciliation status is updated.
 pub fn emit_reconciliation_updated(e: &Env, run_id: u64, status: Symbol) {
     e.events().publish(

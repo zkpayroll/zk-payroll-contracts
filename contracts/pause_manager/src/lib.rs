@@ -150,6 +150,13 @@ impl PauseManager {
     pub fn get_pending_operator_rotation(e: Env) -> Option<PendingOperatorRotation> {
         e.storage().persistent().get(&DataKey::PendingOperator)
     }
+
+    pub fn get_operator(e: Env) -> Address {
+        e.storage()
+            .persistent()
+            .get(&DataKey::Operator)
+            .expect("Not initialized")
+    }
 }
 
 #[cfg(not(feature = "contract"))]
@@ -249,6 +256,14 @@ impl<'a> PauseManagerClient<'a> {
             &self.1,
             &Symbol::new(self.0, "get_pending_operator_rotation"),
             (),
+        )
+    }
+
+    pub fn get_operator(&self) -> Address {
+        self.0.invoke_contract(
+            &self.1,
+            &Symbol::new(self.0, "get_operator"),
+            Self::empty_args(self.0),
         )
     }
 }

@@ -2,6 +2,9 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
+
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
+
 };
 
 use pause_manager::PauseManagerClient;
@@ -122,14 +125,17 @@ pub struct EmergencyWithdrawalRequest {
 
 /// Lifecycle state of a payroll run draft.
 ///
-/// Only `Pending` drafts may be amended. `Finalized` drafts are immutable
-/// and serve as the canonical audit record.
+/// Only `Pending` drafts may be amended. `Finalized` drafts are locked for review.
+/// `Submitted`, `Cancelled`, and `Expired` represent terminal draft states.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum RunDraftState {
     Pending = 0,
     Finalized = 1,
+    Submitted = 2,
+    Cancelled = 3,
+    Expired = 4,
 }
 
 /// An unfinalized payroll run draft that can be corrected before execution.
@@ -307,6 +313,9 @@ pub enum DataKey {
     CompanyState,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
+    /// Allowed asset for treasury payments.
+    /// Allowed asset token for multi-asset treasury management (#175).
+    AllowedAsset(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -551,6 +560,30 @@ impl Payroll {
 
     fn is_retryable_payroll_state_internal(state: PayrollRunState) -> bool {
         matches!(state, PayrollRunState::Failed)
+    }
+
+    fn is_allowed_draft_state_transition_internal(from: RunDraftState, to: RunDraftState) -> bool {
+        match from {
+            RunDraftState::Pending => matches!(
+                to,
+                RunDraftState::Finalized
+                    | RunDraftState::Submitted
+                    | RunDraftState::Cancelled
+                    | RunDraftState::Expired
+            ),
+            RunDraftState::Finalized => matches!(
+                to,
+                RunDraftState::Submitted | RunDraftState::Cancelled | RunDraftState::Expired
+            ),
+            RunDraftState::Submitted | RunDraftState::Cancelled | RunDraftState::Expired => false,
+        }
+    }
+
+    fn is_terminal_draft_state_internal(state: RunDraftState) -> bool {
+        matches!(
+            state,
+            RunDraftState::Submitted | RunDraftState::Cancelled | RunDraftState::Expired
+        )
     }
 
     fn record_payroll_run_state(e: &Env, run_id: u64, state: PayrollRunState) {
@@ -1386,6 +1419,117 @@ impl Payroll {
             .expect("Draft not found")
     }
 
+    /// Return whether a draft transition is allowed by the draft state machine.
+    pub fn is_draft_transition_allowed(_e: Env, from: RunDraftState, to: RunDraftState) -> bool {
+        Self::is_allowed_draft_state_transition_internal(from, to)
+    }
+
+    /// Return whether a draft state is terminal and immutable.
+    pub fn is_draft_state_terminal(_e: Env, state: RunDraftState) -> bool {
+        Self::is_terminal_draft_state_internal(state)
+    }
+
+    /// Submit a payroll run draft, transitioning it to `Submitted`.
+    ///
+    /// Only the admin may submit a draft.
+    pub fn submit_run_draft(e: Env, admin: Address, draft_id: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        if !Self::is_allowed_draft_state_transition_internal(draft.state, RunDraftState::Submitted)
+        {
+            panic!("Invalid draft state transition");
+        }
+
+        draft.state = RunDraftState::Submitted;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+
+        payroll_events::emit_draft_submitted(&e, draft_id, admin);
+    }
+
+    /// Cancel a payroll run draft, transitioning it to `Cancelled`.
+    ///
+    /// Only the admin may cancel a draft.
+    pub fn cancel_run_draft(e: Env, admin: Address, draft_id: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        if !Self::is_allowed_draft_state_transition_internal(draft.state, RunDraftState::Cancelled)
+        {
+            panic!("Invalid draft state transition");
+        }
+
+        draft.state = RunDraftState::Cancelled;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+
+        payroll_events::emit_draft_cancelled(&e, draft_id, admin);
+    }
+
+    /// Expire a payroll run draft, transitioning it to `Expired`.
+    ///
+    /// Only the admin may expire a draft.
+    pub fn expire_run_draft(e: Env, admin: Address, draft_id: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        if !Self::is_allowed_draft_state_transition_internal(draft.state, RunDraftState::Expired) {
+            panic!("Invalid draft state transition");
+        }
+
+        draft.state = RunDraftState::Expired;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+
+        payroll_events::emit_draft_expired(&e, draft_id, admin);
+    }
+
     // ── Issue #91: privileged-role rotation ──────────────────────────────────
 
     /// Propose a new admin (step 1 of 2).
@@ -1710,6 +1854,30 @@ impl Payroll {
     /// Return `true` if the run has been marked as archived, `false` otherwise.
     pub fn is_run_archived(e: Env, run_id: u64) -> bool {
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+    }
+
+    /// Read contract dependency addresses configured during initialization.
+    pub fn get_addresses(e: Env) -> ContractAddresses {
+        e.storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized")
+    }
+
+    /// Read the treasury owner address configured during initialization.
+    pub fn get_treasury_owner(e: Env) -> Address {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TreasuryOwner)
+            .expect("Treasury owner not set")
+    }
+
+    /// Read the current payroll run counter (defaults to 0 on initialization).
+    pub fn get_run_counter(e: Env) -> u64 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::RunCounter)
+            .unwrap_or(0u64)
     }
 }
 
@@ -2183,6 +2351,115 @@ mod tests {
 
         let result = payroll_client.try_amend_run_draft(&admin, &id, &9_000i128, &18u32);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_run_draft_transitions_to_submitted() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "MAY"));
+        assert_eq!(
+            payroll_client.get_run_draft(&id).state,
+            RunDraftState::Pending
+        );
+
+        payroll_client.submit_run_draft(&admin, &id);
+        let draft = payroll_client.get_run_draft(&id);
+        assert_eq!(draft.state, RunDraftState::Submitted);
+        assert!(payroll_client.is_draft_state_terminal(&draft.state));
+    }
+
+    #[test]
+    fn test_cancel_run_draft_transitions_to_cancelled() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "JUN"));
+        payroll_client.cancel_run_draft(&admin, &id);
+
+        let draft = payroll_client.get_run_draft(&id);
+        assert_eq!(draft.state, RunDraftState::Cancelled);
+        assert!(payroll_client.is_draft_state_terminal(&draft.state));
+    }
+
+    #[test]
+    fn test_expire_run_draft_transitions_to_expired() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "JUL"));
+        payroll_client.expire_run_draft(&admin, &id);
+
+        let draft = payroll_client.get_run_draft(&id);
+        assert_eq!(draft.state, RunDraftState::Expired);
+        assert!(payroll_client.is_draft_state_terminal(&draft.state));
+    }
+
+    #[test]
+    fn test_terminal_draft_rejects_amendments_and_retransitions() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "AUG"));
+        payroll_client.cancel_run_draft(&admin, &id);
+
+        // Cannot amend a cancelled draft
+        let amend_res = payroll_client.try_amend_run_draft(&admin, &id, &15_000i128, &25u32);
+        assert!(amend_res.is_err());
+
+        // Cannot submit an already cancelled draft
+        let submit_res = payroll_client.try_submit_run_draft(&admin, &id);
+        assert!(submit_res.is_err());
+
+        // Cannot expire an already cancelled draft
+        let expire_res = payroll_client.try_expire_run_draft(&admin, &id);
+        assert!(expire_res.is_err());
+    }
+
+    #[test]
+    fn test_unauthorized_draft_transitions_fail() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+        let attacker = Address::generate(&env);
+
+        let id =
+            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "SEP"));
+
+        assert!(payroll_client.try_submit_run_draft(&attacker, &id).is_err());
+        assert!(payroll_client.try_cancel_run_draft(&attacker, &id).is_err());
+        assert!(payroll_client.try_expire_run_draft(&attacker, &id).is_err());
+    }
+
+    #[test]
+    fn test_is_draft_state_helpers() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        assert!(payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Pending, &RunDraftState::Submitted));
+        assert!(payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Finalized, &RunDraftState::Cancelled));
+        assert!(!payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Submitted, &RunDraftState::Pending));
+        assert!(!payroll_client
+            .is_draft_transition_allowed(&RunDraftState::Cancelled, &RunDraftState::Submitted));
+
+        assert!(!payroll_client.is_draft_state_terminal(&RunDraftState::Pending));
+        assert!(!payroll_client.is_draft_state_terminal(&RunDraftState::Finalized));
+        assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Submitted));
+        assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Cancelled));
+        assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Expired));
     }
 
     // ── Issue #103: per-payroll run nonce uniqueness ───────────────────────────
