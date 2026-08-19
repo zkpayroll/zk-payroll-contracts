@@ -1,5 +1,7 @@
 #![no_std]
 use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
+    Env, Symbol, Vec,
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
 };
 
@@ -304,6 +306,12 @@ pub enum DataKey {
     CompanyState,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
+    /// Allowlisted payout asset tokens.
+    AllowedAsset(Address),
+    /// Count of payroll runs currently prepared but not yet resolved
+    /// (cancelled). Used to lock unsafe admin configuration changes while a
+    /// run is in progress — see `require_no_active_payroll_run`.
+    PendingRunCount,
     /// Allowed asset token for multi-asset treasury management (#175).
     AllowedAsset(Address),
     // Future upgrade example (issue #196):
@@ -391,6 +399,44 @@ impl Payroll {
         }
     }
 
+    fn pending_payroll_run_count(e: &Env) -> u32 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PendingRunCount)
+            .unwrap_or(0)
+    }
+
+    // Issue #253: configuration locks during active payroll execution.
+    //
+    // A run is "in progress" from the moment `prepare_payroll_run` reserves
+    // its nonce and stores a `PendingPayrollRun` until it is explicitly
+    // resolved via `cancel_payroll_run`. While any run is pending, changing
+    // the acting admin, the treasury owner, the payout asset allowlist, or
+    // the company lifecycle state could silently invalidate assumptions the
+    // run was prepared under (which treasury funds are debited, which asset
+    // pays out, who is authorised to act on it). This gate rejects those
+    // specific changes until every pending run has been cancelled, keeping a
+    // run's preconditions stable for its whole lifetime. It does not block
+    // proposing a rotation (inert until accepted), pausing the system, or
+    // resolving existing runs (`cancel_payroll_run`,
+    // `update_reconciliation_status`), so operators always retain an escape
+    // hatch.
+    fn require_no_active_payroll_run(e: &Env) {
+        if Self::pending_payroll_run_count(e) > 0 {
+            panic!(
+                "Configuration is locked: a payroll run is currently in progress. Cancel all pending runs before changing this setting"
+            );
+        }
+    }
+
+    /// Return `true` if one or more payroll runs are prepared but not yet
+    /// resolved. While `true`, admin configuration changes that could
+    /// undermine those runs (admin rotation, treasury rotation, asset
+    /// allowlist, company state) are rejected (issue #253).
+    pub fn has_active_payroll_run(e: Env) -> bool {
+        Self::pending_payroll_run_count(&e) > 0
+    }
+
     pub fn set_pause_manager(e: Env, pause_manager: Address) {
         let addrs: ContractAddresses = e
             .storage()
@@ -406,6 +452,10 @@ impl Payroll {
     }
 
     /// Allow or disallow an asset token for payroll payouts.
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// changing the payout asset mid-run could redirect or invalidate a run
+    /// that was already validated against the previous allowlist.
     pub fn set_asset_allowed(e: Env, asset: Address, allowed: bool) {
         let addrs: ContractAddresses = e
             .storage()
@@ -413,6 +463,7 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
         addrs.admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
         e.storage()
             .persistent()
             .set(&DataKey::AllowedAsset(asset), &allowed);
@@ -878,6 +929,8 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
+        Self::require_company_active(&e);
+
         let count = proofs.len();
 
         if amounts.len() != count || employees.len() != count {
@@ -955,6 +1008,13 @@ impl Payroll {
             .set(&DataKey::PendingRun(run_id), &pending_run);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Submitted);
 
+        // Issue #253: track this run as "in progress" so unsafe admin
+        // configuration changes are locked out until it is resolved.
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &(Self::pending_payroll_run_count(&e) + 1),
+        );
+
         payroll_events::emit_run_prepared(&e, run_id, expected_total_spend);
 
         run_id
@@ -963,70 +1023,6 @@ impl Payroll {
     /// Get a pending payroll run, if it exists.
     pub fn get_pending_run(e: Env, run_id: u64) -> Option<PendingPayrollRun> {
         e.storage().persistent().get(&DataKey::PendingRun(run_id))
-    }
-
-    /// Finalize a pending payroll run, executing payments and creating a
-    /// permanent `PayrollRun` record (issue #198).
-    ///
-    /// Only the admin may finalize. The caller must supply the same proofs,
-    /// amounts, and employees that were validated during `prepare_payroll_run`.
-    /// The pending run must exist and its metadata (total_amount, employee_count)
-    /// must match the supplied batch.
-    ///
-    /// Cancellation emits an event for audit trails. Finalized runs cannot be
-    /// cancelled retroactively.
-    ///
-    /// Issue #218: Added explicit validation that the run is still pending
-    /// and proper state cleanup to prevent cancel-after-submit race conditions.
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let pending_key = DataKey::PendingRun(run_id);
-        let pending_run: PendingPayrollRun = e
-            .storage()
-            .persistent()
-            .get(&pending_key)
-            .expect("Pending run not found");
-
-        // Issue #218: Check if run has already been finalized
-        // Once a run is executed, it cannot be cancelled
-        let run_key = DataKey::PayrollRun(run_id);
-        if e.storage().persistent().has(&run_key) {
-            panic!("Cannot cancel: run has already been executed");
-        }
-
-        // Remove the pending run from storage
-        e.storage().persistent().remove(&pending_key);
-        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
-
-        let run = PayrollRun {
-            run_id,
-            executed_at: e.ledger().timestamp(),
-            admin: addrs.admin.clone(),
-            total_amount: pending_run.total_amount,
-            employee_count: pending_run.employee_count,
-            draft_hash: pending_run.draft_hash.clone(),
-            nonce: pending_run.nonce.clone(),
-            reconciliation_status: ReconciliationStatus::Unreconciled,
-            metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::PayrollRun(run_id), &run);
-
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "run_finalized")),
-            (run_id, pending_run.total_amount),
-        );
     }
 
     /// Cancel a pending payroll run without executing any payments (issue #198).
@@ -1069,6 +1065,14 @@ impl Payroll {
 
         // Remove the pending run from storage
         e.storage().persistent().remove(&pending_key);
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
+
+        // Issue #253: this run is resolved — release the configuration lock
+        // once no other pending runs remain.
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &Self::pending_payroll_run_count(&e).saturating_sub(1),
+        );
 
         // Emit cancellation event with reason for audit trail
         e.events().publish(
@@ -1086,6 +1090,8 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
+        Self::require_company_active(&e);
+
         let count = proofs.len();
 
         if amounts.len() != count || employees.len() != count {
@@ -1375,7 +1381,7 @@ impl Payroll {
             panic!("Settlement already finalized: run is Completed and cannot be updated again");
         }
 
-        run.reconciliation_status = status.clone();
+        run.reconciliation_status = status;
         e.storage().persistent().set(&run_key, &run);
 
         let next_state = match status {
@@ -1484,6 +1490,10 @@ impl Payroll {
     ///
     /// Only the proposed new admin can accept. On acceptance the admin in
     /// `ContractAddresses` is updated and the proposal is cleared.
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// handing off administration mid-run could let a party the run was not
+    /// authorised under later act on it.
     pub fn accept_admin_rotation(e: Env, new_admin: Address) {
         Self::require_not_paused(&e);
         let proposal: PendingRotation = e
@@ -1496,6 +1506,7 @@ impl Payroll {
             panic!("Unauthorized: caller is not the proposed admin");
         }
         new_admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
 
         let mut addrs: ContractAddresses = e
             .storage()
@@ -1571,6 +1582,11 @@ impl Payroll {
     }
 
     /// Accept a treasury-owner rotation (step 2 of 2).
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// the treasury owner can request deposits and emergency withdrawals, so
+    /// handing that role to a new party mid-run could let someone who did
+    /// not authorise the run's preconditions move funds while it is pending.
     pub fn accept_treasury_rotation(e: Env, new_owner: Address) {
         Self::require_not_paused(&e);
         let proposal: PendingRotation = e
@@ -1583,6 +1599,7 @@ impl Payroll {
             panic!("Unauthorized: caller is not the proposed treasury owner");
         }
         new_owner.require_auth();
+        Self::require_no_active_payroll_run(&e);
 
         let old_owner: Address = e
             .storage()
@@ -1689,8 +1706,15 @@ impl Payroll {
     /// Set the company lifecycle state.
     ///
     /// Only the admin may call. After setting to anything other than `Active`,
-    /// all subsequent `batch_process_payroll` calls will be rejected with a
-    /// descriptive error until the state is restored to `Active`.
+    /// all subsequent `prepare_payroll_run` and `batch_process_payroll` calls
+    /// will be rejected with a descriptive error until the state is restored
+    /// to `Active`.
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// changing the company's lifecycle state mid-run is a policy-level
+    /// decision that should not be made while a run's outcome is still
+    /// pending. To stop payroll immediately in an emergency, use the pause
+    /// manager (always available) or cancel the specific pending run.
     pub fn set_company_state(e: Env, admin: Address, state: CompanyState) {
         let addrs: ContractAddresses = e
             .storage()
@@ -1701,6 +1725,7 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
         e.storage().persistent().set(&DataKey::CompanyState, &state);
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "state_changed")),
@@ -1804,7 +1829,7 @@ mod tests {
     use pause_manager::{PauseManager, PauseManagerClient};
     use proof_verifier::{ProofVerifier, VerificationKey};
     use salary_commitment::SalaryCommitmentContract;
-    use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Env, IntoVal};
 
     fn mock_proof(env: &Env) -> BytesN<256> {
@@ -2887,7 +2912,7 @@ mod tests {
             PayrollRunState::Submitted
         );
 
-        payroll_client.cancel_payroll_run(&admin, &run_id);
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "test"));
         assert_eq!(
             payroll_client.get_payroll_run_state(&run_id),
             PayrollRunState::Cancelled
@@ -2909,7 +2934,7 @@ mod tests {
             &test_nonce(&env, 151),
             &None,
         );
-        payroll_client.cancel_payroll_run(&admin, &run_id);
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "test"));
 
         let result = payroll_client.try_transition_payroll_run_state(
             &admin,
@@ -2985,7 +3010,7 @@ mod tests {
         );
 
         // Cancel the pending run
-        payroll_client.cancel_payroll_run(&admin, &run_id);
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "test"));
 
         // Verify it's no longer pending
         assert!(payroll_client.get_pending_run(&run_id).is_none());
@@ -3510,7 +3535,7 @@ mod tests {
     #[test]
     fn test_deposit_with_unique_id_succeeds() {
         let env = Env::default();
-        let (payroll_client, _admin, treasury, treasury_owner, _employee) =
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
             setup_simple_payroll(&env);
 
         let deposit_id = BytesN::from_array(&env, &[1u8; 32]);
@@ -3521,7 +3546,7 @@ mod tests {
     #[should_panic(expected = "Deposit already processed")]
     fn test_deposit_replay_with_same_id_rejected() {
         let env = Env::default();
-        let (payroll_client, _admin, treasury, treasury_owner, _employee) =
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
             setup_simple_payroll(&env);
 
         let deposit_id = BytesN::from_array(&env, &[2u8; 32]);
@@ -3532,7 +3557,7 @@ mod tests {
     #[test]
     fn test_deposit_distinct_ids_both_succeed() {
         let env = Env::default();
-        let (payroll_client, _admin, treasury, treasury_owner, _employee) =
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
             setup_simple_payroll(&env);
 
         let id1 = BytesN::from_array(&env, &[3u8; 32]);
