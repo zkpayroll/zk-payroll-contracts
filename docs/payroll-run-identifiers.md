@@ -44,7 +44,7 @@ Two events are emitted around execution:
 |---|---|---|
 | `("payroll", "run_executed")` | `(run_id: u64, total_amount: i128)` | After a successful `batch_process_payroll` |
 | `("payroll", "run_prepared")` | `(run_id: u64, total_amount: i128)` | After a successful `prepare_payroll_run` |
-| `("payroll", "run_cancelled")` | `(run_id: u64, total_amount: i128)` | After a successful `cancel_payroll_run` |
+| `("payroll", "run_cancelled")` | `(run_id: u64, total_amount: i128, reason: Symbol)` | After a successful `cancel_payroll_run`; `reason` must be an audit-safe reference, not private payroll content |
 | `("payroll", "run_archived")` | `run_id: u64` | After a successful `archive_payroll_run` |
 
 Consumers listening for `run_executed` should index by `run_id` and cross-check
