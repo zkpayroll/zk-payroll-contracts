@@ -442,6 +442,17 @@ impl PaymentExecutor {
         env.storage().persistent().set(&payment_key, &record);
         env.storage().persistent().set(&nullifier_key, &true);
 
+        // Increment period payment count
+        let period_key = DataKey::Period(company_id, period);
+        if let Some(mut period_struct) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayrollPeriod>(&period_key)
+        {
+            period_struct.payment_count += 1;
+            env.storage().persistent().set(&period_key, &period_struct);
+        }
+
         // Update total paid
         let total_key = DataKey::TotalPaid(company_id);
         let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
@@ -529,6 +540,30 @@ impl PaymentExecutor {
     /// Get the maximum allowed age for a proof in seconds (issue #77).
     pub fn get_max_proof_age(_env: Env) -> u64 {
         MAX_PROOF_AGE_SECONDS
+    }
+
+    /// Get the contract dependency addresses configured during initialization.
+    pub fn get_addresses(env: Env) -> ContractAddresses {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized")
+    }
+
+    /// Get the executor admin address.
+    pub fn get_executor_admin(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set")
+    }
+
+    /// Get the current period sequence for a company (defaults to 0).
+    pub fn get_period_sequence(env: Env, company_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PeriodSequence(company_id))
+            .unwrap_or(0u32)
     }
 }
 
@@ -656,8 +691,8 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 1_000);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 5);
-        let event = events.get(4).unwrap();
+        assert_eq!(events.len(), 6);
+        let event = events.get(events.len() - 1).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
@@ -968,8 +1003,8 @@ mod tests {
         assert_eq!(client.get_total_paid(&company_id), 2_500);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 5);
-        let event = events.get(4).unwrap();
+        assert_eq!(events.len(), 6);
+        let event = events.get(events.len() - 1).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));

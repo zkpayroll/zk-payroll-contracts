@@ -21,8 +21,9 @@ jobs:
         with:
           script: |
             const pr = context.payload.pull_request;
+            const mention = `@${pr.assignees?.[0]?.login || pr.user.login}`;
             const message = [
-              "Thanks for contributing. This repository does not accept pull requests directly into `main`.",
+              `${mention} thanks for contributing. This repository does not accept pull requests directly into main.`,
               "",
               "Please change the PR base branch to `dev` and reopen it there. The automation will review CI, merge conflicts, and merge eligible PRs into `dev` automatically."
             ].join("\n");

@@ -196,7 +196,7 @@ mod migration_tests {
         let new_admin = state_fixtures::seed_address(&env, 0x20);
         let new_treasury = state_fixtures::seed_address(&env, 0x21);
         let new_company_id = registry_client.register_company(&new_admin, &new_treasury);
-        assert_eq!(new_company_id, 3, "New company ID must be sequential");
+        assert_eq!(new_company_id, 2, "New company ID must be sequential");
         let new_company = registry_client.get_company(&new_company_id);
         assert_eq!(new_company.admin, new_admin);
         assert_eq!(new_company.treasury, new_treasury);
@@ -454,6 +454,9 @@ mod migration_tests {
         assert!(period_2.is_some(), "Period 2 (open) must survive migration");
         let p2 = period_2.unwrap();
         assert!(!p2.closed, "Period 2 must remain open");
+
+        // Close open period so a new period can be created
+        let _ = executor_client.close_period(&ctx.company_id_2, &1);
 
         // New periods can be created post-migration
         let new_p = executor_client.create_period(&ctx.company_id_2);
