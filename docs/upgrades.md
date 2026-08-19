@@ -354,3 +354,52 @@ cargo test -p migration_tests
 | Commitment version reset to 1 | Migration re-initialized commitment | Update must use existing.version + 1, not 1 |
 | Deserialization error on existing record | Struct fields changed incompatibly | Use new DataKey variant for new struct format |
 | Malformed state produces Ok | No deserialization validation on read | Add `try_get_*` fallback or assert deserialization fails |
+
+---
+
+## 8. Default Storage Values & Storage Testing Suite
+
+### 8.1 Default Storage Guarantees
+
+When smart contracts are newly initialized, contract storage defaults are strictly defined to guarantee safe upgrades and state machine consistency:
+
+- **`Payroll`**:
+  - `run_counter`: Defaults to `0u64` (accessible via `get_run_counter`).
+  - `company_state`: Defaults to `CompanyState::Active` if unwritten for backward compatibility.
+  - `is_run_archived`: Defaults to `false`.
+  - Non-existent run or draft lookups fail with explicit errors (`"Run not found"`, `"Draft not found"`).
+- **`PaymentExecutor`**:
+  - `storage_version`: Defaults to `1u32` (accessible via `get_storage_version`).
+  - `total_paid`: Defaults to `0i128` (accessible via `get_total_paid`).
+  - `period_sequence`: Defaults to `0u32` (accessible via `get_period_sequence`).
+  - `is_asset_allowed`: `true` for initial token, `false` for unallowed assets.
+  - `is_paid`: Defaults to `false`.
+  - Uninitialized admin lookups panic with `"Executor admin not set"`.
+- **`PayrollRegistry`**:
+  - `company_sequence`: Defaults to `0u64` (accessible via `get_company_sequence`).
+  - `employee_status`: Defaults to `EmployeeStatus::Incomplete`.
+  - `is_eligible`: Defaults to `false` unless registered AND status is `Active`.
+  - Pending rotations default to `None`.
+  - Non-existent company lookups panic with `"Company not found"`.
+- **`PauseManager`**:
+  - `is_paused`: Defaults to `false` both before and after initialization.
+  - `get_operator`: Accessible via `get_operator`.
+- **`AuditModule`**:
+  - `verify_access`: Returns `false` for ungranted or expired keys.
+  - `get_audit_log_count`: Defaults to `0u32`.
+  - Non-existent view key lookups return `Err(AuditError::KeyNotFound)`.
+- **`SalaryCommitment`**:
+  - `is_commitment_locked`: Defaults to `false`.
+  - `has_commitment` / `is_nullifier_used`: Default to `false`.
+
+### 8.2 Privacy Preservation
+
+Default storage queries and getter helpers expose only public metadata, contract dependencies, and sequence counters. Private payroll values (such as salary amounts, blinding factors, and Poseidon secrets) remain strictly encrypted or hashed on-chain.
+
+### 8.3 Storage Defaults Test Suite
+
+The storage defaults test suite (`storage_tests`) verifies initial storage state and panic conditions across all smart contracts:
+
+```bash
+cargo test -p storage_tests
+```
