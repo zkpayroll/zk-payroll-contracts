@@ -1721,7 +1721,9 @@ mod tests {
     use proof_verifier::{ProofVerifier, VerificationKey};
     use salary_commitment::SalaryCommitmentContract;
     use soroban_sdk::testutils::{Address as _, Events as _};
+    use soroban_sdk::{Env, IntoVal, TryFromVal, TryIntoVal};
     use soroban_sdk::{Env, IntoVal, TryIntoVal};
+
 
     fn mock_proof(env: &Env) -> BytesN<256> {
         BytesN::from_array(env, &[0u8; 256])
@@ -2562,6 +2564,120 @@ mod tests {
         assert_eq!(
             run.reconciliation_status,
             ReconciliationStatus::Unreconciled
+        );
+    }
+
+    #[test]
+    fn test_settlement_receipt_event_includes_references_without_private_amounts() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let private_amount = 1000i128;
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, private_amount);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &private_amount,
+            &test_nonce(&env, 231),
+            &None,
+        );
+
+        let before = env.events().all().len();
+        payroll_client.update_reconciliation_status(
+            &admin,
+            &run_id,
+            &ReconciliationStatus::Reconciled,
+        );
+        let after = env.events().all().len();
+        assert_eq!(after, before + 1);
+
+        let event = env.events().all().get(after - 1).unwrap();
+        assert_eq!(
+            event.1.len(),
+            2,
+            "settlement receipt topics must stay compact"
+        );
+        let domain: Symbol = event.1.get(0).unwrap().try_into_val(&env).unwrap();
+        let name: Symbol = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(domain, Symbol::new(&env, "payroll"));
+        assert_eq!(name, Symbol::new(&env, "reconciliation_updated"));
+
+        let data: (u64, ReconciliationStatus) = event.2.try_into_val(&env).unwrap();
+        assert_eq!(
+            data.0, run_id,
+            "settlement receipt must reference the payroll run"
+        );
+        assert_eq!(data.1, ReconciliationStatus::Reconciled);
+        assert!(
+            <(u64, ReconciliationStatus, i128)>::try_from_val(&env, &event.2).is_err(),
+            "settlement receipt must not append total spend or individual payroll values"
+        );
+    }
+
+    #[test]
+    fn test_failed_settlement_receipt_event_includes_run_reference_only() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let private_amount = 750i128;
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, private_amount);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &private_amount,
+            &test_nonce(&env, 232),
+            &None,
+        );
+
+        let before = env.events().all().len();
+        payroll_client.update_reconciliation_status(&admin, &run_id, &ReconciliationStatus::Failed);
+        let after = env.events().all().len();
+        assert_eq!(after, before + 1);
+
+        let event = env.events().all().get(after - 1).unwrap();
+        let data: (u64, ReconciliationStatus) = event.2.try_into_val(&env).unwrap();
+        assert_eq!(data.0, run_id);
+        assert_eq!(data.1, ReconciliationStatus::Failed);
+        assert!(
+            <(u64, ReconciliationStatus, i128)>::try_from_val(&env, &event.2).is_err(),
+            "failed settlement receipts must not expose payroll amounts"
+        );
+    }
+
+    #[test]
+    fn test_unauthorized_settlement_update_emits_no_receipt_event() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let private_amount = 1000i128;
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, private_amount);
+        let run_id = payroll_client.batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &private_amount,
+            &test_nonce(&env, 233),
+            &None,
+        );
+
+        let attacker = Address::generate(&env);
+        let before = env.events().all().len();
+        let result = payroll_client.try_update_reconciliation_status(
+            &attacker,
+            &run_id,
+            &ReconciliationStatus::Reconciled,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            env.events().all().len(),
+            before,
+            "failed settlement attempts must not emit receipt events"
         );
     }
 
