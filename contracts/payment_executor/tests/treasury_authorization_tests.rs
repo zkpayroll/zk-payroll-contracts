@@ -3,8 +3,8 @@ use payment_executor::{ContractAddresses, PaymentError, PaymentExecutor, Payment
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::SalaryCommitmentContract;
-use soroban_sdk::testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke};
-use soroban_sdk::{Address, BytesN, Env, IntoVal, Vec};
+use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
+use soroban_sdk::{Address, BytesN, Env, IntoVal, TryIntoVal, Vec};
 
 fn mock_vk(env: &Env) -> VerificationKey {
     VerificationKey {
@@ -172,7 +172,7 @@ fn test_treasury_asset_registration_emits_state_event() {
     let event = events.get(before).unwrap();
     let topic: soroban_sdk::Symbol = event.1.get(0).unwrap().try_into_val(&env).unwrap();
     let emitted_asset: Address = event.1.get(1).unwrap().try_into_val(&env).unwrap();
-    let allowed: bool = event.2.get(0).unwrap().try_into_val(&env).unwrap();
+    let (allowed, timestamp): (bool, u64) = event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
         topic,
@@ -180,6 +180,7 @@ fn test_treasury_asset_registration_emits_state_event() {
     );
     assert_eq!(emitted_asset, asset);
     assert!(allowed);
+    assert_eq!(timestamp, env.ledger().timestamp());
 }
 
 #[test]
