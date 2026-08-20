@@ -27,7 +27,7 @@ The changes integrate with existing contract infrastructure and follow establish
 - Treasury validation extends the existing `AllowedAsset` allowlist feature
 
 ```bash
-cargo fmt -- --check
+cargo fmt --check
 cargo check --all-targets
 cargo test -p payroll_registry -p payment_executor -p payroll
 ```

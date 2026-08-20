@@ -1,0 +1,18 @@
+[package]
+name = "access_control_tests"
+version.workspace = true
+edition.workspace = true
+
+[[test]]
+name = "unauthorized_actions"
+path = "unauthorized_actions.rs"
+
+[dev-dependencies]
+audit_module = { path = "../../contracts/audit_module" }
+payment_executor = { path = "../../contracts/payment_executor" }
+payroll = { path = "../../contracts/payroll" }
+payroll_registry = { path = "../../contracts/payroll_registry" }
+proof_verifier = { path = "../../contracts/proof_verifier" }
+salary_commitment = { path = "../../contracts/salary_commitment" }
+token = { path = "../../contracts/token" }
+soroban-sdk = { workspace = true, features = ["testutils"] }

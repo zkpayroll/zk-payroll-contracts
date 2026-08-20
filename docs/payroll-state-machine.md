@@ -136,3 +136,15 @@ In addition to the run state machine, `RunDraftState` in `contracts/payroll/src/
 
 All draft state transitions emit events containing only `(draft_id, admin)` identifiers. Individual employee salary values, bank details, and salary commitments remain redacted and unexposed in state logs, telemetry, and contract state.
 
+---
+
+## Cancellation State Cleanup & Audit Preservation
+
+When an admin cancels a pending payroll run via `cancel_payroll_run_with_reason`:
+1. **Active Storage Cleanup**: The `PendingPayrollRun` record (`DataKey::PendingRun(run_id)`) is immediately removed from persistent storage to prevent execution race conditions and double-spending.
+2. **Audit State Preservation**: The canonical state `PayrollRunState::Cancelled` is permanently recorded in `DataKey::PayrollState(run_id)`. Reconcilers and auditors querying `get_payroll_run_state(run_id)` receive `Cancelled`, distinguishing an intentional cancellation from an invalid ID.
+3. **Replay Protection**: The `RunNonce` remains marked as spent in storage, preventing any replay of the exact same batch nonce.
+4. **Treasury Safety**: No token transfers or balance deductions occur; treasury balances remain completely untouched.
+5. **Emergency Escape Hatch**: Run cancellation does not require the contract to be unpaused, allowing admins to safely cancel problematic runs during an active incident pause.
+6. **Privacy Preserved**: The `run_cancelled` event publishes only `(run_id, reason)` topics/data, omitting all sensitive individual employee identifiers, amounts, or cryptographic secrets.
+

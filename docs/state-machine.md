@@ -29,8 +29,15 @@ Tracks off-chain preparation and admin draft management prior to processing:
 - **Cancelled**: Stopped before execution via `cancel_run_draft` (terminal).
 - **Expired**: Marked stale/expired via `expire_run_draft` (terminal).
 
+## 3. Cancellation & State Cleanup Semantics
+
+- **Pending Run Cancellation**: Calling `cancel_payroll_run_with_reason` purges the transient `PendingRun` record from contract storage, records `PayrollRunState::Cancelled` in `PayrollState`, and keeps the batch nonce permanently consumed for audit trail integrity and replay prevention.
+- **Draft Cancellation**: Calling `cancel_run_draft` transitions the draft to terminal `Cancelled`, preserving historical amendment and creation metadata while blocking further modifications.
+- **Escape Hatch**: Run cancellation is explicitly allowed during emergency pause to empower admins to recover from invalid or compromised submissions.
+
 ## Privacy Compliance
 
 In accordance with system privacy requirements:
-- State transitions only record metadata (`draft_id`, `admin`, `total_amount` aggregate, `period_label`).
+- State transitions only record metadata (`draft_id`, `admin`, `total_amount` aggregate, `period_label`, `run_id`, `reason`).
 - Individual salary amounts, employee identifiers, and commitment seeds are **never** included in events, state variables, or logs.
+
