@@ -142,6 +142,10 @@ pub struct AuditModule;
 
 #[contractimpl]
 impl AuditModule {
+    pub fn initialize(_env: Env, admin: Address) {
+        admin.require_auth();
+    }
+
     fn require_not_paused(env: &Env) {
         if env.storage().persistent().has(&DataKey::PauseManager) {
             let pm_addr: Address = env

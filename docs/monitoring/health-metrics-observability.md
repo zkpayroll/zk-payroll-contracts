@@ -53,16 +53,17 @@ Data: (run_id: u64, total_amount: i128)
 **Emitted**: When a pending payroll run is cancelled
 ```
 Event: ("payroll", "run_cancelled")
-Data: (run_id: u64, total_amount: i128)
+Data: (run_id: u64, reason_ref: Symbol)
 ```
 **Signals**:
 - Operator halted a prepared run
 - Budget reservation released
-- Reason implicit (may be paired with off-chain reason logs)
+- Privacy-safe rejection reason reference emitted; access-controlled off-chain
+  review notes may be joined by `reason_ref`
 
 **Alert Triggers**:
 - Multiple `run_cancelled` events from same admin within 1 hour = possible misconfiguration
-- `run_cancelled` for high-value runs (> threshold) = operational review needed
+- `run_cancelled` reason references that repeat across multiple runs = operational review needed
 
 #### `deposit` (Existing)
 **Emitted**: When tokens are deposited to treasury
