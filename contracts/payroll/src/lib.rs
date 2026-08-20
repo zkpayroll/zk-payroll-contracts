@@ -153,29 +153,6 @@ pub struct PayrollRunDraft {
     pub amendment_count: u32,
 }
 
-// ── Reviewer Authorization & Run Review ─────────────────────────────────────
-
-/// Review decision outcome for a payroll run.
-#[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ReviewDecision {
-    Approved = 0,
-    Rejected = 1,
-    ChangesRequested = 2,
-}
-
-/// A review record submitted by an authorized reviewer.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct RunReview {
-    pub run_id: u64,
-    pub reviewer: Address,
-    pub decision: ReviewDecision,
-    pub reason: Symbol,
-    pub reviewed_at: u64,
-}
-
 // ── Issue #91: privileged-role rotation ──────────────────────────────────────
 
 /// Pending two-step role-rotation request.
@@ -331,12 +308,9 @@ pub enum DataKey {
     CompanyState,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
-    /// Allowed asset token map for payroll payouts.
+    /// Allowed asset for treasury payments.
+    /// Allowed asset token for multi-asset treasury management (#175).
     AllowedAsset(Address),
-    /// Authorized reviewer registration for payroll run reviews.
-    AuthorizedReviewer(Address),
-    /// Review record for a payroll run.
-    RunReview(u64),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -423,32 +397,6 @@ impl Payroll {
         }
     }
 
-    fn validate_run_id(run_id: u64) {
-        if run_id == u64::MAX {
-            panic!("Invalid payroll run ID");
-        }
-    }
-
-    fn validate_draft_id(draft_id: u64) {
-        if draft_id == 0 {
-            panic!("Invalid draft ID: must be non-zero");
-        }
-    }
-
-    fn validate_non_zero_digest(e: &Env, digest: &BytesN<32>, _name: &str) {
-        let zero = BytesN::from_array(e, &[0u8; 32]);
-        if digest == &zero {
-            panic!("Digest cannot be all-zero bytes");
-        }
-    }
-
-    fn validate_symbol_not_empty(e: &Env, symbol: &Symbol, _name: &str) {
-        let empty = Symbol::new(e, "");
-        if symbol == &empty {
-            panic!("Symbol cannot be empty");
-        }
-    }
-
     pub fn set_pause_manager(e: Env, pause_manager: Address) {
         let addrs: ContractAddresses = e
             .storage()
@@ -486,7 +434,6 @@ impl Payroll {
 
     pub fn deposit(e: Env, from: Address, amount: i128, deposit_id: BytesN<32>) {
         Self::require_not_paused(&e);
-        Self::validate_non_zero_digest(&e, &deposit_id, "deposit_id");
         if amount <= 0 {
             panic!("Deposit amount must be positive");
         }
@@ -725,7 +672,6 @@ impl Payroll {
     }
 
     pub fn get_payroll_run(e: Env, run_id: u64) -> PayrollRun {
-        Self::validate_run_id(run_id);
         e.storage()
             .persistent()
             .get(&DataKey::PayrollRun(run_id))
@@ -740,7 +686,6 @@ impl Payroll {
     /// by `set_run_metadata` it is removed from storage.
     pub fn commit_metadata_hash(e: Env, admin: Address, metadata_hash: BytesN<32>) {
         Self::require_not_paused(&e);
-        Self::validate_non_zero_digest(&e, &metadata_hash, "metadata_hash");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -767,8 +712,6 @@ impl Payroll {
     /// `commit_metadata_hash`. Fails if the hash has not been pre-committed.
     pub fn set_run_metadata(e: Env, admin: Address, run_id: u64, metadata_hash: BytesN<32>) {
         Self::require_not_paused(&e);
-        Self::validate_run_id(run_id);
-        Self::validate_non_zero_digest(&e, &metadata_hash, "metadata_hash");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -812,7 +755,6 @@ impl Payroll {
     /// from storage (issue #102).
     pub fn commit_draft(e: Env, admin: Address, draft_hash: BytesN<32>) {
         Self::require_not_paused(&e);
-        Self::validate_non_zero_digest(&e, &draft_hash, "draft_hash");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1068,7 +1010,6 @@ impl Payroll {
     /// and proper state cleanup to prevent cancel-after-submit race conditions.
     pub fn finalize_payroll_run(e: Env, admin: Address, run_id: u64) {
         Self::require_not_paused(&e);
-        Self::validate_run_id(run_id);
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1129,9 +1070,8 @@ impl Payroll {
     /// This function serves as a high-priority escape hatch: it deliberately
     /// does NOT require the system to be unpaused. An admin who can pause the
     /// system can also cancel a pending run while paused, enabling rapid
+    /// intervention when a run is discovered to be unsafe.
     pub fn cancel_payroll_run_with_reason(e: Env, admin: Address, run_id: u64, reason: Symbol) {
-        Self::validate_run_id(run_id);
-        Self::validate_symbol_not_empty(&e, &reason, "reason");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1151,26 +1091,21 @@ impl Payroll {
             panic!("Cannot cancel a finalized payroll run");
         }
 
-        let _pending_run: PendingPayrollRun = e
+        let pending_run: PendingPayrollRun = e
             .storage()
             .persistent()
             .get(&pending_key)
             .expect("Pending run not found");
 
-        // Remove the pending run from storage if present
+        // Remove the pending run from storage
         e.storage().persistent().remove(&pending_key);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
 
         // Emit cancellation event with reason for audit trail
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_cancelled")),
-            (run_id, reason),
+            (run_id, pending_run.total_amount, reason),
         );
-    }
-
-    /// Alias for cancel_payroll_run_with_reason
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64, reason: Symbol) {
-        Self::cancel_payroll_run_with_reason(e, admin, run_id, reason);
     }
 
     pub fn batch_process_payroll(
@@ -1182,10 +1117,6 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
-        Self::validate_non_zero_digest(&e, &nonce, "nonce");
-        if let Some(ref dh) = draft_hash {
-            Self::validate_non_zero_digest(&e, dh, "draft_hash");
-        }
         let count = proofs.len();
 
         if amounts.len() != count || employees.len() != count {
@@ -1348,7 +1279,6 @@ impl Payroll {
         period_label: Symbol,
     ) -> u64 {
         Self::require_not_paused(&e);
-        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1404,7 +1334,6 @@ impl Payroll {
         new_employee_count: u32,
     ) {
         Self::require_not_paused(&e);
-        Self::validate_draft_id(draft_id);
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1868,7 +1797,6 @@ impl Payroll {
     /// Returns the raw `BytesN<32>` stored in the run record. The zero hash
     /// indicates no metadata has been bound yet.
     pub fn get_metadata_hash(e: Env, run_id: u64) -> BytesN<32> {
-        Self::validate_run_id(run_id);
         let run: PayrollRun = e
             .storage()
             .persistent()
@@ -1890,7 +1818,6 @@ impl Payroll {
     ///     aligns with their locally computed metadata hash.
     ///   - Other contracts can call this for cross-contract verification.
     pub fn verify_metadata_hash(e: Env, run_id: u64, expected_hash: BytesN<32>) -> bool {
-        Self::validate_run_id(run_id);
         let run: PayrollRun = e
             .storage()
             .persistent()
@@ -1940,7 +1867,6 @@ impl Payroll {
     /// flags the run without altering the underlying `PayrollRun` record,
     /// cannot trigger execution, state transitions, or treasury mutations.
     pub fn archive_payroll_run(e: Env, admin: Address, run_id: u64) {
-        Self::validate_run_id(run_id);
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1974,7 +1900,6 @@ impl Payroll {
     /// panics for runs that exist but have not been archived, keeping the
     /// archived and active access paths clearly separated.
     pub fn get_archived_run(e: Env, run_id: u64) -> PayrollRun {
-        Self::validate_run_id(run_id);
         if !e.storage().persistent().has(&DataKey::ArchivedRun(run_id)) {
             panic!("Run is not archived");
         }
@@ -1986,130 +1911,9 @@ impl Payroll {
 
     /// Return `true` if the run has been marked as archived, `false` otherwise.
     pub fn is_run_archived(e: Env, run_id: u64) -> bool {
-        Self::validate_run_id(run_id);
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
     }
 
-    // ── Reviewer Authorization & Run Review Entrypoints ─────────────────────
-
-    /// Grant reviewer authorization to an address. Only the admin may call.
-    pub fn add_reviewer(e: Env, admin: Address, reviewer: Address) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        e.storage()
-            .persistent()
-            .set(&DataKey::AuthorizedReviewer(reviewer.clone()), &true);
-
-        payroll_events::emit_reviewer_added(&e, reviewer);
-    }
-
-    /// Revoke reviewer authorization from an address. Only the admin may call.
-    pub fn remove_reviewer(e: Env, admin: Address, reviewer: Address) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        e.storage()
-            .persistent()
-            .remove(&DataKey::AuthorizedReviewer(reviewer.clone()));
-
-        payroll_events::emit_reviewer_removed(&e, reviewer);
-    }
-
-    /// Return `true` if the address is an authorized reviewer, `false` otherwise.
-    pub fn is_reviewer(e: Env, reviewer: Address) -> bool {
-        e.storage()
-            .persistent()
-            .get(&DataKey::AuthorizedReviewer(reviewer))
-            .unwrap_or(false)
-    }
-
-    /// Approve a payroll run as an authorized reviewer.
-    pub fn approve_payroll_run(e: Env, reviewer: Address, run_id: u64) {
-        Self::require_not_paused(&e);
-        if !Self::is_reviewer(e.clone(), reviewer.clone()) {
-            panic!("Unauthorized: caller is not an authorized reviewer");
-        }
-        reviewer.require_auth();
-
-        let review = RunReview {
-            run_id,
-            reviewer: reviewer.clone(),
-            decision: ReviewDecision::Approved,
-            reason: Symbol::new(&e, "approved"),
-            reviewed_at: e.ledger().timestamp(),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::RunReview(run_id), &review);
-
-        payroll_events::emit_run_approved(&e, run_id, reviewer);
-    }
-
-    /// Reject a payroll run as an authorized reviewer.
-    pub fn reject_payroll_run(e: Env, reviewer: Address, run_id: u64, reason: Symbol) {
-        Self::require_not_paused(&e);
-        if !Self::is_reviewer(e.clone(), reviewer.clone()) {
-            panic!("Unauthorized: caller is not an authorized reviewer");
-        }
-        reviewer.require_auth();
-
-        let review = RunReview {
-            run_id,
-            reviewer: reviewer.clone(),
-            decision: ReviewDecision::Rejected,
-            reason: reason.clone(),
-            reviewed_at: e.ledger().timestamp(),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::RunReview(run_id), &review);
-
-        payroll_events::emit_run_rejected(&e, run_id, reviewer, reason);
-    }
-
-    /// Request changes to a payroll run as an authorized reviewer.
-    pub fn request_changes_payroll_run(e: Env, reviewer: Address, run_id: u64, reason: Symbol) {
-        Self::require_not_paused(&e);
-        if !Self::is_reviewer(e.clone(), reviewer.clone()) {
-            panic!("Unauthorized: caller is not an authorized reviewer");
-        }
-        reviewer.require_auth();
-
-        let review = RunReview {
-            run_id,
-            reviewer: reviewer.clone(),
-            decision: ReviewDecision::ChangesRequested,
-            reason: reason.clone(),
-            reviewed_at: e.ledger().timestamp(),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::RunReview(run_id), &review);
-
-        payroll_events::emit_run_changes_requested(&e, run_id, reviewer, reason);
-    }
-
-    /// Get the review record for a payroll run, if any.
-    pub fn get_run_review(e: Env, run_id: u64) -> Option<RunReview> {
-        e.storage().persistent().get(&DataKey::RunReview(run_id))
-    }
     /// Read contract dependency addresses configured during initialization.
     pub fn get_addresses(e: Env) -> ContractAddresses {
         e.storage()
@@ -4387,86 +4191,5 @@ mod tests {
             },
         }]);
         payroll_client.set_asset_allowed(&token_id, &false);
-    }
-
-    // ── Reviewer Authorization & Run Review Tests ────────────────────────────
-
-    #[test]
-    fn test_reviewer_authorization_workflow() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let reviewer = Address::generate(&env);
-
-        // Initial state: not reviewer
-        assert!(!payroll_client.is_reviewer(&reviewer));
-
-        // Admin adds reviewer
-        payroll_client.add_reviewer(&admin, &reviewer);
-        assert!(payroll_client.is_reviewer(&reviewer));
-
-        // Prepare run
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 99),
-            &None,
-        );
-
-        // Reviewer approves run
-        payroll_client.approve_payroll_run(&reviewer, &run_id);
-        let review = payroll_client
-            .get_run_review(&run_id)
-            .expect("Review record missing");
-        assert_eq!(review.run_id, run_id);
-        assert_eq!(review.reviewer, reviewer);
-        assert_eq!(review.decision, ReviewDecision::Approved);
-
-        // Reviewer requests changes
-        let reason_changes = Symbol::new(&env, "need_docs");
-        payroll_client.request_changes_payroll_run(&reviewer, &run_id, &reason_changes);
-        let review2 = payroll_client
-            .get_run_review(&run_id)
-            .expect("Review record missing");
-        assert_eq!(review2.decision, ReviewDecision::ChangesRequested);
-        assert_eq!(review2.reason, reason_changes);
-
-        // Reviewer rejects run
-        let reason_reject = Symbol::new(&env, "invalid");
-        payroll_client.reject_payroll_run(&reviewer, &run_id, &reason_reject);
-        let review3 = payroll_client
-            .get_run_review(&run_id)
-            .expect("Review record missing");
-        assert_eq!(review3.decision, ReviewDecision::Rejected);
-        assert_eq!(review3.reason, reason_reject);
-
-        // Admin revokes reviewer
-        payroll_client.remove_reviewer(&admin, &reviewer);
-        assert!(!payroll_client.is_reviewer(&reviewer));
-    }
-
-    #[test]
-    #[should_panic(expected = "Unauthorized: caller is not an authorized reviewer")]
-    fn test_unauthorized_approve_panics() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let unauthorized = Address::generate(&env);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 100),
-            &None,
-        );
-
-        payroll_client.approve_payroll_run(&unauthorized, &run_id);
     }
 }
