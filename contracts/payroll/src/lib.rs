@@ -1134,7 +1134,6 @@ impl Payroll {
     /// does NOT require the system to be unpaused. An admin who can pause the
     /// system can also cancel a pending run while paused, enabling rapid
     /// intervention when a run is discovered to be unsafe.
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64, reason_ref: BytesN<32>) {
     pub fn cancel_payroll_run_with_reason(e: Env, admin: Address, run_id: u64, reason: Symbol) {
         Self::validate_run_id(run_id);
         Self::validate_symbol_not_empty(&e, &reason, "reason");
