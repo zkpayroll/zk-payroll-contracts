@@ -15,6 +15,9 @@ mod upgrade_simulation;
 #[cfg(test)]
 mod proof_helper;
 
+#[cfg(test)]
+mod treasury_invariants;
+
 /// End-to-end integration tests for the ZK Payroll protocol.
 ///
 /// These tests validate the full protocol flow across all smart contracts:

@@ -976,7 +976,7 @@ impl Payroll {
     ///
     /// Issue #218: Added explicit validation that the run is still pending
     /// and proper state cleanup to prevent cancel-after-submit race conditions.
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64) {
+    pub fn finalize_payroll_run(e: Env, admin: Address, run_id: u64) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
             .storage()
