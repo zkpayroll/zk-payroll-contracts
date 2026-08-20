@@ -344,15 +344,6 @@ cargo test -p migration_tests
 
 ---
 
-## 7. Troubleshooting
-
-| Symptom | Likely Cause | Fix |
-|---------|-------------|-----|
-| Test panics with "Company not found" | Key variant discriminant changed | Ensure new DataKey variants are appended, not inserted |
-| Nullifiers not detected post-upgrade | Nullifier storage was cleared | Migration must not touch nullifier keys |
-| Employee status reset to Incomplete | EmpStatus key was not preserved | Verify DataKey::EmpStatus is not removed or changed |
-| Commitment version reset to 1 | Migration re-initialized commitment | Update must use existing.version + 1, not 1 |
-| Deserialization error on existing record | Struct fields changed incompatibly | Use new DataKey variant for new struct format |
 | Malformed state produces Ok | No deserialization validation on read | Add `try_get_*` fallback or assert deserialization fails |
 
 ---
@@ -403,3 +394,21 @@ The storage defaults test suite (`storage_tests`) verifies initial storage state
 ```bash
 cargo test -p storage_tests
 ```
+
+---
+
+## 9. Metadata & Length Validation Rules
+
+Contract entrypoints enforce length and non-zero boundary constraints to protect storage and prevent malformed records:
+
+- **Employee Reference IDs**:
+  - Length constraint: Must be between 1 and 256 characters inclusive.
+  - Queries (`get_employee_by_reference_id`): Invalid lengths return `None` rather than panicking.
+- **Run IDs and Draft IDs**:
+  - `run_id` / `draft_id` boundary checks: Must not equal `u64::MAX`. `draft_id` must be non-zero.
+- **Metadata Digests & Nonces**:
+  - Cryptographic digests (`draft_hash`, `metadata_hash`, `nonce`) must not be all-zero (`[0u8; 32]`).
+- **Symbol / Label Fields**:
+  - Non-empty validation (`Symbol::new(e, "")`) enforced on operational symbols and reason codes (e.g. cancellation reasons).
+- **Privacy Assurance**:
+  - Validation failures emit crisp error responses or panics without exposing sensitive payroll inputs (amounts, employee identities, salary values) in logs, events, or state exports.

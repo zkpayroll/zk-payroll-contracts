@@ -96,7 +96,7 @@ chmod +x .git/hooks/pre-commit
 After installation the hook runs automatically on every `git commit` and:
 
 1. **Rust formatting** — if any `.rs` files are staged, runs
-   `cargo fmt -- --check`.  If the check fails it prints the command to fix
+   `cargo fmt --check`.  If the check fails it prints the command to fix
    the issue (`cargo fmt`) and aborts the commit.
 2. **Circom compilation** — if any `.circom` files are staged, compiles all
    circuits under `circuits/` using:

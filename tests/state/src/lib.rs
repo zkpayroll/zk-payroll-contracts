@@ -1,13 +1,13 @@
 #![cfg(test)]
 
-use pause_manager::PauseManager;
 use payroll::{Payroll, PayrollClient, RunDraftState};
 use proof_verifier::{ProofVerifier, VerificationKey};
 use salary_commitment::SalaryCommitmentContract;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
-use token::{Token, TokenClient};
+use token::Token;
 
+#[allow(dead_code)]
 fn mock_vk(env: &Env) -> VerificationKey {
     VerificationKey {
         alpha: BytesN::from_array(env, &[0u8; 64]),

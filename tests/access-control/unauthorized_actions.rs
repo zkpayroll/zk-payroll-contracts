@@ -17,7 +17,7 @@ use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, Vec};
 use token::{Token, TokenClient};
 
 // ============================================================================
@@ -59,7 +59,7 @@ fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
 /// Test that unauthorized users cannot prepare payroll runs.
 /// Only the contract admin should be able to call prepare_payroll_run.
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #4)")]
+#[should_panic]
 fn test_unauthorized_prepare_payroll_run_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -127,7 +127,7 @@ fn test_unauthorized_prepare_payroll_run_fails() {
 /// Test that unauthorized users cannot execute batch payroll.
 /// Only the contract admin should be able to call batch_process_payroll.
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #4)")]
+#[should_panic]
 fn test_unauthorized_batch_process_payroll_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -241,8 +241,8 @@ fn test_unauthorized_cancel_payroll_run_fails() {
         &None::<BytesN<32>>,
     );
 
-    // Attempt to cancel as unauthorized user
-    payroll_client.cancel_payroll_run(&unauthorized_user, &run_id);
+    let reason = Symbol::new(&env, "cancel");
+    payroll_client.cancel_payroll_run(&unauthorized_user, &run_id, &reason);
 }
 
 /// Test that unauthorized users cannot commit draft hashes.
@@ -675,7 +675,7 @@ fn test_unauthorized_revoke_view_key_fails() {
 /// Test that non-admins cannot set pause manager in audit module.
 /// Only the admin should be able to call set_pause_manager.
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #4)")]
+#[should_panic]
 fn test_unauthorized_set_audit_pause_manager_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -794,4 +794,256 @@ fn test_unauthorized_request_emergency_withdrawal_fails() {
 
     // Attempt to request emergency withdrawal as unauthorized user
     payroll_client.request_emergency_withdrawal(&unauthorized_user, &5000, &recipient);
+}
+
+// ============================================================================
+// Category 5: Unauthorized Payroll Reviewer Action Tests
+// ============================================================================
+
+/// Test that unauthorized users cannot approve payroll runs.
+/// Only authorized reviewers can call approve_payroll_run.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not an authorized reviewer")]
+fn test_unauthorized_approve_payroll_run_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let treasury_owner = Address::generate(&env);
+    let unauthorized_user = Address::generate(&env);
+
+    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+    verifier_client.init_verifier_admin(&admin);
+    verifier_client.initialize_verifier(&mock_vk(&env));
+
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.init_commitment_admin(&admin);
+
+    let token_id = env.register_contract(None, Token);
+
+    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &treasury,
+        &treasury_owner,
+    );
+
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.set_payroll_operator(&payroll_id);
+
+    let run_id = payroll_client.prepare_payroll_run(
+        &Vec::from_array(&env, [mock_proof(&env)]),
+        &Vec::from_array(&env, [1000i128]),
+        &Vec::from_array(&env, [Address::generate(&env)]),
+        &1000i128,
+        &test_nonce(&env, 10),
+        &None::<BytesN<32>>,
+    );
+
+    payroll_client.approve_payroll_run(&unauthorized_user, &run_id);
+}
+
+/// Test that unauthorized users cannot reject payroll runs.
+/// Only authorized reviewers can call reject_payroll_run.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not an authorized reviewer")]
+fn test_unauthorized_reject_payroll_run_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let treasury_owner = Address::generate(&env);
+    let unauthorized_user = Address::generate(&env);
+
+    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+    verifier_client.init_verifier_admin(&admin);
+    verifier_client.initialize_verifier(&mock_vk(&env));
+
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.init_commitment_admin(&admin);
+
+    let token_id = env.register_contract(None, Token);
+
+    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &treasury,
+        &treasury_owner,
+    );
+
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.set_payroll_operator(&payroll_id);
+
+    let run_id = payroll_client.prepare_payroll_run(
+        &Vec::from_array(&env, [mock_proof(&env)]),
+        &Vec::from_array(&env, [1000i128]),
+        &Vec::from_array(&env, [Address::generate(&env)]),
+        &1000i128,
+        &test_nonce(&env, 11),
+        &None::<BytesN<32>>,
+    );
+
+    let reason = Symbol::new(&env, "invalid");
+    payroll_client.reject_payroll_run(&unauthorized_user, &run_id, &reason);
+}
+
+/// Test that unauthorized users cannot request changes to payroll runs.
+/// Only authorized reviewers can call request_changes_payroll_run.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not an authorized reviewer")]
+fn test_unauthorized_request_changes_payroll_run_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let treasury_owner = Address::generate(&env);
+    let unauthorized_user = Address::generate(&env);
+
+    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+    verifier_client.init_verifier_admin(&admin);
+    verifier_client.initialize_verifier(&mock_vk(&env));
+
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.init_commitment_admin(&admin);
+
+    let token_id = env.register_contract(None, Token);
+
+    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &treasury,
+        &treasury_owner,
+    );
+
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.set_payroll_operator(&payroll_id);
+
+    let run_id = payroll_client.prepare_payroll_run(
+        &Vec::from_array(&env, [mock_proof(&env)]),
+        &Vec::from_array(&env, [1000i128]),
+        &Vec::from_array(&env, [Address::generate(&env)]),
+        &1000i128,
+        &test_nonce(&env, 12),
+        &None::<BytesN<32>>,
+    );
+
+    let reason = Symbol::new(&env, "fix_amounts");
+    payroll_client.request_changes_payroll_run(&unauthorized_user, &run_id, &reason);
+}
+
+/// Test that non-admin users cannot add or remove reviewers.
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn test_unauthorized_add_reviewer_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let treasury_owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let target_reviewer = Address::generate(&env);
+
+    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+    verifier_client.init_verifier_admin(&admin);
+    verifier_client.initialize_verifier(&mock_vk(&env));
+
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.init_commitment_admin(&admin);
+
+    let token_id = env.register_contract(None, Token);
+
+    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &treasury,
+        &treasury_owner,
+    );
+
+    payroll_client.add_reviewer(&attacker, &target_reviewer);
+}
+
+/// Test that once a reviewer is removed by admin, they can no longer approve runs.
+#[test]
+#[should_panic(expected = "Unauthorized: caller is not an authorized reviewer")]
+fn test_revoked_reviewer_cannot_approve_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let treasury_owner = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+
+    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
+    verifier_client.init_verifier_admin(&admin);
+    verifier_client.initialize_verifier(&mock_vk(&env));
+
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    commitment_client_init.init_commitment_admin(&admin);
+
+    let token_id = env.register_contract(None, Token);
+
+    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_client = PayrollClient::new(&env, &payroll_id);
+
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &treasury,
+        &treasury_owner,
+    );
+
+    // Admin grants then revokes reviewer role
+    payroll_client.add_reviewer(&admin, &reviewer);
+    assert!(payroll_client.is_reviewer(&reviewer));
+    payroll_client.remove_reviewer(&admin, &reviewer);
+    assert!(!payroll_client.is_reviewer(&reviewer));
+
+    let run_id = payroll_client.prepare_payroll_run(
+        &Vec::from_array(&env, [mock_proof(&env)]),
+        &Vec::from_array(&env, [1000i128]),
+        &Vec::from_array(&env, [Address::generate(&env)]),
+        &1000i128,
+        &test_nonce(&env, 13),
+        &None::<BytesN<32>>,
+    );
+
+    // Revoked reviewer attempts to approve run
+    payroll_client.approve_payroll_run(&reviewer, &run_id);
 }

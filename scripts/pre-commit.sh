@@ -44,7 +44,7 @@ STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
 if [ -n "$STAGED_RS" ]; then
     log "Staged Rust files detected — running cargo fmt --check ..."
 
-    if cargo fmt -- --check 2>&1; then
+    if cargo fmt --check 2>&1; then
         ok "Rust formatting"
     else
         echo "" >&2

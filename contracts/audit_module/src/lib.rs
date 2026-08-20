@@ -425,12 +425,12 @@ impl AuditModule {
 
         if matched {
             let scope_sym = match scope {
-                AuditScope::FullCompany => Symbol::new(&env, "FullCompany"),
-                AuditScope::TimeRange => Symbol::new(&env, "TimeRange"),
-                AuditScope::EmployeeList => Symbol::new(&env, "EmployeeList"),
-                AuditScope::AggregateOnly => Symbol::new(&env, "AggregateOnly"),
+                AuditScope::FullCompany => Symbol::new(env, "FullCompany"),
+                AuditScope::TimeRange => Symbol::new(env, "TimeRange"),
+                AuditScope::EmployeeList => Symbol::new(env, "EmployeeList"),
+                AuditScope::AggregateOnly => Symbol::new(env, "AggregateOnly"),
             };
-            payroll_events::emit_audit_successful(&env, auditor.clone(), scope_sym);
+            payroll_events::emit_audit_successful(env, auditor.clone(), scope_sym);
         }
 
         matched
@@ -621,6 +621,10 @@ impl AuditModule {
         expected_hash: BytesN<32>,
         scope: AuditScope,
     ) -> Result<bool, AuditError> {
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if stored_hash == zero || expected_hash == zero {
+            panic!("Metadata hash cannot be all-zero digest");
+        }
         Self::authorize_auditor(&env, auditor.clone())?;
         Self::verify_scope_for_commitment(scope)?;
 

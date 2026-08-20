@@ -252,6 +252,46 @@ pub fn emit_treasury_rotation_cancelled(e: &Env, caller: Address) {
     );
 }
 
+/// Emitted when a reviewer is authorized by admin.
+pub fn emit_reviewer_added(e: &Env, reviewer: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "reviewer_added")),
+        reviewer,
+    );
+}
+
+/// Emitted when a reviewer authorization is revoked by admin.
+pub fn emit_reviewer_removed(e: &Env, reviewer: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "reviewer_removed")),
+        reviewer,
+    );
+}
+
+/// Emitted when an authorized reviewer approves a payroll run.
+pub fn emit_run_approved(e: &Env, run_id: u64, reviewer: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_approved")),
+        (run_id, reviewer),
+    );
+}
+
+/// Emitted when an authorized reviewer rejects a payroll run.
+pub fn emit_run_rejected(e: &Env, run_id: u64, reviewer: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_rejected")),
+        (run_id, reviewer, reason),
+    );
+}
+
+/// Emitted when an authorized reviewer requests changes to a payroll run.
+pub fn emit_run_changes_requested(e: &Env, run_id: u64, reviewer: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "changes_requested")),
+        (run_id, reviewer, reason),
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Payroll Registry Events
 // ═════════════════════════════════════════════════════════════════════════════

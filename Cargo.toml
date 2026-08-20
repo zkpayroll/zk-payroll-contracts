@@ -1,7 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["contracts/*", "cli", "tests/migrations", "tests/state"]
-members = ["contracts/*", "cli", "tests/migrations", "tests/storage"]
+members = [
+    "contracts/*",
+    "cli",
+    "tests/migrations",
+    "tests/metadata",
+    "tests/state",
+    "tests/storage",
+    "tests/access-control",
+]
 exclude = ["fuzz"]
 
 
