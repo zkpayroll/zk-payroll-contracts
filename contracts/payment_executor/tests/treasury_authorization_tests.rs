@@ -3,8 +3,8 @@ use payment_executor::{ContractAddresses, PaymentError, PaymentExecutor, Payment
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::SalaryCommitmentContract;
-use soroban_sdk::testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke};
-use soroban_sdk::{Address, BytesN, Env, IntoVal, Vec};
+use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
+use soroban_sdk::{Address, BytesN, Env, IntoVal, TryIntoVal, Vec};
 
 fn mock_vk(env: &Env) -> VerificationKey {
     VerificationKey {
@@ -103,6 +103,84 @@ fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
     let amount_u128 = amount as u128;
     bytes[16..].copy_from_slice(&amount_u128.to_be_bytes());
     BytesN::from_array(env, &bytes)
+}
+
+#[test]
+fn test_treasury_asset_registration_defaults_to_supported_token_only() {
+    let env = Env::default();
+    let (
+        executor,
+        _registry,
+        _commitment,
+        _token,
+        _company_id,
+        _admin,
+        _treasury,
+        _employee,
+        token_id,
+    ) = setup_system_no_auth(&env);
+    let unregistered_asset = Address::generate(&env);
+
+    assert!(executor.is_asset_allowed(&token_id));
+    assert!(!executor.is_asset_allowed(&unregistered_asset));
+}
+
+#[test]
+fn test_treasury_asset_registration_can_be_updated_and_disabled() {
+    let env = Env::default();
+    let (
+        executor,
+        _registry,
+        _commitment,
+        _token,
+        _company_id,
+        _admin,
+        _treasury,
+        _employee,
+        _token_id,
+    ) = setup_system_no_auth(&env);
+    let asset = Address::generate(&env);
+
+    executor.set_asset_allowed(&asset, &true);
+    assert!(executor.is_asset_allowed(&asset));
+
+    executor.set_asset_allowed(&asset, &false);
+    assert!(!executor.is_asset_allowed(&asset));
+}
+
+#[test]
+fn test_treasury_asset_registration_emits_state_event() {
+    let env = Env::default();
+    let (
+        executor,
+        _registry,
+        _commitment,
+        _token,
+        _company_id,
+        _admin,
+        _treasury,
+        _employee,
+        _token_id,
+    ) = setup_system_no_auth(&env);
+    let asset = Address::generate(&env);
+    let before = env.events().all().len();
+
+    executor.set_asset_allowed(&asset, &true);
+
+    let events = env.events().all();
+    assert_eq!(events.len(), before + 1);
+    let event = events.get(before).unwrap();
+    let topic: soroban_sdk::Symbol = event.1.get(0).unwrap().try_into_val(&env).unwrap();
+    let emitted_asset: Address = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+    let (allowed, timestamp): (bool, u64) = event.2.try_into_val(&env).unwrap();
+
+    assert_eq!(
+        topic,
+        soroban_sdk::Symbol::new(&env, "TreasuryAssetAllowedUpdated")
+    );
+    assert_eq!(emitted_asset, asset);
+    assert!(allowed);
+    assert_eq!(timestamp, env.ledger().timestamp());
 }
 
 #[test]
