@@ -106,6 +106,83 @@ fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
 }
 
 #[test]
+fn test_treasury_asset_registration_defaults_to_supported_token_only() {
+    let env = Env::default();
+    let (
+        executor,
+        _registry,
+        _commitment,
+        _token,
+        _company_id,
+        _admin,
+        _treasury,
+        _employee,
+        token_id,
+    ) = setup_system_no_auth(&env);
+    let unregistered_asset = Address::generate(&env);
+
+    assert!(executor.is_asset_allowed(&token_id));
+    assert!(!executor.is_asset_allowed(&unregistered_asset));
+}
+
+#[test]
+fn test_treasury_asset_registration_can_be_updated_and_disabled() {
+    let env = Env::default();
+    let (
+        executor,
+        _registry,
+        _commitment,
+        _token,
+        _company_id,
+        _admin,
+        _treasury,
+        _employee,
+        _token_id,
+    ) = setup_system_no_auth(&env);
+    let asset = Address::generate(&env);
+
+    executor.set_asset_allowed(&asset, &true);
+    assert!(executor.is_asset_allowed(&asset));
+
+    executor.set_asset_allowed(&asset, &false);
+    assert!(!executor.is_asset_allowed(&asset));
+}
+
+#[test]
+fn test_treasury_asset_registration_emits_state_event() {
+    let env = Env::default();
+    let (
+        executor,
+        _registry,
+        _commitment,
+        _token,
+        _company_id,
+        _admin,
+        _treasury,
+        _employee,
+        _token_id,
+    ) = setup_system_no_auth(&env);
+    let asset = Address::generate(&env);
+    let before = env.events().all().len();
+
+    executor.set_asset_allowed(&asset, &true);
+
+    let events = env.events().all();
+    assert_eq!(events.len(), before + 1);
+    let event = events.get(before).unwrap();
+    let topic: soroban_sdk::Symbol = event.1.get(0).unwrap().try_into_val(&env).unwrap();
+    let emitted_asset: Address = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+    let allowed: bool = event.2.get(0).unwrap().try_into_val(&env).unwrap();
+
+    assert_eq!(
+        topic,
+        soroban_sdk::Symbol::new(&env, "TreasuryAssetAllowedUpdated")
+    );
+    assert_eq!(emitted_asset, asset);
+    assert!(allowed);
+}
+
+#[test]
 fn test_execution_with_correct_treasury_context() {
     let env = Env::default();
     let (
