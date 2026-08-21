@@ -621,6 +621,10 @@ impl AuditModule {
         expected_hash: BytesN<32>,
         scope: AuditScope,
     ) -> Result<bool, AuditError> {
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if stored_hash == zero || expected_hash == zero {
+            panic!("Metadata hash cannot be all-zero digest");
+        }
         Self::authorize_auditor(&env, auditor.clone())?;
         Self::verify_scope_for_commitment(scope)?;
 

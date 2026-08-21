@@ -1,22 +1,17 @@
 [package]
-name = "audit_revocation_event_tests"
-name = "event_ordering_tests"
+name = "access_control_tests"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 
-[lib]
-crate-type = ["lib"]
-doctest = false
-
-[dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
-audit_module = { path = "../../contracts/audit_module" }
-crate-type = ["rlib"]
-doctest = false
+[[test]]
+name = "unauthorized_actions"
+path = "unauthorized_actions.rs"
 
 [dev-dependencies]
+audit_module = { path = "../../contracts/audit_module" }
+payment_executor = { path = "../../contracts/payment_executor" }
 payroll = { path = "../../contracts/payroll" }
+payroll_registry = { path = "../../contracts/payroll_registry" }
 proof_verifier = { path = "../../contracts/proof_verifier" }
 salary_commitment = { path = "../../contracts/salary_commitment" }
 token = { path = "../../contracts/token" }

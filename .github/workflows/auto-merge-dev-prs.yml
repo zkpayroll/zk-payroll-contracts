@@ -94,10 +94,12 @@ jobs:
               });
 
               const relevantCheckRuns = checkRuns.filter((run) => run.name !== "handle-dev-pr");
-              const failingChecks = relevantCheckRuns.filter((run) =>
-                run.status === "completed" &&
-                !["success", "neutral", "skipped"].includes(run.conclusion)
-              );
+              const failingChecks = relevantCheckRuns.filter((run) => {
+                return (
+                  run.status === "completed" &&
+                  !["success", "neutral", "skipped"].includes(run.conclusion)
+                );
+              });
               const pendingChecks = relevantCheckRuns.filter((run) => run.status !== "completed");
               const failingStatuses = combinedStatus.statuses.filter((status) => status.state === "failure" || status.state === "error");
               const pendingStatuses = combinedStatus.statuses.filter((status) => status.state === "pending");

@@ -389,8 +389,9 @@ impl PaymentExecutor {
         let registry = PayrollRegistryClient::new(&env, &addresses.registry);
         let company: CompanyInfo = registry.get_company(&company_id);
 
-        // Ensure only HR admin for this company can trigger payroll.
+        // Ensure only HR admin for this company can trigger payroll and treasury authorizes payment.
         company.admin.require_auth();
+        company.treasury.require_auth();
 
         // Construct public inputs required by issue #20:
         let mut public_inputs = soroban_sdk::Vec::new(&env);

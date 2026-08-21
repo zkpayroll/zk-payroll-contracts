@@ -22,21 +22,18 @@
 //! - `mg_flow_*` — Active flow continuation tests
 
 #[cfg(test)]
-#[allow(clippy::module_inception)]
+#[allow(clippy::module_inception, unused_imports, unused_variables)]
 mod migration_tests {
-    use audit_module::{AuditModuleClient, AuditScope};
-    use pause_manager::{PauseManager, PauseManagerClient};
+    use audit_module::AuditModuleClient;
     use payment_executor::PaymentExecutorClient;
     use payroll::{PayrollClient, ReconciliationStatus};
     use payroll_registry::{EmployeeStatus, PayrollRegistryClient};
-    use proof_verifier::{ProofVerifierClient, VerificationKey};
     use salary_commitment::SalaryCommitmentContractClient;
-    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, IntoVal, Vec};
-    use token::{Token, TokenClient};
+    use soroban_sdk::{Env, Vec};
 
     use crate::migration_helpers::{
-        self, assert_malformed_state_fails_safely, assert_post_migration_invariants,
-        assert_unsupported_version_handled, mock_vk, MigrationContext, V1_STORAGE_VERSION,
+        assert_malformed_state_fails_safely, assert_post_migration_invariants,
+        assert_unsupported_version_handled, MigrationContext, V1_STORAGE_VERSION,
     };
     use crate::state_fixtures;
 
@@ -325,7 +322,7 @@ mod migration_tests {
 
         // Can still grant new view keys after migration
         let new_auditor = state_fixtures::seed_address(&env, 0x30);
-        let new_key = audit_client.generate_view_key(&new_auditor, &200_000u32);
+        let _new_key = audit_client.generate_view_key(&new_auditor, &200_000u32);
         assert!(
             audit_client.verify_access(&new_auditor),
             "New auditor granted after migration must have access"
@@ -553,7 +550,7 @@ mod migration_tests {
         let env = Env::default();
         let ctx = setup_and_migrate(&env);
 
-        let commitment_client = SalaryCommitmentContractClient::new(&env, &ctx.commitment_id);
+        let _commitment_client = SalaryCommitmentContractClient::new(&env, &ctx.commitment_id);
         let payroll_client = PayrollClient::new(&env, &ctx.payroll_id);
         let _registry_client = PayrollRegistryClient::new(&env, &ctx.registry_id);
 
