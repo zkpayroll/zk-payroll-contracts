@@ -1568,4 +1568,86 @@ mod tests {
             &1u32,
         );
     }
+
+    // =====================================================================
+    // Issue #277: `amount_to_public_input` precision-format encoding
+    //
+    // The ZK public input for an amount must be a canonical, big-endian,
+    // zero-padded `BytesN<32>` per
+    // `docs/interop/proof-schema-version-negotiation.md`'s "Unsupported
+    // Combinations" section ("Public inputs using i128 raw bytes instead of
+    // the canonical BytesN<32> big-endian zero-padded encoding" is
+    // explicitly rejected). These tests pin the exact byte layout across
+    // supported precision boundaries and confirm invalid (negative) amounts
+    // are rejected before any encoding happens.
+    // =====================================================================
+
+    #[test]
+    fn test_amount_to_public_input_zero_is_all_zero_bytes() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, 0);
+        assert_eq!(encoded.to_array(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_one_is_zero_padded_big_endian() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, 1);
+        let arr = encoded.to_array();
+
+        // High 16 bytes are always zero: i128 fits entirely within the low
+        // 16 bytes of the 32-byte field, per the canonical encoding.
+        assert_eq!(arr[..16], [0u8; 16]);
+        // Big-endian: the least-significant byte is last.
+        let mut expected_low16 = [0u8; 16];
+        expected_low16[15] = 1;
+        assert_eq!(arr[16..], expected_low16);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_preserves_full_precision_for_non_round_amount() {
+        // A non-round, multi-byte amount must round-trip through the
+        // big-endian encoding with no truncation or rounding drift.
+        let env = Env::default();
+        let amount: i128 = 999_999_999_937;
+        let encoded = PaymentExecutor::amount_to_public_input(&env, amount);
+        let arr = encoded.to_array();
+
+        let mut low16 = [0u8; 16];
+        low16.copy_from_slice(&arr[16..]);
+        let round_tripped = u128::from_be_bytes(low16) as i128;
+
+        assert_eq!(arr[..16], [0u8; 16]);
+        assert_eq!(round_tripped, amount);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_accepts_maximum_i128_at_full_precision() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, i128::MAX);
+        let arr = encoded.to_array();
+
+        let mut low16 = [0u8; 16];
+        low16.copy_from_slice(&arr[16..]);
+        let round_tripped = u128::from_be_bytes(low16) as i128;
+
+        assert_eq!(round_tripped, i128::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn test_amount_to_public_input_rejects_negative_one() {
+        // Boundary just below the supported precision range: the smallest
+        // magnitude negative value must still be rejected, not just
+        // `i128::MIN`.
+        let env = Env::default();
+        let _ = PaymentExecutor::amount_to_public_input(&env, -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn test_amount_to_public_input_rejects_i128_min() {
+        let env = Env::default();
+        let _ = PaymentExecutor::amount_to_public_input(&env, i128::MIN);
+    }
 }

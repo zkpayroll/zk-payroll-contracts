@@ -27,12 +27,8 @@ use payment_executor::{
 use payroll::{Payroll, PayrollClient, ReconciliationStatus};
 use payroll_registry::{EmployeeStatus, PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
-use salary_commitment::{
-    SalaryCommitment, SalaryCommitmentContract, SalaryCommitmentContractClient,
-};
-use soroban_sdk::{
-    testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, IntoVal, Symbol, Vec,
-};
+use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, Vec};
 use token::{Token, TokenClient};
 
 use crate::state_fixtures;

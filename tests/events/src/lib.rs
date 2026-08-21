@@ -92,7 +92,14 @@ fn event_name(env: &Env, event: &(Address, Vec<Val>, Val)) -> Option<Symbol> {
     if domain != Symbol::new(env, "payroll") {
         return None;
     }
-    topics.get(1).unwrap().try_into_val(env).ok()
+    let name: Symbol = topics.get(1).unwrap().try_into_val(env).ok()?;
+    // `run_state` is an internal bookkeeping event emitted alongside the
+    // named lifecycle events on every state transition; it is not itself
+    // one of the lifecycle events this test asserts the order of.
+    if name == Symbol::new(env, "run_state") {
+        return None;
+    }
+    Some(name)
 }
 
 fn payroll_event_names(env: &Env) -> Vec<Symbol> {
