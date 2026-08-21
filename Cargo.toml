@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+members = ["contracts/*", "cli", "tests/migrations", "tests/audit", "tests/events"]
+members = ["contracts/*", "cli", "tests/migrations", "tests/storage"]
 members = [
     "contracts/*",
     "cli",
