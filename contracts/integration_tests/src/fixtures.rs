@@ -167,6 +167,7 @@ pub mod fixtures {
         }
 
         #[test]
+        #[allow(clippy::assertions_on_constants)]
         fn test_payroll_period_fixtures() {
             assert_eq!(Q1_2024_ACME.company_id, 0);
             assert!(!Q1_2024_ACME.is_active);
