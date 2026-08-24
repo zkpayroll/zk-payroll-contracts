@@ -380,7 +380,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
         let emp = employee.clone();
         env.storage()
             .persistent()
-            .remove(&DataKey::Employee(company_id, emp));
+            .remove(&DataKey::Employee(company_id, emp.clone()));
+
+        // Issue #249: removal must also clear the eligibility status so that
+        // no stale status survives for an employee that no longer exists.
+        // Removed employees read back as `Incomplete` and are never eligible.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::EmpStatus(company_id, emp));
 
         payroll_events::emit_employee_removed(&env, company_id, employee);
     }

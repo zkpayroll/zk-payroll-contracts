@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "issue": 249,
+  "source": "contracts/payroll_registry/src/lib.rs::EmployeeStatus",
+  "documentation": "docs/employees.md",
+  "states": [
+    {
+      "name": "active",
+      "contract_variant": "Active",
+      "ordinal": 0,
+      "payroll_eligible": true,
+      "user_visible": true,
+      "description": "Commitment registered and record complete; included in payroll runs."
+    },
+    {
+      "name": "inactive",
+      "contract_variant": "Inactive",
+      "ordinal": 1,
+      "payroll_eligible": false,
+      "user_visible": true,
+      "description": "Temporarily ineligible (on leave, suspended, terminated pending off-chain action)."
+    },
+    {
+      "name": "incomplete",
+      "contract_variant": "Incomplete",
+      "ordinal": 2,
+      "payroll_eligible": false,
+      "user_visible": true,
+      "description": "Missing required registration data; never eligible until corrected and marked active."
+    },
+    {
+      "name": "removed",
+      "contract_variant": null,
+      "ordinal": null,
+      "payroll_eligible": false,
+      "user_visible": true,
+      "terminal": true,
+      "description": "Terminal state. Commitment and status entries erased; reads fall back to incomplete."
+    }
+  ],
+  "allowed_transitions": [
+    { "from": "active", "to": "inactive", "event": "EmployeeDeactivated" },
+    { "from": "inactive", "to": "active", "event": "EmployeeReactivated" },
+    { "from": "active", "to": "incomplete", "event": "EmployeeStatusUpdated" },
+    { "from": "incomplete", "to": "active", "event": "EmployeeStatusUpdated" },
+    { "from": "inactive", "to": "incomplete", "event": "EmployeeStatusUpdated" },
+    { "from": "incomplete", "to": "inactive", "event": "EmployeeStatusUpdated" }
+  ],
+  "no_op_transitions": [
+    { "from": "active", "to": "active" },
+    { "from": "inactive", "to": "inactive" },
+    { "from": "incomplete", "to": "incomplete" }
+  ],
+  "blocked_operations": [
+    { "operation": "set_employee_status without company admin authorization", "outcome": "rejected" },
+    { "operation": "set_employee_status for unregistered employee", "outcome": "rejected: Employee not found" },
+    { "operation": "set_employee_status under unknown company", "outcome": "rejected: Company not found" },
+    { "operation": "any status change after removal", "outcome": "rejected; re-add the employee instead" }
+  ],
+  "removal_event": "EmployeeRemoved",
+  "payroll_enforcement": {
+    "entry_point": "contracts/payment_executor/src/lib.rs::execute_payment",
+    "eligibility_check": "payroll_registry::is_eligible",
+    "ineligible_error": "PaymentError::EmployeeIneligible"
+  }
+}

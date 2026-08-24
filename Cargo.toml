@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/*", "cli", "tests/migrations"]
+members = ["contracts/*", "cli", "tests/migrations", "tests/employees"]
 exclude = ["fuzz"]
 
 
