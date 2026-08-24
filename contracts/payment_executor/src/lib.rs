@@ -67,6 +67,12 @@ pub enum PaymentError {
     ProofExpired = 7,
     /// Empty payroll batches are rejected to avoid silent no-op execution.
     EmptyBatch = 8,
+    /// The employee is not eligible for payment (issue #249).
+    ///
+    /// Payroll execution consults `payroll_registry::is_eligible`, which is
+    /// `true` only for registered employees whose status is `Active`.
+    /// Inactive, incomplete, or removed employees must never be paid.
+    EmployeeIneligible = 9,
 }
 
 /// Contract addresses for dependencies
@@ -388,6 +394,14 @@ impl PaymentExecutor {
         let commitment = commitment_client.get_commitment(&employee).commitment;
         let registry = PayrollRegistryClient::new(&env, &addresses.registry);
         let company: CompanyInfo = registry.get_company(&company_id);
+
+        // Issue #249: payroll execution must respect employee status
+        // transitions. Only registered employees with `Active` status are
+        // eligible; inactive, incomplete, or removed employees are blocked
+        // before any proof verification or transfer takes place.
+        if !registry.is_eligible(&company_id, &employee) {
+            return Err(PaymentError::EmployeeIneligible);
+        }
 
         // Ensure only HR admin for this company can trigger payroll and treasury authorizes payment.
         company.admin.require_auth();

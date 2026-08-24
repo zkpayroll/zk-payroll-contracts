@@ -798,6 +798,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "employee_status_tests"
+version = "0.1.0"
+dependencies = [
+ "payment_executor",
+ "payroll_registry",
+ "proof_verifier",
+ "salary_commitment",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
