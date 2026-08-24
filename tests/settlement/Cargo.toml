@@ -1,0 +1,21 @@
+[package]
+name = "settlement_state_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+payroll = { path = "../../contracts/payroll" }
+proof_verifier = { path = "../../contracts/proof_verifier" }
+salary_commitment = { path = "../../contracts/salary_commitment" }
+token = { path = "../../contracts/token" }
+# Bring in pause_manager with its `contract` feature so feature unification
+# builds it in the configuration its source expects (the no-default-features
+# lib path fails to compile against the current SDK). This is purely a test
+# harness concern; it does not change any contract behavior.
+pause_manager = { path = "../../contracts/pause_manager" }

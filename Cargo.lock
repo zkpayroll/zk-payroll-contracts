@@ -2385,6 +2385,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "settlement_state_tests"
+version = "0.1.0"
+dependencies = [
+ "pause_manager",
+ "payroll",
+ "proof_verifier",
+ "salary_commitment",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
