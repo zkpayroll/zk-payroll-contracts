@@ -1,0 +1,17 @@
+[package]
+name = "employee_status_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+payroll_registry = { path = "../../contracts/payroll_registry" }
+payment_executor = { path = "../../contracts/payment_executor" }
+salary_commitment = { path = "../../contracts/salary_commitment" }
+proof_verifier = { path = "../../contracts/proof_verifier" }
+token = { path = "../../contracts/token" }
