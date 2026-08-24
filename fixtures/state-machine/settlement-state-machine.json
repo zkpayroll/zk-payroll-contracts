@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "issue": 254,
+  "source": "contracts/payroll/src/lib.rs::PayrollRunState",
+  "documentation": "docs/state-machine.md",
+  "settlement_phases": {
+    "pending": "Submitted",
+    "executing": "Confirming",
+    "settled": "Completed",
+    "failed": "Failed",
+    "cancelled": "Cancelled"
+  },
+  "states": [
+    { "name": "draft", "variant": "Draft", "ordinal": 0, "terminal": false, "retryable": false, "settlement_phase": null },
+    { "name": "validating", "variant": "Validating", "ordinal": 1, "terminal": false, "retryable": false, "settlement_phase": null },
+    { "name": "proof_pending", "variant": "ProofPending", "ordinal": 2, "terminal": false, "retryable": false, "settlement_phase": null },
+    { "name": "ready_to_submit", "variant": "ReadyToSubmit", "ordinal": 3, "terminal": false, "retryable": false, "settlement_phase": null },
+    { "name": "pending", "variant": "Submitted", "ordinal": 4, "terminal": false, "retryable": false, "settlement_phase": "pending" },
+    { "name": "executing", "variant": "Confirming", "ordinal": 5, "terminal": false, "retryable": false, "settlement_phase": "executing" },
+    { "name": "settled", "variant": "Completed", "ordinal": 6, "terminal": true, "retryable": false, "settlement_phase": "settled" },
+    { "name": "failed", "variant": "Failed", "ordinal": 7, "terminal": false, "retryable": true, "settlement_phase": "failed" },
+    { "name": "cancelled", "variant": "Cancelled", "ordinal": 8, "terminal": true, "retryable": false, "settlement_phase": "cancelled" },
+    { "name": "reconciliation_required", "variant": "ReconciliationRequired", "ordinal": 9, "terminal": false, "retryable": false, "settlement_phase": null }
+  ],
+  "allowed_transitions": [
+    { "from": "draft", "to": "validating" },
+    { "from": "draft", "to": "cancelled" },
+    { "from": "validating", "to": "proof_pending" },
+    { "from": "validating", "to": "failed" },
+    { "from": "validating", "to": "cancelled" },
+    { "from": "proof_pending", "to": "ready_to_submit" },
+    { "from": "proof_pending", "to": "failed" },
+    { "from": "proof_pending", "to": "cancelled" },
+    { "from": "ready_to_submit", "to": "submitted" },
+    { "from": "ready_to_submit", "to": "failed" },
+    { "from": "ready_to_submit", "to": "cancelled" },
+    { "from": "pending", "to": "executing" },
+    { "from": "pending", "to": "failed" },
+    { "from": "pending", "to": "cancelled" },
+    { "from": "executing", "to": "settled" },
+    { "from": "executing", "to": "failed" },
+    { "from": "executing", "to": "reconciliation_required" },
+    { "from": "failed", "to": "validating" },
+    { "from": "failed", "to": "proof_pending" },
+    { "from": "failed", "to": "cancelled" },
+    { "from": "reconciliation_required", "to": "settled" },
+    { "from": "reconciliation_required", "to": "failed" }
+  ],
+  "blocked_transitions": [
+    { "rule": "any transition into draft", "outcome": "rejected" },
+    { "rule": "settled -> any", "outcome": "rejected (terminal)" },
+    { "rule": "cancelled -> any", "outcome": "rejected (terminal)" },
+    { "rule": "non-adjacent transitions (e.g. pending -> settled)", "outcome": "rejected" },
+    { "rule": "transition without company admin authorization", "outcome": "rejected" }
+  ],
+  "invalid_transition_error": "Invalid payroll state transition",
+  "enforcement_entry_point": "contracts/payroll/src/lib.rs::is_allowed_payroll_state_transition_internal",
+  "operations_hook": "contracts/payroll/src/lib.rs::transition_payroll_run_state"
+}

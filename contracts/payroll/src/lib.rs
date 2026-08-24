@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token as soroban_token, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
+    Env, Symbol, Vec,
 };
 
 use pause_manager::PauseManagerClient;
@@ -304,6 +305,8 @@ pub enum DataKey {
     CompanyState,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
+    /// Allowlisted asset token for payroll payouts (#175).
+    AllowedAsset(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -361,30 +364,6 @@ impl Payroll {
             let pm_client = PauseManagerClient::new(e, &pm_addr);
             if pm_client.is_paused() {
                 panic!("Payroll is paused");
-            }
-        }
-    }
-
-    // Issue #147: reject payroll execution for any non-Active company state.
-    // Absent state defaults to Active for backward compatibility with existing
-    // deployments that predate this field.
-    fn require_company_active(e: &Env) {
-        if let Some(state) = e
-            .storage()
-            .persistent()
-            .get::<_, CompanyState>(&DataKey::CompanyState)
-        {
-            match state {
-                CompanyState::Active => {}
-                CompanyState::Paused => {
-                    panic!("Company is paused; payroll execution is not permitted")
-                }
-                CompanyState::Archived => {
-                    panic!("Company is archived; payroll execution is not permitted")
-                }
-                CompanyState::Incomplete => {
-                    panic!("Company setup is incomplete; payroll execution is not permitted")
-                }
             }
         }
     }
@@ -963,70 +942,6 @@ impl Payroll {
         e.storage().persistent().get(&DataKey::PendingRun(run_id))
     }
 
-    /// Finalize a pending payroll run, executing payments and creating a
-    /// permanent `PayrollRun` record (issue #198).
-    ///
-    /// Only the admin may finalize. The caller must supply the same proofs,
-    /// amounts, and employees that were validated during `prepare_payroll_run`.
-    /// The pending run must exist and its metadata (total_amount, employee_count)
-    /// must match the supplied batch.
-    ///
-    /// Cancellation emits an event for audit trails. Finalized runs cannot be
-    /// cancelled retroactively.
-    ///
-    /// Issue #218: Added explicit validation that the run is still pending
-    /// and proper state cleanup to prevent cancel-after-submit race conditions.
-    pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let pending_key = DataKey::PendingRun(run_id);
-        let pending_run: PendingPayrollRun = e
-            .storage()
-            .persistent()
-            .get(&pending_key)
-            .expect("Pending run not found");
-
-        // Issue #218: Check if run has already been finalized
-        // Once a run is executed, it cannot be cancelled
-        let run_key = DataKey::PayrollRun(run_id);
-        if e.storage().persistent().has(&run_key) {
-            panic!("Cannot cancel: run has already been executed");
-        }
-
-        // Remove the pending run from storage
-        e.storage().persistent().remove(&pending_key);
-        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
-
-        let run = PayrollRun {
-            run_id,
-            executed_at: e.ledger().timestamp(),
-            admin: addrs.admin.clone(),
-            total_amount: pending_run.total_amount,
-            employee_count: pending_run.employee_count,
-            draft_hash: pending_run.draft_hash.clone(),
-            nonce: pending_run.nonce.clone(),
-            reconciliation_status: ReconciliationStatus::Unreconciled,
-            metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::PayrollRun(run_id), &run);
-
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "run_finalized")),
-            (run_id, pending_run.total_amount),
-        );
-    }
-
     /// Cancel a pending payroll run without executing any payments (issue #198).
     ///
     /// Only the admin may cancel. The `reason` is recorded in the event for
@@ -1373,7 +1288,7 @@ impl Payroll {
             panic!("Settlement already finalized: run is Completed and cannot be updated again");
         }
 
-        run.reconciliation_status = status.clone();
+        run.reconciliation_status = status;
         e.storage().persistent().set(&run_key, &run);
 
         let next_state = match status {
@@ -2861,7 +2776,7 @@ mod tests {
             PayrollRunState::Submitted
         );
 
-        payroll_client.cancel_payroll_run(&admin, &run_id);
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "test_reason"));
         assert_eq!(
             payroll_client.get_payroll_run_state(&run_id),
             PayrollRunState::Cancelled
@@ -2883,7 +2798,7 @@ mod tests {
             &test_nonce(&env, 151),
             &None,
         );
-        payroll_client.cancel_payroll_run(&admin, &run_id);
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "test_reason"));
 
         let result = payroll_client.try_transition_payroll_run_state(
             &admin,
@@ -2959,7 +2874,7 @@ mod tests {
         );
 
         // Cancel the pending run
-        payroll_client.cancel_payroll_run(&admin, &run_id);
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "test_reason"));
 
         // Verify it's no longer pending
         assert!(payroll_client.get_pending_run(&run_id).is_none());
