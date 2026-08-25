@@ -204,6 +204,52 @@ pub fn emit_reconciliation_updated(e: &Env, run_id: u64, status: Symbol) {
     );
 }
 
+/// Emitted when the employer's per-period capacity policy is set or replaced (#338).
+pub fn emit_capacity_limits_set(
+    e: &Env,
+    max_batches: u32,
+    max_employees: u32,
+    max_total_value: i128,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "capacity_limits_set")),
+        (max_batches, max_employees, max_total_value),
+    );
+}
+
+/// Emitted when a new payroll period is opened for capacity accounting (#338).
+pub fn emit_capacity_period_opened(e: &Env, period: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "capacity_period_opened")),
+        period,
+    );
+}
+
+/// Emitted after a batch is accepted and its usage recorded against the
+/// active period's capacity counters (#338).
+pub fn emit_capacity_usage_recorded(
+    e: &Env,
+    period: Symbol,
+    batch_count: u32,
+    employee_count: u32,
+    total_value: i128,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "capacity_usage")),
+        (period, batch_count, employee_count, total_value),
+    );
+}
+
+/// Emitted when a batch is rejected for exceeding a capacity limit. `kind`
+/// identifies the exceeded category: 0 = batch count, 1 = employee count,
+/// 2 = total value (mirrors `payroll::CapacityLimitKind`) (#338).
+pub fn emit_capacity_limit_exceeded(e: &Env, period: Symbol, kind: u32) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "capacity_exceeded")),
+        (period, kind),
+    );
+}
+
 /// Emitted when a new admin is proposed (step 1 of 2).
 pub fn emit_admin_proposed(e: &Env, current_admin: Address, new_admin: Address) {
     e.events().publish(
