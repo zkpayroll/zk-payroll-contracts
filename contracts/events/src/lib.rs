@@ -274,6 +274,30 @@ pub fn emit_admin_rotation_cancelled(e: &Env, caller: Address) {
     );
 }
 
+/// Emitted when an admin handover is requested (#339).
+pub fn emit_admin_handover_requested(e: &Env, current_admin: Address, pending_admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "admin_handover_req")),
+        (current_admin, pending_admin),
+    );
+}
+
+/// Emitted when an admin handover is accepted (#339).
+pub fn emit_admin_handover_accepted(e: &Env, old_admin: Address, new_admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "admin_handover_acc")),
+        (old_admin, new_admin),
+    );
+}
+
+/// Emitted when a pending admin handover is cancelled (#339).
+pub fn emit_admin_handover_cancelled(e: &Env, caller: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "admin_handover_can")),
+        caller,
+    );
+}
+
 /// Emitted when a new treasury owner is proposed (step 1 of 2).
 pub fn emit_treasury_proposed(e: &Env, current_owner: Address, new_owner: Address) {
     e.events().publish(
@@ -748,4 +772,20 @@ pub fn emit_audit_summary_exported(
 pub fn emit_audit_pause_manager_set(e: &Env, pause_manager: Address) {
     e.events()
         .publish((Symbol::new(e, "AuditPauseMgrSet"),), (pause_manager,));
+}
+
+/// Emitted when locked payroll funds are updated (#343).
+pub fn emit_locked_funds_updated(e: &Env, asset: Address, locked_amount: i128) {
+    e.events().publish(
+        (Symbol::new(e, "treasury"), Symbol::new(e, "locked_funds_updated")),
+        (asset, locked_amount),
+    );
+}
+
+/// Emitted when a multi-signer quorum approval payload reference is consumed (#334).
+pub fn emit_quorum_consumed(e: &Env, batch_root: BytesN<32>, employer: Address, nonce: BytesN<32>) {
+    e.events().publish(
+        (Symbol::new(e, "signing"), Symbol::new(e, "quorum_consumed")),
+        (batch_root, employer, nonce),
+    );
 }

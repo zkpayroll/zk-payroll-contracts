@@ -92,7 +92,11 @@ fn event_name(env: &Env, event: &(Address, Vec<Val>, Val)) -> Option<Symbol> {
     if domain != Symbol::new(env, "payroll") {
         return None;
     }
-    topics.get(1).unwrap().try_into_val(env).ok()
+    let name: Symbol = topics.get(1).unwrap().try_into_val(env).ok()?;
+    if name == Symbol::new(env, "run_state") {
+        return None;
+    }
+    Some(name)
 }
 
 fn payroll_event_names(env: &Env) -> Vec<Symbol> {
