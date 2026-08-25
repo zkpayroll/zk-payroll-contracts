@@ -7,6 +7,18 @@ edition.workspace = true
 name = "unauthorized_actions"
 path = "unauthorized_actions.rs"
 
+[[test]]
+name = "admin_handover"
+path = "admin_handover.rs"
+
+[[test]]
+name = "withdrawal_guardrails"
+path = "withdrawal_guardrails.rs"
+
+[[test]]
+name = "quorum_replay"
+path = "quorum_replay.rs"
+
 [dev-dependencies]
 audit_module = { path = "../../contracts/audit_module" }
 payment_executor = { path = "../../contracts/payment_executor" }

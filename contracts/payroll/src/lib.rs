@@ -3,6 +3,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 
 use pause_manager::PauseManagerClient;
 use proof_verifier::ProofVerifierClient;
@@ -225,6 +226,31 @@ pub struct PendingRotation {
     pub proposed_at: u64,
 }
 
+// ── Issue #339: Admin Handover Record ───────────────────────────────────────
+
+/// Record of a pending admin handover requiring acceptance.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAdminHandover {
+    pub current_admin: Address,
+    pub pending_admin: Address,
+    pub requested_at: u64,
+}
+
+// ── Issue #334: Signer Quorum Approval Payload ──────────────────────────────
+
+/// Multi-signer approval payload bound to batch root, employer, period, asset, nonce, and policy version.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumApprovalPayload {
+    pub batch_root: BytesN<32>,
+    pub employer: Address,
+    pub period: Symbol,
+    pub asset: Address,
+    pub nonce: BytesN<32>,
+    pub policy_version: u32,
+}
+
 // ── Issue #147: company lifecycle state ──────────────────────────────────────
 
 /// Lifecycle state of the company operating this payroll contract.
@@ -378,6 +404,12 @@ pub enum DataKey {
     ActiveDisputeForRun(u64),
     /// Authorized dispute-resolution role registration (#342).
     DisputeAuthority(Address),
+    /// Pending admin handover request requiring acceptance (#339).
+    PendingAdminHandover,
+    /// Locked payroll funds reserved per asset (#343).
+    LockedPayrollFunds(Address),
+    /// Consumed signer quorum approval hash reference (#334).
+    ConsumedQuorum(BytesN<32>),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -903,6 +935,17 @@ impl Payroll {
             panic!("A pending emergency request already exists");
         }
 
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let available = Self::get_available_treasury_balance(e.clone(), addrs.token.clone());
+        if amount > available {
+            panic!("Insufficient available treasury balance: funds locked for pending payroll");
+        }
+
         let request = EmergencyWithdrawalRequest {
             amount,
             recipient: recipient.clone(),
@@ -938,6 +981,11 @@ impl Payroll {
             .persistent()
             .get(&DataKey::EmergencyRequest)
             .expect("No pending emergency request");
+
+        let available = Self::get_available_treasury_balance(e.clone(), addrs.token.clone());
+        if request.amount > available {
+            panic!("Insufficient available treasury balance: funds locked for pending payroll");
+        }
 
         // Clear before transfer (checks-effects-interactions).
         e.storage().persistent().remove(&DataKey::EmergencyRequest);
@@ -1084,6 +1132,9 @@ impl Payroll {
             .set(&DataKey::PendingRun(run_id), &pending_run);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Submitted);
 
+        // Reserve locked funds for the prepared payroll run (#343)
+        Self::add_locked_funds(&e, addrs.token.clone(), expected_total_spend);
+
         payroll_events::emit_run_prepared(&e, run_id, expected_total_spend);
 
         run_id
@@ -1134,6 +1185,9 @@ impl Payroll {
         if e.storage().persistent().has(&run_key) {
             panic!("Cannot cancel: run has already been executed");
         }
+
+        // Release locked funds reservation (#343)
+        Self::subtract_locked_funds(&e, addrs.token.clone(), pending_run.total_amount);
 
         // Remove the pending run from storage
         e.storage().persistent().remove(&pending_key);
@@ -1193,11 +1247,14 @@ impl Payroll {
             panic!("Cannot cancel a finalized payroll run");
         }
 
-        let _pending_run: PendingPayrollRun = e
+        let pending_run: PendingPayrollRun = e
             .storage()
             .persistent()
             .get(&pending_key)
             .expect("Pending run not found");
+
+        // Release locked funds reservation (#343)
+        Self::subtract_locked_funds(&e, addrs.token.clone(), pending_run.total_amount);
 
         // Remove the pending run from storage if present
         e.storage().persistent().remove(&pending_key);
@@ -1901,6 +1958,194 @@ impl Payroll {
         e.storage()
             .persistent()
             .get(&DataKey::PendingTreasuryRotation)
+    }
+
+    // ── Issue #339: Admin Handover Safety Checks ─────────────────────────────
+
+    /// Request a new admin handover requiring explicit acceptance (step 1 of 2 — issue #339).
+    pub fn request_admin_handover(e: Env, current_admin: Address, pending_admin: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if current_admin != addrs.admin {
+            panic!("Unauthorized: caller is not current admin");
+        }
+        current_admin.require_auth();
+
+        if e.storage().persistent().has(&DataKey::PendingAdminHandover) {
+            panic!("A pending admin handover already exists");
+        }
+
+        let handover = PendingAdminHandover {
+            current_admin: current_admin.clone(),
+            pending_admin: pending_admin.clone(),
+            requested_at: e.ledger().timestamp(),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::PendingAdminHandover, &handover);
+
+        payroll_events::emit_admin_handover_requested(&e, current_admin, pending_admin);
+    }
+
+    /// Accept an admin handover (step 2 of 2 — issue #339).
+    pub fn accept_admin_handover(e: Env, pending_admin: Address) {
+        Self::require_not_paused(&e);
+        let handover: PendingAdminHandover = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdminHandover)
+            .expect("No pending admin handover");
+
+        if pending_admin != handover.pending_admin {
+            panic!("Unauthorized: caller is not the pending admin");
+        }
+        pending_admin.require_auth();
+
+        let mut addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let old_admin = addrs.admin.clone();
+        addrs.admin = pending_admin.clone();
+        e.storage().persistent().set(&DataKey::Addresses, &addrs);
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PendingAdminHandover);
+
+        payroll_events::emit_admin_handover_accepted(&e, old_admin, pending_admin);
+    }
+
+    /// Cancel a pending admin handover.
+    pub fn cancel_admin_handover(e: Env, current_admin: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if current_admin != addrs.admin {
+            panic!("Unauthorized: caller is not current admin");
+        }
+        current_admin.require_auth();
+
+        if !e.storage().persistent().has(&DataKey::PendingAdminHandover) {
+            panic!("No pending admin handover to cancel");
+        }
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PendingAdminHandover);
+
+        payroll_events::emit_admin_handover_cancelled(&e, current_admin);
+    }
+
+    /// Return the pending admin handover request, if any.
+    pub fn get_pending_admin_handover(e: Env) -> Option<PendingAdminHandover> {
+        e.storage().persistent().get(&DataKey::PendingAdminHandover)
+    }
+
+    // ── Issue #343: Treasury Withdrawal Guardrails ───────────────────────────
+
+    /// Get total locked payroll funds for an asset.
+    pub fn get_locked_funds(e: Env, asset: Address) -> i128 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::LockedPayrollFunds(asset))
+            .unwrap_or(0i128)
+    }
+
+    /// Get available unreserved treasury balance for an asset.
+    pub fn get_available_treasury_balance(e: Env, asset: Address) -> i128 {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        let total_balance = soroban_token::Client::new(&e, &asset).balance(&addrs.treasury);
+        let locked = Self::get_locked_funds(e.clone(), asset);
+        total_balance.checked_sub(locked).unwrap_or(0i128)
+    }
+
+    pub fn add_locked_funds(e: &Env, asset: Address, amount: i128) {
+        let key = DataKey::LockedPayrollFunds(asset.clone());
+        let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
+        let new_locked = current.checked_add(amount).expect("Locked funds overflow");
+        e.storage().persistent().set(&key, &new_locked);
+        payroll_events::emit_locked_funds_updated(e, asset, new_locked);
+    }
+
+    pub fn subtract_locked_funds(e: &Env, asset: Address, amount: i128) {
+        let key = DataKey::LockedPayrollFunds(asset.clone());
+        let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
+        let new_locked = current.checked_sub(amount).expect("Locked funds underflow");
+        e.storage().persistent().set(&key, &new_locked);
+        payroll_events::emit_locked_funds_updated(e, asset, new_locked);
+    }
+
+    // ── Issue #334: Signer Quorum Replay Protection ──────────────────────────
+
+    /// Compute cryptographic hash binding all fields of a signer quorum approval payload.
+    pub fn hash_quorum_payload(e: Env, payload: QuorumApprovalPayload) -> BytesN<32> {
+        let mut bin = soroban_sdk::Bytes::new(&e);
+        bin.append(&payload.batch_root.to_xdr(&e));
+        bin.append(&payload.employer.to_xdr(&e));
+        bin.append(&payload.period.to_xdr(&e));
+        bin.append(&payload.asset.to_xdr(&e));
+        bin.append(&payload.nonce.to_xdr(&e));
+        bin.extend_from_array(&payload.policy_version.to_be_bytes());
+        e.crypto().sha256(&bin).into()
+    }
+
+    /// Check if a quorum approval payload hash has already been consumed.
+    pub fn is_quorum_consumed(e: Env, quorum_hash: BytesN<32>) -> bool {
+        e.storage().persistent().has(&DataKey::ConsumedQuorum(quorum_hash))
+    }
+
+    /// Verify signer quorum requirements and consume the quorum approval reference once.
+    pub fn verify_and_consume_quorum(
+        e: Env,
+        payload: QuorumApprovalPayload,
+        signers: Vec<Address>,
+        required_quorum: u32,
+    ) -> BytesN<32> {
+        Self::require_not_paused(&e);
+        if signers.len() < required_quorum {
+            panic!("Insufficient signer quorum");
+        }
+        for i in 0..signers.len() {
+            let s = signers.get(i).unwrap();
+            s.require_auth();
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        if payload.employer != addrs.admin {
+            panic!("Employer mismatch in quorum payload");
+        }
+        if payload.asset != addrs.token {
+            panic!("Asset mismatch in quorum payload");
+        }
+
+        let q_hash = Self::hash_quorum_payload(e.clone(), payload.clone());
+        if Self::is_quorum_consumed(e.clone(), q_hash.clone()) {
+            panic!("Quorum approval payload already consumed: replay rejected");
+        }
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::ConsumedQuorum(q_hash.clone()), &e.ledger().timestamp());
+
+        payroll_events::emit_quorum_consumed(&e, payload.batch_root, payload.employer, payload.nonce);
+        q_hash
     }
 
     // ── Issue #177: metadata hash verification ──────────────────────────────
@@ -4757,5 +5002,241 @@ mod tests {
         );
 
         payroll_client.approve_payroll_run(&unauthorized, &run_id);
+    }
+
+    // ============================================================================
+    // Issue #339: Admin Handover Safety Checks Tests
+    // ============================================================================
+
+    #[test]
+    fn test_admin_handover_full_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let new_admin = Address::generate(&env);
+
+        // Step 1: Current admin requests handover
+        payroll_client.request_admin_handover(&admin, &new_admin);
+
+        let pending = payroll_client
+            .get_pending_admin_handover()
+            .expect("Handover should exist");
+        assert_eq!(pending.current_admin, admin);
+        assert_eq!(pending.pending_admin, new_admin);
+
+        // Step 2: New admin accepts handover
+        payroll_client.accept_admin_handover(&new_admin);
+
+        assert!(payroll_client.get_pending_admin_handover().is_none());
+
+        // Verify admin role is transferred: new admin can perform admin action
+        let draft_id = payroll_client.create_run_draft(
+            &new_admin,
+            &5000i128,
+            &10u32,
+            &Symbol::new(&env, "P1"),
+        );
+        assert_eq!(draft_id, 1);
+    }
+
+    #[test]
+    fn test_admin_handover_cancellation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let new_admin = Address::generate(&env);
+        payroll_client.request_admin_handover(&admin, &new_admin);
+
+        // Current admin cancels
+        payroll_client.cancel_admin_handover(&admin);
+
+        assert!(payroll_client.get_pending_admin_handover().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not current admin")]
+    fn test_admin_handover_unauthorized_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let attacker = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        payroll_client.request_admin_handover(&attacker, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not the pending admin")]
+    fn test_admin_handover_unauthorized_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let new_admin = Address::generate(&env);
+        payroll_client.request_admin_handover(&admin, &new_admin);
+
+        let attacker = Address::generate(&env);
+        payroll_client.accept_admin_handover(&attacker);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not current admin")]
+    fn test_admin_handover_unauthorized_cancel() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let new_admin = Address::generate(&env);
+        payroll_client.request_admin_handover(&admin, &new_admin);
+
+        let attacker = Address::generate(&env);
+        payroll_client.cancel_admin_handover(&attacker);
+    }
+
+    // ============================================================================
+    // Issue #343: Treasury Withdrawal Guardrails Tests
+    // ============================================================================
+
+    #[test]
+    fn test_withdrawal_guardrails_before_and_after_lock() {
+        let env = Env::default();
+        let (payroll_client, admin, treasury, treasury_owner, employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let token_client = TokenClient::new(&env, &token_id);
+        let init_balance = token_client.balance(&treasury);
+
+        // Before lock: 0 locked. Available equals total balance.
+        assert_eq!(payroll_client.get_locked_funds(&token_id), 0);
+        assert_eq!(
+            payroll_client.get_available_treasury_balance(&token_id),
+            init_balance
+        );
+
+        // Prepare payroll run for 800 -> locks 800.
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 800);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &800,
+            &test_nonce(&env, 43),
+            &None,
+        );
+
+        assert_eq!(payroll_client.get_locked_funds(&token_id), 800);
+        assert_eq!(
+            payroll_client.get_available_treasury_balance(&token_id),
+            init_balance - 800
+        );
+
+        // Withdrawal of surplus 150 succeeds because 150 <= available surplus balance.
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &150i128, &recipient);
+        payroll_client.approve_emergency_withdrawal(&admin);
+
+        // Cancellation restores capacity: cancelling run_id releases 800 locked funds.
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "cancel"));
+        assert_eq!(payroll_client.get_locked_funds(&token_id), 0);
+        assert_eq!(
+            payroll_client.get_available_treasury_balance(&token_id),
+            init_balance - 150
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient available treasury balance: funds locked for pending payroll")]
+    fn test_withdrawal_guardrails_rejects_underfunding() {
+        let env = Env::default();
+        let (payroll_client, _admin, treasury, treasury_owner, employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let token_client = TokenClient::new(&env, &token_id);
+        let init_balance = token_client.balance(&treasury);
+
+        // Prepare run for init_balance - 100 -> available surplus balance becomes 100.
+        let (proofs, amounts, employees) =
+            single_payment_batch(&env, &employee, init_balance - 100);
+        let _run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &(init_balance - 100),
+            &test_nonce(&env, 44),
+            &None,
+        );
+
+        // Attempt emergency withdrawal of 300 should fail because only 100 is available surplus.
+        let recipient = Address::generate(&env);
+        payroll_client.request_emergency_withdrawal(&treasury_owner, &300i128, &recipient);
+    }
+
+    // ============================================================================
+    // Issue #334: Signer Quorum Replay Protection Tests
+    // ============================================================================
+
+    #[test]
+    fn test_quorum_approval_valid_and_replay_rejected() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        signers.push_back(signer1);
+        signers.push_back(signer2);
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[1u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 55),
+            policy_version: 1,
+        };
+
+        let q_hash = payroll_client.hash_quorum_payload(&payload);
+        assert!(!payroll_client.is_quorum_consumed(&q_hash));
+
+        // First verification & consumption succeeds.
+        let consumed_hash = payroll_client.verify_and_consume_quorum(&payload, &signers, &2u32);
+        assert_eq!(q_hash, consumed_hash);
+        assert!(payroll_client.is_quorum_consumed(&q_hash));
+
+        // Replaying the exact same quorum approval payload must be rejected.
+        let result = payroll_client.try_verify_and_consume_quorum(&payload, &signers, &2u32);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient signer quorum")]
+    fn test_quorum_insufficient_signers() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let signer1 = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        signers.push_back(signer1);
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[2u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 56),
+            policy_version: 1,
+        };
+
+        // Required quorum is 2, but only 1 signer provided -> panics
+        payroll_client.verify_and_consume_quorum(&payload, &signers, &2u32);
     }
 }
