@@ -431,6 +431,38 @@ data       (u64 run_id, i128 total_amount)
 |----------|-----------|
 | `LOW` | Run-aggregators (track `run_id` sequence for gap detection) |
 
+#### `payroll / run_cancelled`
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_cancelled")
+data       (u64 run_id, Symbol reason_ref)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` | Review dashboards, audit queues |
+
+`reason_ref` is a bounded reference code for an access-controlled off-chain
+review record. It must not contain employee names, payroll totals, individual
+payment amounts, or free-form sensitive notes.
+
+#### `payroll / settlement_receipt`
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("settlement_receipt")
+data       (u64 run_id, BytesN<32> draft_hash, BytesN<32> metadata_hash, Symbol status_ref)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Reconciliation tools, downstream reporting, audit exports |
+
+Settlement receipts provide stable references for reporting after a run is
+marked reconciled. The payload intentionally omits private payroll values such
+as total amount, individual payment amounts, employee count, and employee
+addresses.
 ### Payroll lifecycle ordering
 
 For the cross-call payroll lifecycle, consumers should process the legacy

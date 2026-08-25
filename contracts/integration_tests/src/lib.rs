@@ -242,77 +242,46 @@ mod e2e {
         //      - `payment_executed`   from payroll.batch_process_payroll     (execution)
         //      - `run_executed`       from payroll.batch_process_payroll     (execution)
         let events = env.events().all();
-        let mut has_company = false;
-        let mut has_commitment = false;
-        let mut has_employee = false;
-        let mut has_payment = false;
+        assert!(
+            events.len() >= 6,
+            "Expected at least the core lifecycle events: CompanyRegistered + CommitmentUpdated + EmployeeAdded + CommitmentLocked + payment_executed + run_executed"
+        );
 
+        let mut saw_payment_executed = false;
+        let mut saw_run_executed = false;
+        let mut saw_company_registered = false;
+        let mut saw_commitment_updated = false;
+        let mut saw_employee_added = false;
+        let mut saw_commitment_locked = false;
         for event in events.iter() {
-            let topics = event.1;
-            if !topics.is_empty() {
-                if let Ok(sym) = topics.get(0).unwrap().try_into_val(&env.clone()) {
-                    let sym: Symbol = sym;
-                    if sym == Symbol::new(env, "CompanyRegistered") {
-                        has_company = true;
-                    } else if sym == Symbol::new(env, "CommitmentUpdated") {
-                        has_commitment = true;
-                    } else if sym == Symbol::new(env, "EmployeeAdded") {
-                        has_employee = true;
-                    } else if sym == Symbol::new(env, "payroll") && topics.len() > 1 {
-                        if let Ok(sub_sym) = topics.get(1).unwrap().try_into_val(&env.clone()) {
-                            let sub_sym: Symbol = sub_sym;
-                            if sub_sym == Symbol::new(env, "payment_executed") {
-                                has_payment = true;
-                            }
-                        }
-                    }
+            if event.1.len() < 1 {
+                continue;
+            }
+            let first_topic: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+            if first_topic == Symbol::new(env, "CompanyRegistered") {
+                saw_company_registered = true;
+            } else if first_topic == Symbol::new(env, "CommitmentUpdated") {
+                saw_commitment_updated = true;
+            } else if first_topic == Symbol::new(env, "EmployeeAdded") {
+                saw_employee_added = true;
+            } else if first_topic == Symbol::new(env, "CommitmentLocked") {
+                saw_commitment_locked = true;
+            } else if first_topic == Symbol::new(env, "payroll") && event.1.len() >= 2 {
+                let name: Symbol = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+                if name == Symbol::new(env, "payment_executed") {
+                    saw_payment_executed = true;
+                }
+                if name == Symbol::new(env, "run_executed") {
+                    saw_run_executed = true;
                 }
             }
         }
-
-        assert!(has_company, "CompanyRegistered event missing");
-        assert!(has_commitment, "CommitmentUpdated event missing");
-        assert!(has_employee, "EmployeeAdded event missing");
-        assert!(has_payment, "payment_executed event missing");
-        assert!(events.len() >= 6, "Expected at least 6 events emitted");
-
-        let has_event = |sym: &str| {
-            events.iter().any(|e| {
-                e.1.iter().any(|val| {
-                    if let Ok(s) = val.try_into_val(env) {
-                        let symbol: Symbol = s;
-                        symbol == Symbol::new(env, sym)
-                    } else {
-                        false
-                    }
-                })
-            })
-        };
-
-        assert!(
-            has_event("CompanyRegistered"),
-            "CompanyRegistered event must be emitted"
-        );
-        assert!(
-            has_event("CommitmentUpdated"),
-            "CommitmentUpdated event must be emitted"
-        );
-        assert!(
-            has_event("EmployeeAdded"),
-            "EmployeeAdded event must be emitted"
-        );
-        assert!(
-            has_event("CommitmentLocked"),
-            "CommitmentLocked event must be emitted"
-        );
-        assert!(
-            has_event("payment_executed"),
-            "payment_executed event must be emitted"
-        );
-        assert!(
-            has_event("run_executed"),
-            "run_executed event must be emitted"
-        );
+        assert!(saw_company_registered);
+        assert!(saw_commitment_updated);
+        assert!(saw_employee_added);
+        assert!(saw_commitment_locked);
+        assert!(saw_payment_executed);
+        assert!(saw_run_executed);
     }
 
     /// Paying an employee who has no commitment on-chain must panic.

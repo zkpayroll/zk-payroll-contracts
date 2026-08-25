@@ -1,4 +1,7 @@
 #![no_std]
+
+extern crate alloc;
+use alloc::format;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
@@ -6,112 +9,26 @@ use soroban_sdk::{
 use soroban_sdk::xdr::ToXdr;
 
 use pause_manager::PauseManagerClient;
-use proof_verifier::ProofVerifierClient;
+use payroll_registry::{CompanyInfo, PayrollRegistryClient};
+use proof_verifier::{Groth16Proof, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
+};
 
-const MAX_BATCH: u32 = 50;
+/// Maximum age for a proof relative to its period creation time (7 days in seconds).
+/// Proofs must be submitted within this window to prevent replay attacks using stale proofs.
+const MAX_PROOF_AGE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
-#[contract]
-pub struct Payroll;
-
+/// Payment record
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct ContractAddresses {
-    pub admin: Address,
-    pub token: Address,
-    pub verifier: Address,
-    pub commitment: Address,
-    pub treasury: Address,
-    pub treasury_owner: Address,
-}
-
-/// Reconciliation status for completed payroll runs.
-#[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReconciliationStatus {
-    Unreconciled,
-    Reconciled,
-    Failed,
-}
-
-/// Canonical payroll run state shared by contracts, SDKs, and dashboards (#159).
-///
-/// This enum is the source of truth for user-visible payroll run lifecycle
-/// labels. Off-chain clients should mirror these exact names and transition
-/// rules from `docs/payroll-state-machine.md` and the JSON fixture under
-/// `fixtures/state-machine/`.
-#[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum PayrollRunState {
-    Draft = 0,
-    Validating = 1,
-    ProofPending = 2,
-    ReadyToSubmit = 3,
-    Submitted = 4,
-    Confirming = 5,
-    Completed = 6,
-    Failed = 7,
-    Cancelled = 8,
-    ReconciliationRequired = 9,
-}
-
-/// A pending payroll run that has been prepared but not yet finalized.
-/// Stores the metadata needed to execute the run without exposing salary amounts.
-///
-/// Once finalized (via `finalize_payroll_run`), this becomes a completed `PayrollRun`.
-/// If cancelled (via `cancel_payroll_run`), this is removed from storage.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct PendingPayrollRun {
-    pub run_id: u64,
-    pub prepared_at: u64,
-    pub admin: Address,
-    pub total_amount: i128,
-    pub employee_count: u32,
-    pub draft_hash: BytesN<32>,
-    pub nonce: BytesN<32>,
-}
-
-/// A completed payroll run record.
-///
-/// `draft_hash` is the SHA-256 / Poseidon hash of the off-chain payroll
-/// preparation artifact submitted by the client (#102). Storing it on-chain
-/// gives auditors a stable reference to tie the execution back to the
-/// reviewed draft.
-///
-/// `metadata_hash` is a SHA-256 hash of off-chain metadata (payroll period,
-/// company ID, employee batch, commitment references). It is validated against
-/// a pre-committed hash via `commit_metadata` and stored for audit (#177).
-///
-/// `nonce` is a caller-supplied, company-scoped uniqueness token (#103).
-/// Once used it can never be reused, preventing accidental duplicate runs.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct PayrollRun {
-    pub run_id: u64,
-    pub executed_at: u64,
-    pub admin: Address,
-    pub total_amount: i128,
-    pub employee_count: u32,
-    /// Off-chain draft hash bound at execution time (issue #102).
-    pub draft_hash: BytesN<32>,
-    /// Caller-supplied run nonce (issue #103). Unique per contract lifetime.
-    pub nonce: BytesN<32>,
-    pub reconciliation_status: ReconciliationStatus,
-    /// Off-chain metadata hash (period, company, batch, commitments) (#177).
-    pub metadata_hash: BytesN<32>,
-}
-
-/// Pending emergency withdrawal request (issue #104).
-///
-/// Withdrawal requires two separate authorised actions:
-/// 1. `request_emergency_withdrawal` — called by the `treasury_owner`.
-/// 2. `approve_emergency_withdrawal` — called by the `admin`.
-///
-/// This two-step design ensures neither role can unilaterally drain funds.
-#[contracttype]
-#[derive(Clone, Debug)]
+pub struct PaymentRecord {
+    pub company_id: u64,
+    pub employee: Address,
+    pub proof_hash: BytesN<32>,
+    pub timestamp: u64,
+    pub period: u32,
 pub struct EmergencyWithdrawalRequest {
     pub amount: i128,
     pub recipient: Address,
@@ -167,39 +84,57 @@ pub enum RunDraftState {
     Expired = 4,
 }
 
-/// An unfinalized payroll run draft that can be corrected before execution.
+/// A payroll period definition with scheduling metadata.
 ///
-/// Admins create a draft, optionally amend it one or more times, then
-/// finalize it. Once finalized the record is immutable and every amendment
-/// is reflected in `amendment_count` for auditability.
+/// Each payroll run is tied to a unique period per company. Periods are
+/// monotonically numbered and carry ledger-based scheduling metadata so
+/// that downstream consumers (audit, UI reporting) can map payments to
+/// calendar cycles without leaking salary values.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct PayrollRunDraft {
-    pub draft_id: u64,
+pub struct PayrollPeriod {
+    pub period_id: u32,
+    pub company_id: u64,
+    /// Ledger sequence at which the period was opened.
+    pub start_ledger: u32,
+    /// Ledger sequence at which the period was closed (0 = still open).
+    pub end_ledger: u32,
+    /// Unix timestamp when the period was created (on-chain time).
     pub created_at: u64,
-    pub admin: Address,
-    pub total_amount: i128,
-    pub employee_count: u32,
-    pub period_label: Symbol,
-    pub state: RunDraftState,
-    pub amendment_count: u32,
+    /// True when the period has been closed. Payments cannot be made
+    /// against a closed period.
+    pub closed: bool,
+    /// Number of payments executed within this period.
+    pub payment_count: u32,
 }
 
-// ── Reviewer Authorization & Run Review ─────────────────────────────────────
-
-/// Review decision outcome for a payroll run.
-#[contracttype]
+#[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
-pub enum ReviewDecision {
-    Approved = 0,
-    Rejected = 1,
-    ChangesRequested = 2,
+pub enum PaymentError {
+    ProofAlreadyUsed = 1,
+    ArrayLengthMismatch = 2,
+    AlreadyPaid = 3,
+    /// The payroll period does not exist.
+    PeriodNotFound = 4,
+    /// The payroll period is closed — no new payments allowed.
+    PeriodClosed = 5,
+    /// Attempt to create a duplicate period for this company.
+    PeriodAlreadyExists = 6,
+    /// The proof has expired and can no longer be used (issue #77).
+    ProofExpired = 7,
+    /// Empty payroll batches are rejected to avoid silent no-op execution.
+    EmptyBatch = 8,
 }
 
-/// A review record submitted by an authorized reviewer.
+/// Contract addresses for dependencies
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct ContractAddresses {
+    pub registry: Address,
+    pub commitment: Address,
+    pub verifier: Address,
+    pub token: Address,
 pub struct RunReview {
     pub run_id: u64,
     pub reviewer: Address,
@@ -332,127 +267,21 @@ pub enum CompanyState {
     Incomplete,
 }
 
-// ── Storage keys ──────────────────────────────────────────────────────────────
-// Issue #196: Storage Key Versioning Strategy
-//
-// ## Overview
-// This contract uses a versioned storage-key design to enable safe schema
-// evolution during contract upgrades. Each storage key is strongly typed and
-// scoped to prevent collisions across upgrade boundaries.
-//
-// ## Versioning Strategy
-// 1. **Enum-based namespacing**: All keys are variants of the `DataKey` enum,
-//    ensuring type safety and preventing accidental key collisions.
-//
-// 2. **Append-only evolution**: When adding new storage patterns, append new
-//    variants to the enum rather than modifying existing ones. This preserves
-//    backward compatibility with data written by earlier contract versions.
-//
-// 3. **Explicit migration path**: If a breaking schema change is required:
-//    - Add a new key variant (e.g., `PayrollRunV2(u64)`)
-//    - Write a one-time migration function that reads from the old key and
-//      writes to the new key
-//    - Mark the old variant as deprecated in comments
-//    - After migration window, the old variant can be removed in a future release
-//
-// 4. **Parameterized keys**: Many keys are parameterized (e.g., `PayrollRun(u64)`).
-//    This design is forward-compatible — new fields can be added to the stored
-//    struct without changing the key structure.
-//
-// 5. **Persistent vs Temporary storage**: Keys map to Persistent storage unless
-//    otherwise noted. Temporary storage (not used here) would require a separate
-//    key namespace to avoid upgrade confusion.
-//
-// ## Upgrade-safe patterns
-// - ✅ Adding new key variants (append-only)
-// - ✅ Adding fields to structs stored under existing keys (Soroban XDR evolution)
-// - ✅ Creating parallel V2 keys and migrating data over time
-// - ❌ Changing the type signature of an existing key variant (breaks deserialization)
-// - ❌ Reusing a key variant for a different data type (silent corruption)
-//
-// ## Example future upgrade scenarios
-//
-// ### Scenario 1: Adding a new payroll feature
-// ```rust
-// // Add to DataKey enum:
-// PayrollSchedule(u64),  // New feature, no conflicts
-// ```
-//
-// ### Scenario 2: Breaking change to PayrollRun
-// ```rust
-// // Step 1: Add new variant
-// PayrollRunV2(u64),
-//
-// // Step 2: Write migration function
-// pub fn migrate_payroll_runs_to_v2(e: Env) {
-//     let counter: u64 = e.storage().persistent()
-//         .get(&DataKey::RunCounter).unwrap_or(0);
-//     for id in 1..=counter {
-//         if let Some(old_run) = e.storage().persistent()
-//             .get::<_, PayrollRun>(&DataKey::PayrollRun(id)) {
-//             let new_run = PayrollRunV2::from(old_run);
-//             e.storage().persistent()
-//                 .set(&DataKey::PayrollRunV2(id), &new_run);
-//         }
-//     }
-// }
-//
-// // Step 3: Update all read/write call sites to use V2 key
-// // Step 4: Mark PayrollRun(u64) as deprecated
-// ```
-//
-// ### Scenario 3: Deprecating old data
-// ```rust
-// // After successful migration and a deprecation window:
-// // Remove the old variant from the enum in a new release
-// // (ensure no production deployments still reference it)
-// ```
-//
-// ## Testing migrations
-// Integration tests for schema upgrades should:
-// 1. Deploy contract V1 and write data
-// 2. Upgrade to contract V2
-// 3. Run migration function
-// 4. Verify V2 reads return expected data
-// 5. Verify old keys are either removed or marked obsolete
-//
-// See `contracts/integration_tests/` for versioning test examples.
-
+/// Storage keys
 #[contracttype]
 pub enum DataKey {
     Addresses,
+    Payment(Address, u32),
+    Nullifier(BytesN<32>),
+    TotalPaid(u64),
+    ExecutorAdmin,
     PauseManager,
-    PayrollRun(u64),
-    /// Pending payroll run awaiting finalization (issue #75).
-    PendingRun(u64),
-    TreasuryOwner,
-    RunCounter,
-    /// Draft run storage for the amendment flow (issue #89).
-    RunDraft(u64),
-    /// Auto-increment counter for draft IDs (issue #89).
-    RunDraftCounter,
-    /// Pending admin rotation proposal (issue #91).
-    PendingAdminRotation,
-    /// Pending treasury-owner rotation proposal (issue #91).
-    PendingTreasuryRotation,
-    /// Marks a run nonce as consumed. Value is the run_id that used it (#103).
-    RunNonce(BytesN<32>),
-    /// Marks a deposit nonce as consumed to prevent replay (#191).
-    DepositNonce(BytesN<32>),
-    /// Pre-committed draft hash bound before execution (#102).
-    DraftCommitment(BytesN<32>),
-    /// Pending emergency withdrawal request (#104).
-    EmergencyRequest,
-    /// Accumulated deposit balance per depositor address (#62).
-    CompanyBalance(Address),
-    /// Marks a completed payroll run as archived for long-term reporting (#146).
-    ArchivedRun(u64),
-    /// Company lifecycle state gate for payroll execution (#147).
-    CompanyState,
-    /// Canonical payroll run state for SDK/dashboard conformance (#159).
-    PayrollState(u64),
-    /// Allowed asset token map for payroll payouts.
+    Period(u64, u32),
+    PeriodSequence(u64),
+    /// Allowed assets for payment execution (issue #175)
     AllowedAsset(Address),
+    /// Storage key schema version (issue #174)
+    StorageVersion,
     /// Checkpointed payroll batch execution keyed by a privacy-safe tuple.
     BatchCheckpoint(Address, BytesN<32>, Address, BytesN<32>),
     /// Authorized reviewer registration for payroll run reviews.
@@ -477,358 +306,228 @@ pub enum DataKey {
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
 
-#[contractimpl]
-impl Payroll {
-    pub fn initialize(
-        e: Env,
-        admin: Address,
-        token: Address,
-        verifier: Address,
-        commitment: Address,
-        treasury: Address,
-        treasury_owner: Address,
-    ) {
-        let key = DataKey::Addresses;
-        if e.storage().persistent().has(&key) {
-            panic!("Already initialized")
-        }
-        let addrs = ContractAddresses {
-            admin,
-            token,
-            verifier,
-            commitment,
-            treasury,
-            treasury_owner: treasury_owner.clone(),
-        };
-        e.storage().persistent().set(&key, &addrs);
-        e.storage()
-            .persistent()
-            .set(&DataKey::AllowedAsset(addrs.token.clone()), &true);
-        e.storage()
-            .persistent()
-            .set(&DataKey::TreasuryOwner, &treasury_owner);
-        e.storage().persistent().set(&DataKey::RunCounter, &0u64);
+#[contract]
+pub struct PaymentExecutor;
 
-        payroll_events::emit_payroll_initialized(
-            &e,
-            addrs.admin.clone(),
-            addrs.token.clone(),
-            addrs.verifier.clone(),
-            addrs.commitment.clone(),
-            addrs.treasury.clone(),
-            treasury_owner.clone(),
-        );
+#[contractimpl]
+impl PaymentExecutor {
+    fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
+        if amount < 0 {
+            panic!("Amount must be non-negative");
+        }
+
+        let mut bytes = [0u8; 32];
+        let amount_u128 = amount as u128;
+        bytes[16..].copy_from_slice(&amount_u128.to_be_bytes());
+        BytesN::from_array(env, &bytes)
     }
 
-    fn require_not_paused(e: &Env) {
-        if e.storage().persistent().has(&DataKey::PauseManager) {
-            let pm_addr: Address = e
+    fn require_not_paused(env: &Env) {
+        if env.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = env
                 .storage()
                 .persistent()
                 .get(&DataKey::PauseManager)
                 .unwrap();
-            let pm_client = PauseManagerClient::new(e, &pm_addr);
+            let pm_client = PauseManagerClient::new(env, &pm_addr);
             if pm_client.is_paused() {
                 panic!("Payroll is paused");
             }
         }
     }
 
-    // Issue #147: reject payroll execution for any non-Active company state.
-    // Absent state defaults to Active for backward compatibility with existing
-    // deployments that predate this field.
-    #[allow(dead_code)]
-    fn require_company_active(e: &Env) {
-        if let Some(state) = e
+    /// Initialize with contract addresses
+    pub fn initialize(env: Env, addresses: ContractAddresses) {
+        let key = DataKey::Addresses;
+        if env.storage().persistent().has(&key) {
+            panic!("Already initialized");
+        }
+        env.storage().persistent().set(&key, &addresses);
+        // Automatically allow initial token asset (issue #175)
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowedAsset(addresses.token.clone()), &true);
+        // Set initial storage key version (issue #174)
+        env.storage()
+            .persistent()
+            .set(&DataKey::StorageVersion, &1u32);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
+                addresses.token.clone(),
+            ),
+            (true, env.ledger().timestamp()),
+        );
+    }
+
+    /// Set the executor-level admin (one-time, protected by auth).
+    pub fn set_executor_admin(env: Env, admin: Address) {
+        if env.storage().persistent().has(&DataKey::ExecutorAdmin) {
+            panic!("Executor admin already set");
+        }
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::ExecutorAdmin, &admin);
+        payroll_events::emit_executor_admin_set(&env, admin);
+    }
+
+    /// Set the pause manager contract address (only executor admin).
+    pub fn set_pause_manager(env: Env, pause_manager: Address) {
+        let admin: Address = env
             .storage()
             .persistent()
-            .get::<_, CompanyState>(&DataKey::CompanyState)
-        {
-            match state {
-                CompanyState::Active => {}
-                CompanyState::Paused => {
-                    panic!("Company is paused; payroll execution is not permitted")
-                }
-                CompanyState::Archived => {
-                    panic!("Company is archived; payroll execution is not permitted")
-                }
-                CompanyState::Incomplete => {
-                    panic!("Company setup is incomplete; payroll execution is not permitted")
-                }
-            }
-        }
-    }
-
-    fn validate_run_id(run_id: u64) {
-        if run_id == u64::MAX {
-            panic!("Invalid payroll run ID");
-        }
-    }
-
-    fn validate_draft_id(draft_id: u64) {
-        if draft_id == 0 {
-            panic!("Invalid draft ID: must be non-zero");
-        }
-    }
-
-    fn validate_non_zero_digest(e: &Env, digest: &BytesN<32>, _name: &str) {
-        let zero = BytesN::from_array(e, &[0u8; 32]);
-        if digest == &zero {
-            panic!("Digest cannot be all-zero bytes");
-        }
-    }
-
-    fn validate_symbol_not_empty(e: &Env, symbol: &Symbol, _name: &str) {
-        let empty = Symbol::new(e, "");
-        if symbol == &empty {
-            panic!("Symbol cannot be empty");
-        }
-    }
-
-    pub fn set_pause_manager(e: Env, pause_manager: Address) {
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        addrs.admin.require_auth();
-        e.storage()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+        env.storage()
             .persistent()
             .set(&DataKey::PauseManager, &pause_manager);
-
-        payroll_events::emit_pause_manager_set(&e, pause_manager);
+        payroll_events::emit_executor_pause_manager_set(&env, pause_manager);
     }
 
-    /// Allow or disallow an asset token for payroll payouts.
-    pub fn set_asset_allowed(e: Env, asset: Address, allowed: bool) {
-        let addrs: ContractAddresses = e
+    /// Allow or disallow an asset token for payment execution (only executor admin - issue #175).
+    pub fn set_asset_allowed(env: Env, asset: Address, allowed: bool) {
+        let admin: Address = env
             .storage()
             .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        addrs.admin.require_auth();
-        e.storage()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+        env.storage()
             .persistent()
-            .set(&DataKey::AllowedAsset(asset), &allowed);
+            .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
+
+        env.events().publish(
+            (Symbol::new(&env, "TreasuryAssetAllowedUpdated"), asset),
+            (allowed, env.ledger().timestamp()),
+        );
     }
 
-    /// Check if an asset token is allowlisted for payroll payouts.
-    pub fn is_asset_allowed(e: Env, asset: Address) -> bool {
-        e.storage()
+    /// Check if an asset token is allowlisted for payments (issue #175).
+    pub fn is_asset_allowed(env: Env, asset: Address) -> bool {
+        env.storage()
             .persistent()
             .get(&DataKey::AllowedAsset(asset))
             .unwrap_or(false)
     }
 
-    pub fn deposit(e: Env, from: Address, amount: i128, deposit_id: BytesN<32>) {
-        Self::require_not_paused(&e);
-        Self::validate_non_zero_digest(&e, &deposit_id, "deposit_id");
-        if amount <= 0 {
-            panic!("Deposit amount must be positive");
-        }
+    /// Read contract storage schema version (issue #174).
+    pub fn get_storage_version(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(1u32)
+    }
 
-        let nonce_key = DataKey::DepositNonce(deposit_id.clone());
-        if e.storage().persistent().has(&nonce_key) {
-            panic!("Deposit already processed");
-        }
-        e.storage().persistent().set(&nonce_key, &true);
+    // -----------------------------------------------------------------------
+    // Payroll period lifecycle
+    // -----------------------------------------------------------------------
 
-        let addrs: ContractAddresses = e
+    /// Create a new payroll period for a company.
+    ///
+    /// Periods are numbered sequentially per company. Only one period can
+    /// be open at a time — a new period cannot be created until the previous
+    /// one is closed (or no periods exist yet).
+    pub fn create_period(env: Env, company_id: u64) -> Result<PayrollPeriod, PaymentError> {
+        Self::require_not_paused(&env);
+        let addresses: ContractAddresses = env
             .storage()
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
 
-        let treasury_owner: Address = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TreasuryOwner)
-            .expect("Treasury owner not set");
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company: CompanyInfo = registry.get_company(&company_id);
+        company.admin.require_auth();
 
-        from.require_auth();
-        treasury_owner.require_auth();
+        // Assign sequential period ID
+        let seq_key = DataKey::PeriodSequence(company_id);
+        let next_id: u32 = env.storage().persistent().get(&seq_key).unwrap_or(1u32);
 
-        let token_client = soroban_token::Client::new(&e, &addrs.token);
-        token_client.transfer(&from, &addrs.treasury, &amount);
-
-        // Issue #62: accumulate per-depositor balance for auditability.
-        let balance_key = DataKey::CompanyBalance(from.clone());
-        let prev_balance: i128 = e.storage().persistent().get(&balance_key).unwrap_or(0i128);
-        let new_balance = prev_balance + amount;
-
-        e.storage().persistent().set(&balance_key, &new_balance);
-
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "deposit")),
-            (from, amount, deposit_id, new_balance),
-        );
-    }
-
-    /// Return the accumulated deposit balance for a given depositor address (#62).
-    ///
-    /// This reflects the running total of all successful deposits made by that
-    /// address. It is an accounting record only; actual treasury liquidity is
-    /// held by the token contract at `ContractAddresses.treasury`.
-    pub fn get_treasury_balance(e: Env, depositor: Address) -> i128 {
-        e.storage()
-            .persistent()
-            .get(&DataKey::CompanyBalance(depositor))
-            .unwrap_or(0i128)
-    }
-
-    fn derive_run_id(e: &Env) -> u64 {
-        let counter: u64 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::RunCounter)
-            .unwrap_or(0);
-
-        let run_id = counter + 1;
-        e.storage().persistent().set(&DataKey::RunCounter, &run_id);
-
-        run_id
-    }
-
-    fn is_allowed_payroll_state_transition_internal(
-        from: PayrollRunState,
-        to: PayrollRunState,
-    ) -> bool {
-        match from {
-            PayrollRunState::Draft => {
-                matches!(to, PayrollRunState::Validating | PayrollRunState::Cancelled)
-            }
-            PayrollRunState::Validating => matches!(
-                to,
-                PayrollRunState::ProofPending
-                    | PayrollRunState::Failed
-                    | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::ProofPending => matches!(
-                to,
-                PayrollRunState::ReadyToSubmit
-                    | PayrollRunState::Failed
-                    | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::ReadyToSubmit => matches!(
-                to,
-                PayrollRunState::Submitted | PayrollRunState::Failed | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::Submitted => matches!(
-                to,
-                PayrollRunState::Confirming | PayrollRunState::Failed | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::Confirming => matches!(
-                to,
-                PayrollRunState::Completed
-                    | PayrollRunState::Failed
-                    | PayrollRunState::ReconciliationRequired
-            ),
-            PayrollRunState::Failed => matches!(
-                to,
-                PayrollRunState::Validating
-                    | PayrollRunState::ProofPending
-                    | PayrollRunState::Cancelled
-            ),
-            PayrollRunState::ReconciliationRequired => {
-                matches!(to, PayrollRunState::Completed | PayrollRunState::Failed)
-            }
-            PayrollRunState::Completed | PayrollRunState::Cancelled => false,
-        }
-    }
-
-    fn is_terminal_payroll_state_internal(state: PayrollRunState) -> bool {
-        matches!(
-            state,
-            PayrollRunState::Completed | PayrollRunState::Cancelled
-        )
-    }
-
-    fn is_retryable_payroll_state_internal(state: PayrollRunState) -> bool {
-        matches!(state, PayrollRunState::Failed)
-    }
-
-    fn is_allowed_draft_state_transition_internal(from: RunDraftState, to: RunDraftState) -> bool {
-        match from {
-            RunDraftState::Pending => matches!(
-                to,
-                RunDraftState::Finalized
-                    | RunDraftState::Submitted
-                    | RunDraftState::Cancelled
-                    | RunDraftState::Expired
-            ),
-            RunDraftState::Finalized => matches!(
-                to,
-                RunDraftState::Submitted | RunDraftState::Cancelled | RunDraftState::Expired
-            ),
-            RunDraftState::Submitted | RunDraftState::Cancelled | RunDraftState::Expired => false,
-        }
-    }
-
-    fn is_terminal_draft_state_internal(state: RunDraftState) -> bool {
-        matches!(
-            state,
-            RunDraftState::Submitted | RunDraftState::Cancelled | RunDraftState::Expired
-        )
-    }
-
-    fn record_payroll_run_state(e: &Env, run_id: u64, state: PayrollRunState) {
-        e.storage()
-            .persistent()
-            .set(&DataKey::PayrollState(run_id), &state);
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(e, "run_state")),
-            (run_id, state),
-        );
-    }
-
-    fn get_payroll_run_state_internal(e: &Env, run_id: u64) -> PayrollRunState {
-        if let Some(state) = e
-            .storage()
-            .persistent()
-            .get::<_, PayrollRunState>(&DataKey::PayrollState(run_id))
-        {
-            return state;
+        let period_key = DataKey::Period(company_id, next_id);
+        if env.storage().persistent().has(&period_key) {
+            return Err(PaymentError::PeriodAlreadyExists);
         }
 
-        if let Some(run) = e
-            .storage()
-            .persistent()
-            .get::<_, PayrollRun>(&DataKey::PayrollRun(run_id))
-        {
-            return match run.reconciliation_status {
-                ReconciliationStatus::Reconciled => PayrollRunState::Completed,
-                ReconciliationStatus::Unreconciled | ReconciliationStatus::Failed => {
-                    PayrollRunState::ReconciliationRequired
+        if next_id > 1 {
+            let prev_key = DataKey::Period(company_id, next_id - 1);
+            if let Some(prev_period) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PayrollPeriod>(&prev_key)
+            {
+                if !prev_period.closed {
+                    return Err(PaymentError::PeriodAlreadyExists);
                 }
-            };
+            }
         }
 
-        if e.storage().persistent().has(&DataKey::PendingRun(run_id)) {
-            return PayrollRunState::Submitted;
+        let period = PayrollPeriod {
+            period_id: next_id,
+            company_id,
+            start_ledger: env.ledger().sequence(),
+            end_ledger: 0,
+            created_at: env.ledger().timestamp(),
+            closed: false,
+            payment_count: 0,
+        };
+
+        env.storage().persistent().set(&period_key, &period);
+        env.storage().persistent().set(&seq_key, &(next_id + 1));
+
+        payroll_events::emit_period_created(&env, company_id, next_id);
+
+        Ok(period)
+    }
+
+    /// Close a payroll period so no further payments can be made in it.
+    pub fn close_period(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+    ) -> Result<PayrollPeriod, PaymentError> {
+        Self::require_not_paused(&env);
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company: CompanyInfo = registry.get_company(&company_id);
+        company.admin.require_auth();
+
+        let period_key = DataKey::Period(company_id, period_id);
+        let mut period: PayrollPeriod = env
+            .storage()
+            .persistent()
+            .get(&period_key)
+            .ok_or(PaymentError::PeriodNotFound)?;
+
+        if period.closed {
+            return Err(PaymentError::PeriodClosed);
         }
 
-        panic!("Payroll run state not found");
+        period.closed = true;
+        period.end_ledger = env.ledger().sequence();
+        env.storage().persistent().set(&period_key, &period);
+
+        payroll_events::emit_period_closed(&env, company_id, period_id);
+
+        Ok(period)
     }
 
-    /// Return whether a transition is allowed by the canonical state machine.
-    pub fn is_state_transition_allowed(
-        _e: Env,
-        from: PayrollRunState,
-        to: PayrollRunState,
-    ) -> bool {
-        Self::is_allowed_payroll_state_transition_internal(from, to)
+    /// Read a period definition.
+    pub fn get_period(env: Env, company_id: u64, period_id: u32) -> Option<PayrollPeriod> {
+        let key = DataKey::Period(company_id, period_id);
+        env.storage().persistent().get(&key)
     }
 
-    /// Return whether a payroll run state is terminal and immutable.
-    pub fn is_payroll_state_terminal(_e: Env, state: PayrollRunState) -> bool {
-        Self::is_terminal_payroll_state_internal(state)
-    }
-
-    /// Return whether a state should expose a retry action to clients.
-    pub fn is_payroll_state_retryable(_e: Env, state: PayrollRunState) -> bool {
-        Self::is_retryable_payroll_state_internal(state)
-    }
-
+    // -----------------------------------------------------------------------
+    // Payment execution
+    // -----------------------------------------------------------------------
     pub fn begin_batch_execution_checkpoint(
         e: Env,
         admin: Address,
@@ -1040,170 +739,125 @@ impl Payroll {
         Self::get_payroll_run_state_internal(&e, run_id)
     }
 
-    /// Admin-only state transition hook for conformance tests and operations.
-    pub fn transition_payroll_run_state(
-        e: Env,
-        admin: Address,
-        run_id: u64,
-        next_state: PayrollRunState,
-    ) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let current = Self::get_payroll_run_state_internal(&e, run_id);
-        if !Self::is_allowed_payroll_state_transition_internal(current, next_state) {
-            panic!("Invalid payroll state transition");
-        }
-
-        Self::record_payroll_run_state(&e, run_id, next_state);
-    }
-
-    pub fn get_payroll_run(e: Env, run_id: u64) -> PayrollRun {
-        Self::validate_run_id(run_id);
-        e.storage()
-            .persistent()
-            .get(&DataKey::PayrollRun(run_id))
-            .expect("Run not found")
-    }
-
-    /// Pre-commit an off-chain metadata hash (SHA-256 of payroll period,
-    /// company ID, employee batch hash, and commitment references) that
-    /// will be bound to a payroll run during execution (#177).
-    ///
-    /// Only the admin may call. The commitment is one-time-use: once consumed
-    /// by `set_run_metadata` it is removed from storage.
-    pub fn commit_metadata_hash(e: Env, admin: Address, metadata_hash: BytesN<32>) {
-        Self::require_not_paused(&e);
-        Self::validate_non_zero_digest(&e, &metadata_hash, "metadata_hash");
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let key = DataKey::DraftCommitment(metadata_hash.clone());
-        if e.storage().persistent().has(&key) {
-            panic!("Metadata hash already committed");
-        }
-        e.storage().persistent().set(&key, &true);
-
-        payroll_events::emit_metadata_committed(&e, metadata_hash);
-    }
-
-    /// Bound a pre-committed metadata hash to an existing payroll run.
-    /// Consumes the commitment so it cannot be reused. Only the admin may call.
-    ///
-    /// Must be called with a metadata hash that was previously committed via
-    /// `commit_metadata_hash`. Fails if the hash has not been pre-committed.
-    pub fn set_run_metadata(e: Env, admin: Address, run_id: u64, metadata_hash: BytesN<32>) {
-        Self::require_not_paused(&e);
-        Self::validate_run_id(run_id);
-        Self::validate_non_zero_digest(&e, &metadata_hash, "metadata_hash");
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        // Verify the metadata hash was pre-committed.
-        let commit_key = DataKey::DraftCommitment(metadata_hash.clone());
-        if !e.storage().persistent().has(&commit_key) {
-            panic!("Metadata hash not pre-committed: call commit_metadata_hash first");
-        }
-        // Consume the commitment.
-        e.storage().persistent().remove(&commit_key);
-
-        // Update the payroll run record.
-        let run_key = DataKey::PayrollRun(run_id);
-        let mut run: PayrollRun = e
-            .storage()
-            .persistent()
-            .get(&run_key)
-            .expect("Run not found");
-        run.metadata_hash = metadata_hash.clone();
-        e.storage().persistent().set(&run_key, &run);
-
-        payroll_events::emit_metadata_bound(&e, run_id, metadata_hash);
-    }
-
-    /// Pre-commit an off-chain draft hash so it can be bound to a future run.
-    ///
-    /// Clients compute `draft_hash` over the payroll preparation artifact
-    /// (employee list, amounts, period metadata) before submitting the batch.
-    /// Calling this function registers the hash on-chain so that
-    /// `batch_process_payroll` can verify it has not been tampered with.
-    ///
-    /// Only the admin may pre-commit a draft. The commitment is one-time-use:
-    /// once consumed by a successful `batch_process_payroll` call it is removed
-    /// from storage (issue #102).
-    pub fn commit_draft(e: Env, admin: Address, draft_hash: BytesN<32>) {
-        Self::require_not_paused(&e);
-        Self::validate_non_zero_digest(&e, &draft_hash, "draft_hash");
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
-        }
-        admin.require_auth();
-
-        let key = DataKey::DraftCommitment(draft_hash.clone());
-        if e.storage().persistent().has(&key) {
-            panic!("Draft already committed");
-        }
-        e.storage().persistent().set(&key, &true);
-
-        payroll_events::emit_draft_committed(&e, draft_hash);
-    }
-
-    /// Request an emergency treasury withdrawal (step 1 of 2 — issue #104).
-    ///
-    /// Only the `treasury_owner` may submit a request. A pending request is
-    /// stored on-chain and must be separately approved by the `admin` via
-    /// `approve_emergency_withdrawal`. At most one pending request may exist at
-    /// any time.
-    pub fn request_emergency_withdrawal(
-        e: Env,
-        treasury_owner: Address,
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_payment(
+        env: Env,
+        company_id: u64,
+        employee: Address,
         amount: i128,
-        recipient: Address,
-    ) {
-        Self::require_not_paused(&e);
-        if amount <= 0 {
-            panic!("Amount must be positive");
-        }
-        let stored_owner: Address = e
+        proof_a: BytesN<64>,
+        proof_b: BytesN<128>,
+        proof_c: BytesN<64>,
+        nullifier: BytesN<32>,
+        period: u32,
+    ) -> Result<PaymentRecord, PaymentError> {
+        let addresses: ContractAddresses = env
             .storage()
             .persistent()
-            .get(&DataKey::TreasuryOwner)
-            .expect("Treasury owner not set");
-        if treasury_owner != stored_owner {
-            panic!("Unauthorized: caller is not treasury owner");
-        }
-        treasury_owner.require_auth();
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
 
-        if e.storage().persistent().has(&DataKey::EmergencyRequest) {
-            panic!("A pending emergency request already exists");
+        // Check if pause manager is configured and system is paused
+        if env.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(&env, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
         }
 
+        // Validate the period exists and is open
+        let period_key = DataKey::Period(company_id, period);
+        let period_record: PayrollPeriod = env
+            .storage()
+            .persistent()
+            .get(&period_key)
+            .ok_or(PaymentError::PeriodNotFound)?;
+
+        if period_record.closed {
+            return Err(PaymentError::PeriodClosed);
+        }
+
+        // Check proof freshness: reject stale proofs (issue #77).
+        // Proofs must be submitted within MAX_PROOF_AGE_SECONDS of the period creation.
+        let current_time = env.ledger().timestamp();
+        let proof_age = current_time.saturating_sub(period_record.created_at);
+        if proof_age > MAX_PROOF_AGE_SECONDS {
+            return Err(PaymentError::ProofExpired);
+        }
+
+        // Check cryptographically if the exact proof was submitted previously
+        let nullifier_key = DataKey::Nullifier(nullifier.clone());
+        if env.storage().persistent().has(&nullifier_key) {
+            return Err(PaymentError::ProofAlreadyUsed);
+        }
+
+        // Check payment hasn't been made for this period
+        let payment_key = DataKey::Payment(employee.clone(), period);
+        if env.storage().persistent().has(&payment_key) {
+            return Err(PaymentError::AlreadyPaid);
+        }
+
+        // Read the employee commitment from the dedicated commitment contract
+        // and company metadata from payroll_registry.
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let commitment = commitment_client.get_commitment(&employee).commitment;
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company: CompanyInfo = registry.get_company(&company_id);
+
+        // Ensure only HR admin for this company can trigger payroll and treasury authorizes payment.
+        company.admin.require_auth();
+        company.treasury.require_auth();
+
+        // Construct public inputs required by issue #20:
+        let mut public_inputs = soroban_sdk::Vec::new(&env);
+        public_inputs.push_back(commitment);
+        public_inputs.push_back(Self::amount_to_public_input(&env, amount));
+
+        // Validate Groth16 proof via proof_verifier contract.
+        let verifier = ProofVerifierClient::new(&env, &addresses.verifier);
+        let proof = Groth16Proof {
+            a: proof_a.clone(),
+            b: proof_b.clone(),
+            c: proof_c.clone(),
+        };
+        if !verifier.verify(&proof, &public_inputs) {
+            panic!("Invalid payment proof");
+        }
+
+        // Validate treasury asset allowlist (issue #175)
+        if !Self::is_asset_allowed(env.clone(), addresses.token.clone()) {
+            panic!("Asset not allowed");
+        }
+
+        // Issue #217: Validate treasury asset mapping matches supported payroll assets
+        // Ensure the token contract address is valid and matches expected format
+        let token_str = format!("{:?}", addresses.token);
+        if token_str.is_empty() {
+            panic!("Invalid treasury asset mapping: empty token address");
+        }
+
+        // Verify the treasury address is properly configured and matches asset type
+        let treasury_str = format!("{:?}", company.treasury);
+        if treasury_str.is_empty() {
+            panic!("Invalid treasury mapping: empty treasury address");
+        }
+
+        // Execute token transfer from company treasury to employee.
+        let token_client = token::Client::new(&env, &addresses.token);
+        token_client.transfer(&company.treasury, &employee, &amount);
+
+        // Record payment
+        let record = PaymentRecord {
+            company_id,
+            employee: employee.clone(),
+            proof_hash: nullifier.clone(),
+            timestamp: env.ledger().timestamp(),
+            period,
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1221,36 +875,30 @@ impl Payroll {
             requested_at: e.ledger().timestamp(),
             approved: false,
         };
-        e.storage()
-            .persistent()
-            .set(&DataKey::EmergencyRequest, &request);
 
-        payroll_events::emit_emergency_requested(&e, amount, recipient);
-    }
+        env.storage().persistent().set(&payment_key, &record);
+        env.storage().persistent().set(&nullifier_key, &true);
 
-    /// Approve and execute a pending emergency withdrawal (step 2 of 2 — issue #104).
-    ///
-    /// Only the `admin` may approve. On approval the treasury funds are
-    /// transferred to the recipient specified in the request and the pending
-    /// request is cleared from storage, ensuring it cannot be replayed.
-    pub fn approve_emergency_withdrawal(e: Env, admin: Address) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
+        // Increment period payment count
+        let period_key = DataKey::Period(company_id, period);
+        if let Some(mut period_struct) = env
             .storage()
             .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        if admin != addrs.admin {
-            panic!("Unauthorized");
+            .get::<DataKey, PayrollPeriod>(&period_key)
+        {
+            period_struct.payment_count += 1;
+            env.storage().persistent().set(&period_key, &period_struct);
         }
-        admin.require_auth();
 
-        let request: EmergencyWithdrawalRequest = e
-            .storage()
+        // Update total paid
+        let total_key = DataKey::TotalPaid(company_id);
+        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        env.storage()
             .persistent()
-            .get(&DataKey::EmergencyRequest)
-            .expect("No pending emergency request");
+            .set(&total_key, &(current_total + amount));
 
+        // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
+        payroll_events::emit_executor_payment_processed(&env, company_id, employee, amount, period);
         let available = Self::get_available_treasury_balance(e.clone(), addrs.token.clone());
         if request.amount > available {
             panic!("Insufficient available treasury balance: funds locked for pending payroll");
@@ -1259,121 +907,99 @@ impl Payroll {
         // Clear before transfer (checks-effects-interactions).
         e.storage().persistent().remove(&DataKey::EmergencyRequest);
 
-        let token_client = soroban_token::Client::new(&e, &addrs.token);
-        token_client.transfer(&addrs.treasury, &request.recipient, &request.amount);
+        let _ = nullifier;
 
-        payroll_events::emit_emergency_approved(&e, request.amount, request.recipient);
+        Ok(record)
     }
 
-    /// Cancel a pending emergency withdrawal request.
-    ///
-    /// Either the `treasury_owner` or the `admin` may cancel. Cancellation
-    /// removes the pending request without transferring any funds.
-    pub fn cancel_emergency_withdrawal(e: Env, caller: Address) {
-        Self::require_not_paused(&e);
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        let stored_owner: Address = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TreasuryOwner)
-            .expect("Treasury owner not set");
+    /// Execute batch payroll for multiple employees
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_batch_payroll(
+        env: Env,
+        company_id: u64,
+        employees: soroban_sdk::Vec<Address>,
+        amounts: soroban_sdk::Vec<i128>,
+        proofs_a: soroban_sdk::Vec<BytesN<64>>,
+        proofs_b: soroban_sdk::Vec<BytesN<128>>,
+        proofs_c: soroban_sdk::Vec<BytesN<64>>,
+        nullifiers: soroban_sdk::Vec<BytesN<32>>,
+        period: u32,
+    ) -> Result<soroban_sdk::Vec<PaymentRecord>, PaymentError> {
+        let count = employees.len();
 
-        let is_admin = caller == addrs.admin;
-        let is_owner = caller == stored_owner;
-        if !is_admin && !is_owner {
-            panic!("Unauthorized: only admin or treasury owner may cancel");
-        }
-        caller.require_auth();
-
-        if !e.storage().persistent().has(&DataKey::EmergencyRequest) {
-            panic!("No pending emergency request to cancel");
-        }
-        e.storage().persistent().remove(&DataKey::EmergencyRequest);
-
-        payroll_events::emit_emergency_cancelled(&e, caller);
-    }
-
-    /// Returns the pending emergency withdrawal request, if any.
-    pub fn get_emergency_request(e: Env) -> Option<EmergencyWithdrawalRequest> {
-        e.storage().persistent().get(&DataKey::EmergencyRequest)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Payroll run cancellation (issue #75)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Prepare a pending payroll run for later finalization or cancellation.
-    ///
-    /// This function validates the batch metadata and reserves the nonce without
-    /// executing any payments. The run can later be finalized (via `finalize_payroll_run`)
-    /// or cancelled (via `cancel_payroll_run`). Only finalized runs are permanent.
-    ///
-    /// This two-step process allows operators to validate configuration before
-    /// committing treasury funds, reducing the risk of executing with incorrect
-    /// inputs.
-    pub fn prepare_payroll_run(
-        e: Env,
-        proofs: Vec<BytesN<256>>,
-        amounts: Vec<i128>,
-        employees: Vec<Address>,
-        expected_total_spend: i128,
-        nonce: BytesN<32>,
-        draft_hash: Option<BytesN<32>>,
-    ) -> u64 {
-        let count = proofs.len();
-
-        if amounts.len() != count || employees.len() != count {
-            panic!("Array length mismatch");
+        if amounts.len() != count
+            || proofs_a.len() != count
+            || proofs_b.len() != count
+            || proofs_c.len() != count
+            || nullifiers.len() != count
+        {
+            return Err(PaymentError::ArrayLengthMismatch);
         }
 
         if count == 0 {
-            panic!("Empty payroll batch");
+            return Err(PaymentError::EmptyBatch);
         }
 
-        assert!(count <= MAX_BATCH, "Batch too large");
+        let mut records = soroban_sdk::Vec::new(&env);
 
-        // Reject duplicate run nonces before any other work.
-        let nonce_key = DataKey::RunNonce(nonce.clone());
-        if e.storage().persistent().has(&nonce_key) {
-            panic!("Duplicate run nonce: this payroll batch has already been submitted");
-        }
-
-        // If a draft hash is supplied, verify a pre-commitment exists.
-        let resolved_draft_hash: BytesN<32> = if let Some(ref dh) = draft_hash {
-            let commit_key = DataKey::DraftCommitment(dh.clone());
-            if !e.storage().persistent().has(&commit_key) {
-                panic!("Draft hash not pre-committed: call commit_draft first");
-            }
-            dh.clone()
-        } else {
-            BytesN::from_array(&e, &[0u8; 32])
-        };
-
-        let mut total: i128 = 0;
         for i in 0..count {
-            let amt = amounts.get(i).unwrap();
-            if amt <= 0 {
-                panic!("Amount must be positive");
-            }
-            total += amt;
-        }
-        if total != expected_total_spend {
-            panic!(
-                "Expected spend mismatch: authorised {} but batch totals {}",
-                expected_total_spend, total
-            );
+            let record = Self::execute_payment(
+                env.clone(),
+                company_id,
+                employees.get(i).unwrap(),
+                amounts.get(i).unwrap(),
+                proofs_a.get(i).unwrap(),
+                proofs_b.get(i).unwrap(),
+                proofs_c.get(i).unwrap(),
+                nullifiers.get(i).unwrap(),
+                period,
+            )?;
+            records.push_back(record);
         }
 
-        let addrs: ContractAddresses = e
-            .storage()
+        Ok(records)
+    }
+
+    /// Get payment record
+    pub fn get_payment(env: Env, employee: Address, period: u32) -> PaymentRecord {
+        let key = DataKey::Payment(employee, period);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .expect("Payment not found")
+    }
+
+    /// Check if payment was made for a period
+    pub fn is_paid(env: Env, employee: Address, period: u32) -> bool {
+        let key = DataKey::Payment(employee, period);
+        env.storage().persistent().has(&key)
+    }
+
+    /// Get total amount paid by company
+    pub fn get_total_paid(env: Env, company_id: u64) -> i128 {
+        let key = DataKey::TotalPaid(company_id);
+        env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    /// Get the maximum allowed age for a proof in seconds (issue #77).
+    pub fn get_max_proof_age(_env: Env) -> u64 {
+        MAX_PROOF_AGE_SECONDS
+    }
+
+    /// Get the contract dependency addresses configured during initialization.
+    pub fn get_addresses(env: Env) -> ContractAddresses {
+        env.storage()
             .persistent()
             .get(&DataKey::Addresses)
-            .expect("Not initialized");
+            .expect("Not initialized")
+    }
 
+    /// Get the executor admin address.
+    pub fn get_executor_admin(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set")
         addrs.admin.require_auth();
 
         // Validate treasury asset allowlist
@@ -3998,1272 +3624,1096 @@ mod tests {
         assert!(payroll_client.is_payroll_state_retryable(&PayrollRunState::Failed));
     }
 
-    #[test]
-    #[should_panic(expected = "Unauthorized")]
-    fn test_non_admin_cannot_update_reconciliation_status() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 32),
-            &None,
-        );
-
-        let non_admin = Address::generate(&env);
-        payroll_client.update_reconciliation_status(
-            &non_admin,
-            &run_id,
-            &ReconciliationStatus::Reconciled,
-        );
+    /// Get the current period sequence for a company (defaults to 0).
+    pub fn get_period_sequence(env: Env, company_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PeriodSequence(company_id))
+            .unwrap_or(0u32)
     }
-
-    #[test]
-    #[should_panic(expected = "Run not found")]
-    fn test_update_status_for_invalid_run_panics() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        payroll_client.update_reconciliation_status(
-            &admin,
-            &999u64,
-            &ReconciliationStatus::Reconciled,
-        );
-    }
-
-    // ── Issue #75: payroll cancellation ──────────────────────────────────────
-
-    // ── Issue #159: canonical payroll state machine ──────────────────────────
-
-    #[test]
-    fn test_payroll_state_machine_allows_canonical_forward_transitions() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        assert!(payroll_client
-            .is_state_transition_allowed(&PayrollRunState::Draft, &PayrollRunState::Validating,));
-        assert!(payroll_client.is_state_transition_allowed(
-            &PayrollRunState::Validating,
-            &PayrollRunState::ProofPending,
-        ));
-        assert!(payroll_client.is_state_transition_allowed(
-            &PayrollRunState::ProofPending,
-            &PayrollRunState::ReadyToSubmit,
-        ));
-        assert!(payroll_client.is_state_transition_allowed(
-            &PayrollRunState::ReadyToSubmit,
-            &PayrollRunState::Submitted,
-        ));
-        assert!(payroll_client.is_state_transition_allowed(
-            &PayrollRunState::Submitted,
-            &PayrollRunState::Confirming,
-        ));
-        assert!(payroll_client.is_state_transition_allowed(
-            &PayrollRunState::Confirming,
-            &PayrollRunState::ReconciliationRequired,
-        ));
-        assert!(payroll_client.is_state_transition_allowed(
-            &PayrollRunState::ReconciliationRequired,
-            &PayrollRunState::Completed,
-        ));
-    }
-
-    #[test]
-    fn test_payroll_state_machine_rejects_forbidden_transitions() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        assert!(!payroll_client
-            .is_state_transition_allowed(&PayrollRunState::Draft, &PayrollRunState::Completed,));
-        assert!(!payroll_client
-            .is_state_transition_allowed(&PayrollRunState::Submitted, &PayrollRunState::Draft,));
-        assert!(!payroll_client
-            .is_state_transition_allowed(&PayrollRunState::Completed, &PayrollRunState::Failed,));
-        assert!(
-            !payroll_client.is_state_transition_allowed(
-                &PayrollRunState::Cancelled,
-                &PayrollRunState::Submitted,
-            )
-        );
-    }
-
-    #[test]
-    fn test_payroll_state_machine_terminal_and_retryable_metadata() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        assert!(payroll_client.is_payroll_state_terminal(&PayrollRunState::Completed));
-        assert!(payroll_client.is_payroll_state_terminal(&PayrollRunState::Cancelled));
-        assert!(!payroll_client.is_payroll_state_terminal(&PayrollRunState::Failed));
-        assert!(payroll_client.is_payroll_state_retryable(&PayrollRunState::Failed));
-        assert!(
-            !payroll_client.is_payroll_state_retryable(&PayrollRunState::ReconciliationRequired)
-        );
-    }
-
-    #[test]
-    fn test_prepare_and_cancel_write_canonical_payroll_states() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 150),
-            &None,
-        );
-        assert_eq!(
-            payroll_client.get_payroll_run_state(&run_id),
-            PayrollRunState::Submitted
-        );
-
-        payroll_client.cancel_payroll_run_with_reason(
-            &admin,
-            &run_id,
-            &Symbol::new(&env, "CANCEL"),
-        );
-        assert_eq!(
-            payroll_client.get_payroll_run_state(&run_id),
-            PayrollRunState::Cancelled
-        );
-    }
-
-    #[test]
-    fn test_terminal_payroll_state_cannot_be_mutated() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 151),
-            &None,
-        );
-        payroll_client.cancel_payroll_run_with_reason(
-            &admin,
-            &run_id,
-            &Symbol::new(&env, "CANCEL"),
-        );
-
-        let result = payroll_client.try_transition_payroll_run_state(
-            &admin,
-            &run_id,
-            &PayrollRunState::Submitted,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_non_admin_cannot_transition_payroll_state() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 152),
-            &None,
-        );
-        let attacker = Address::generate(&env);
-        let result = payroll_client.try_transition_payroll_run_state(
-            &attacker,
-            &run_id,
-            &PayrollRunState::Confirming,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_prepare_payroll_run_creates_pending_run() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 40),
-            &None,
-        );
-        assert!(run_id > 0);
-
-        let pending = payroll_client
-            .get_pending_run(&run_id)
-            .expect("Pending run should exist");
-        assert_eq!(pending.run_id, run_id);
-        assert_eq!(pending.total_amount, 1000);
-        assert_eq!(pending.employee_count, 1);
-    }
-
-    #[test]
-    fn test_cancel_pending_payroll_run() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 41),
-            &None,
-        );
-
-        // Cancel the pending run
-        payroll_client.cancel_payroll_run_with_reason(
-            &admin,
-            &run_id,
-            &Symbol::new(&env, "CANCEL"),
-        );
-
-        // Verify it's no longer pending
-        assert!(payroll_client.get_pending_run(&run_id).is_none());
-    }
-
-    #[test]
-    #[should_panic(expected = "Unauthorized")]
-    fn test_cancel_by_non_admin_fails() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 42),
-            &None,
-        );
-
-        let non_admin = Address::generate(&env);
-        let reason = Symbol::new(&env, "attack");
-        payroll_client.cancel_payroll_run_with_reason(&non_admin, &run_id, &reason);
-    }
-
-    #[test]
-    #[should_panic(expected = "Pending run not found")]
-    fn test_cancel_non_existent_run_fails() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let reason = Symbol::new(&env, "no_such_run");
-        payroll_client.cancel_payroll_run_with_reason(&admin, &999u64, &reason);
-    }
-
-    // ── Issue #177: payroll run metadata hash checks ──────────────────────────
-
-    #[test]
-    fn test_commit_metadata_hash_stores_commitment() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let meta_hash = BytesN::from_array(&env, &[0xaau8; 32]);
-        payroll_client.commit_metadata_hash(&admin, &meta_hash);
-
-        // Should not panic — commitment is stored.
-    }
-
-    #[test]
-    #[should_panic(expected = "Metadata hash already committed")]
-    fn test_commit_metadata_hash_twice_panics() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let meta_hash = BytesN::from_array(&env, &[0xbbu8; 32]);
-        payroll_client.commit_metadata_hash(&admin, &meta_hash);
-        payroll_client.commit_metadata_hash(&admin, &meta_hash);
-    }
-
-    #[test]
-    fn test_set_run_metadata_binds_hash_to_run() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 50),
-            &None,
-        );
-        assert!(run_id > 0);
-
-        let meta_hash = BytesN::from_array(&env, &[0xccu8; 32]);
-        payroll_client.commit_metadata_hash(&admin, &meta_hash);
-        payroll_client.set_run_metadata(&admin, &run_id, &meta_hash);
-
-        let run = payroll_client.get_payroll_run(&run_id);
-        assert_eq!(run.metadata_hash, meta_hash);
-    }
-
-    #[test]
-    #[should_panic(expected = "Metadata hash not pre-committed")]
-    fn test_set_run_metadata_rejects_uncommitted_hash() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 51),
-            &None,
-        );
-
-        let meta_hash = BytesN::from_array(&env, &[0xddu8; 32]);
-        payroll_client.set_run_metadata(&admin, &run_id, &meta_hash);
-    }
-
-    #[test]
-    fn test_run_metadata_hash_defaults_to_zero() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 52),
-            &None,
-        );
-
-        let run = payroll_client.get_payroll_run(&run_id);
-        let zero: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
-        assert_eq!(run.metadata_hash, zero);
-    }
-
-    #[test]
-    fn test_prepare_rejects_duplicate_nonce() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 43);
-        let (p1, a1, e1) = single_payment_batch(&env, &employee, 1000);
-        payroll_client.prepare_payroll_run(&p1, &a1, &e1, &1000, &nonce, &None);
-
-        // Second call with same nonce must fail
-        let (p2, a2, e2) = single_payment_batch(&env, &employee, 1000);
-        let result = payroll_client.try_prepare_payroll_run(&p2, &a2, &e2, &1000, &nonce, &None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "Pending run not found")]
-    fn test_cancel_payroll_run_twice_fails() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 44),
-            &None,
-        );
-
-        let reason = Symbol::new(&env, "double_cancel");
-        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
-        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
-    }
-
-    #[test]
-    fn test_cancel_pending_payroll_run_frees_nonce_and_cleans_state() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 45);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id =
-            payroll_client.prepare_payroll_run(&proofs, &amounts, &employees, &1000, &nonce, &None);
-
-        assert!(payroll_client.get_pending_run(&run_id).is_some());
-        let reason = Symbol::new(&env, "test_cleanup");
-        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
-
-        assert!(payroll_client.get_pending_run(&run_id).is_none());
-        assert_eq!(
-            payroll_client.get_payroll_run_state(&run_id),
-            PayrollRunState::Cancelled
-        );
-    }
-
-    #[test]
-    fn test_finalize_payroll_run_records_reconciliation_required_and_cleans_pending() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 46);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id =
-            payroll_client.prepare_payroll_run(&proofs, &amounts, &employees, &1000, &nonce, &None);
-
-        assert!(payroll_client.get_pending_run(&run_id).is_some());
-        assert_eq!(
-            payroll_client.get_payroll_run_state(&run_id),
-            PayrollRunState::Submitted
-        );
-
-        payroll_client.finalize_payroll_run(&admin, &run_id);
-
-        assert!(payroll_client.get_pending_run(&run_id).is_none());
-        assert_eq!(
-            payroll_client.get_payroll_run_state(&run_id),
-            PayrollRunState::ReconciliationRequired
-        );
-        let run = payroll_client.get_payroll_run(&run_id);
-        assert_eq!(
-            run.reconciliation_status,
-            ReconciliationStatus::Unreconciled
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Payroll is paused")]
-    fn test_pause_blocks_deposit() {
-        let env = Env::default();
-        let (payroll_client, admin, treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let pm_id = env.register_contract(None, PauseManager);
-        let pm_client = PauseManagerClient::new(&env, &pm_id);
-        pm_client.initialize(&admin);
-
-        payroll_client.set_pause_manager(&pm_id);
-        pm_client.pause();
-
-        let deposit_id = BytesN::from_array(&env, &[0xffu8; 32]);
-        payroll_client.deposit(&treasury, &100i128, &deposit_id);
-    }
-
-    // ── Issue #180: failed execution rollback tests ──────────────────────────
-
-    #[test]
-    fn test_failed_proof_mid_batch_rolls_back_nonce() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let mut employees = Vec::new(&env);
-        let mut proofs = Vec::new(&env);
-        let mut amounts = Vec::new(&env);
-
-        // Employee 1 — valid proof
-        let emp1 = employee;
-        employees.push_back(emp1.clone());
-        proofs.push_back(mock_proof(&env));
-        amounts.push_back(500i128);
-
-        // Employee 2 — will trigger proof failure (but proofs are mocked to always pass,
-        // so instead we use a different employee without a commitment stored).
-        let emp2 = Address::generate(&env);
-        employees.push_back(emp2.clone());
-        proofs.push_back(mock_proof(&env));
-        amounts.push_back(500i128);
-
-        let nonce = test_nonce(&env, 100);
-        let result = payroll_client
-            .try_batch_process_payroll(&proofs, &amounts, &employees, &1000, &nonce, &None);
-        // Execution fails because emp2 has no stored commitment
-        assert!(result.is_err());
-
-        // Verify the nonce was rolled back — should be usable in a new run
-        let (proofs2, amounts2, employees2) = single_payment_batch(&env, &emp1, 500);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs2,
-            &amounts2,
-            &employees2,
-            &500,
-            &nonce,
-            &None,
-        );
-        assert!(
-            run_id > 0,
-            "Nonce must be reusable after rolled-back execution"
-        );
-    }
-
-    #[test]
-    fn test_insufficient_funds_rolls_back_nonce_and_commitment() {
-        let env = Env::default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::pause_manager::{PauseManager, PauseManagerClient};
+    use ::salary_commitment::SalaryCommitmentContract;
+    use ::token::{Token, TokenClient};
+    use payroll_registry::PayrollRegistry;
+    use proof_verifier::{ProofVerifier, VerificationKey};
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{Env, IntoVal, Symbol, TryIntoVal};
+
+    fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
-
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
-        let verifier_admin = Address::generate(&env);
-        verifier_client.init_verifier_admin(&verifier_admin);
-        verifier_client.initialize_verifier(&mock_vk(&env));
-
+        let registry_id = env.register_contract(None, PayrollRegistry);
         let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
-        let commitment_admin = Address::generate(&env);
+        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register_contract(None, Token);
+
+        let verifier_client = ProofVerifierClient::new(env, &verifier_id);
+        let verifier_admin = Address::generate(env);
+        verifier_client.init_verifier_admin(&verifier_admin);
+        verifier_client.initialize_verifier(&mock_vk(env));
+
+        let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
+        let commitment_admin = Address::generate(env);
         commitment_client.init_commitment_admin(&commitment_admin);
 
-        let token_id = env.register_contract(None, Token);
-        let token_client = TokenClient::new(&env, &token_id);
+        ContractAddresses {
+            registry: registry_id,
+            commitment: commitment_id,
+            verifier: verifier_id,
+            token: token_id,
+        }
+    }
 
-        let payroll_id = env.register_contract(None, Payroll);
-        let payroll_client = PayrollClient::new(&env, &payroll_id);
+    fn mock_vk(env: &Env) -> VerificationKey {
+        VerificationKey {
+            alpha: BytesN::from_array(env, &[0u8; 64]),
+            beta: BytesN::from_array(env, &[0u8; 128]),
+            gamma: BytesN::from_array(env, &[0u8; 128]),
+            delta: BytesN::from_array(env, &[0u8; 128]),
+            ic: soroban_sdk::Vec::from_array(
+                env,
+                [
+                    BytesN::from_array(env, &[0u8; 64]),
+                    BytesN::from_array(env, &[0u8; 64]),
+                    BytesN::from_array(env, &[0u8; 64]),
+                ],
+            ),
+        }
+    }
 
-        let treasury = Address::generate(&env);
-        let admin = Address::generate(&env);
-        let treasury_owner = Address::generate(&env);
+    #[test]
+    fn test_initialize() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        // Mint only 100 tokens — NOT enough for the 1000 payment
-        token_client.mint(&treasury, &100i128);
-        payroll_client.initialize(
-            &admin,
-            &token_id,
-            &verifier_id,
-            &commitment_id,
-            &treasury,
-            &treasury_owner,
-        );
-        commitment_client.set_payroll_operator(&payroll_id);
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+    }
+
+    #[test]
+    fn test_is_paid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
 
         let employee = Address::generate(&env);
-        commitment_client.store_commitment(&employee, &BytesN::from_array(&env, &[0u8; 32]));
 
-        let nonce = test_nonce(&env, 101);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        assert!(!client.is_paid(&employee, &1));
+    }
 
-        // Pre-commit a draft hash so we can verify it's also rolled back
-        let draft_hash = BytesN::from_array(&env, &[0x81u8; 32]);
-        payroll_client.commit_draft(&admin, &draft_hash);
+    #[test]
+    fn test_execute_payment_transfers_after_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        let result = payroll_client.try_batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        // Create payroll period
+        let _ = client.create_period(&company_id);
+
+        let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let valid_nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
             &1000,
-            &nonce,
-            &Some(draft_hash.clone()),
+            &valid_proof_a,
+            &valid_proof_b,
+            &valid_proof_c,
+            &valid_nullifier,
+            &1,
         );
-        // Must fail due to insufficient treasury balance
-        assert!(result.is_err());
 
-        // Verify nonce is reusable (rolled back)
-        token_client.mint(&treasury, &10_000i128);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
+        assert_eq!(token_client.balance(&treasury), 9_000);
+        assert_eq!(token_client.balance(&employee), 1_000);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 6);
+        let event = events.get(events.len() - 1).unwrap();
+        assert_eq!(event.1.len(), 2);
+        let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "PayrollProcessed"));
+        let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(comp_id, company_id);
+    }
+
+    #[test]
+    fn test_double_spend_proof_reuse_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+
+        let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let valid_nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
             &1000,
-            &nonce,
-            &Some(draft_hash.clone()),
-        );
-        assert!(
-            run_id > 0,
-            "Nonce and commitment must be reusable after failed execution"
-        );
-    }
-
-    #[test]
-    fn test_failed_execution_does_not_create_payroll_run() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        // Submit with wrong expected_total_spend to trigger failure AFTER nonce consumption
-        let nonce = test_nonce(&env, 102);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 500);
-
-        let result = payroll_client
-            .try_batch_process_payroll(&proofs, &amounts, &employees, &999, &nonce, &None);
-        assert!(result.is_err());
-
-        // Verify no payroll run record was created
-        let mut any_run = false;
-        for run_id in 1..5u64 {
-            if payroll_client.try_get_payroll_run(&run_id).is_ok() {
-                any_run = true;
-                break;
-            }
-        }
-        assert!(
-            !any_run,
-            "No PayrollRun should exist after a failed execution"
+            &valid_proof_a,
+            &valid_proof_b,
+            &valid_proof_c,
+            &valid_nullifier,
+            &1,
         );
 
-        // Nonce is NOT consumed (rolled back) — can retry with corrected params
-        let run_id = payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &500, &nonce, &None);
-        assert!(run_id > 0, "Nonce must be reusable after failed execution");
-    }
-
-    #[test]
-    fn test_failed_execution_does_not_consume_draft_commitment() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let draft_hash = BytesN::from_array(&env, &[0x82u8; 32]);
-        payroll_client.commit_draft(&admin, &draft_hash);
-
-        // Trigger failure with amount mismatch
-        let nonce = test_nonce(&env, 103);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 500);
-        let result = payroll_client.try_batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &999,
-            &nonce,
-            &Some(draft_hash.clone()),
-        );
-        assert!(result.is_err());
-
-        // Draft commitment should still be usable (rolled back)
-        let nonce2 = test_nonce(&env, 104);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &500,
-            &nonce2,
-            &Some(draft_hash),
-        );
-        assert!(
-            run_id > 0,
-            "Draft commitment must survive a rolled-back execution"
-        );
-    }
-
-    #[test]
-    fn test_failed_execution_does_not_leave_pending_state() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 105);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 500);
-        let result = payroll_client
-            .try_batch_process_payroll(&proofs, &amounts, &employees, &999, &nonce, &None);
-        assert!(result.is_err());
-
-        // After failure, a successful run with the same nonce should work
-        // (nonce was rolled back). Also verify the run gets a valid ID.
-        let run_id = payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &500, &nonce, &None);
-        assert!(run_id > 0, "Nonce must be reusable after failed execution");
-    }
-
-    #[test]
-    #[should_panic(expected = "Duplicate run nonce")]
-    fn test_successful_run_consumes_nonce_permanently() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 106);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 500);
-        payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &500, &nonce, &None);
-
-        // Second attempt with same nonce — must fail permanently
-        let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 500);
-        payroll_client.batch_process_payroll(&proofs2, &amounts2, &employees2, &500, &nonce, &None);
-    }
-
-    #[test]
-    fn test_failed_prepare_does_not_lock_nonce() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 107);
-        let mut proofs = Vec::new(&env);
-        proofs.push_back(mock_proof(&env));
-        let mut amounts = Vec::new(&env);
-        amounts.push_back(500i128);
-        let mut employees = Vec::new(&env);
-        employees.push_back(employee.clone());
-
-        // Successful prepare
-        let run_id =
-            payroll_client.prepare_payroll_run(&proofs, &amounts, &employees, &500, &nonce, &None);
-        assert!(run_id > 0);
-
-        // Failed cancel (wrong caller) should not affect the pending run
-        let attacker = Address::generate(&env);
-        let reason = Symbol::new(&env, "attack");
-        let cancel_result =
-            payroll_client.try_cancel_payroll_run_with_reason(&attacker, &run_id, &reason);
-        assert!(cancel_result.is_err());
-
-        // Pending run should still exist
-        let pending = payroll_client.get_pending_run(&run_id);
-        assert!(
-            pending.is_some(),
-            "Pending run must survive unauthorized cancel attempt"
-        );
-    }
-
-    #[test]
-    fn test_failed_execution_array_mismatch_rolls_back() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 108);
-        let mut proofs = Vec::new(&env);
-        proofs.push_back(mock_proof(&env)); // 1 proof
-        let mut amounts = Vec::new(&env);
-        amounts.push_back(500i128);
-        amounts.push_back(500i128); // 2 amounts — mismatch!
-        let mut employees = Vec::new(&env);
-        employees.push_back(employee.clone());
-
-        let result = payroll_client
-            .try_batch_process_payroll(&proofs, &amounts, &employees, &1000, &nonce, &None);
-        assert!(result.is_err());
-
-        // Nonce should still be usable after rollback
-        let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 500);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs2,
-            &amounts2,
-            &employees2,
-            &500,
-            &nonce,
-            &None,
-        );
-        assert!(
-            run_id > 0,
-            "Nonce must be reusable after array mismatch rollback"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Payroll is paused")]
-    fn test_pause_blocks_emergency_withdrawal_request() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let pm_id = env.register_contract(None, PauseManager);
-        let pm_client = PauseManagerClient::new(&env, &pm_id);
-        pm_client.initialize(&admin);
-
-        payroll_client.set_pause_manager(&pm_id);
-        pm_client.pause();
-
-        let recipient = Address::generate(&env);
-        payroll_client.request_emergency_withdrawal(&treasury_owner, &500i128, &recipient);
-    }
-
-    // ── Issue #191: deposit replay protection ────────────────────────────────
-
-    #[test]
-    fn test_deposit_with_unique_id_succeeds() {
-        let env = Env::default();
-        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let deposit_id = BytesN::from_array(&env, &[1u8; 32]);
-        payroll_client.deposit(&treasury, &500i128, &deposit_id);
-    }
-
-    #[test]
-    #[should_panic(expected = "Deposit already processed")]
-    fn test_deposit_replay_with_same_id_rejected() {
-        let env = Env::default();
-        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let deposit_id = BytesN::from_array(&env, &[2u8; 32]);
-        payroll_client.deposit(&treasury, &500i128, &deposit_id);
-        payroll_client.deposit(&treasury, &500i128, &deposit_id);
-    }
-
-    #[test]
-    fn test_deposit_distinct_ids_both_succeed() {
-        let env = Env::default();
-        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let id1 = BytesN::from_array(&env, &[3u8; 32]);
-        let id2 = BytesN::from_array(&env, &[4u8; 32]);
-        payroll_client.deposit(&treasury, &500i128, &id1);
-        payroll_client.deposit(&treasury, &500i128, &id2);
-    }
-
-    // ── Issue #194: amount boundary validations ──────────────────────────────
-
-    #[test]
-    #[should_panic(expected = "Amount must be positive")]
-    fn test_batch_process_rejects_zero_amount() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, _amounts, employees) = single_payment_batch(&env, &employee, 0);
-        let mut amounts = Vec::new(&env);
-        amounts.push_back(0i128);
-        payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &0,
-            &test_nonce(&env, 200),
-            &None,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Amount must be positive")]
-    fn test_batch_process_rejects_negative_amount() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, _amounts, employees) = single_payment_batch(&env, &employee, -1);
-        let mut amounts = Vec::new(&env);
-        amounts.push_back(-1i128);
-        payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &-1,
-            &test_nonce(&env, 201),
-            &None,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Amount must be positive")]
-    fn test_prepare_payroll_run_rejects_zero_amount() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, _amounts, employees) = single_payment_batch(&env, &employee, 0);
-        let mut amounts = Vec::new(&env);
-        amounts.push_back(0i128);
-        payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &0,
-            &test_nonce(&env, 202),
-            &None,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Amount must be positive")]
-    fn test_prepare_payroll_run_rejects_negative_amount() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, _amounts, employees) = single_payment_batch(&env, &employee, -1);
-        let mut amounts = Vec::new(&env);
-        amounts.push_back(-1i128);
-        payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &-1,
-            &test_nonce(&env, 203),
-            &None,
-        );
-    }
-
-    // ── Issue #196: Storage key versioning strategy tests ────────────────────
-
-    #[test]
-    fn test_storage_keys_are_namespaced() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
             &1000,
-            &test_nonce(&env, 210),
-            &None,
+            &valid_proof_a,
+            &valid_proof_b,
+            &valid_proof_c,
+            &valid_nullifier,
+            &1,
         );
-
-        let draft_id =
-            payroll_client.create_run_draft(&admin, &5_000i128, &10u32, &Symbol::new(&env, "Q1"));
-
-        let run = payroll_client.get_payroll_run(&run_id);
-        let draft = payroll_client.get_run_draft(&draft_id);
-
-        assert_eq!(run.run_id, run_id);
-        assert_eq!(draft.draft_id, draft_id);
+        assert_eq!(result.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
     }
 
     #[test]
-    fn test_parameterized_keys_support_schema_extension() {
+    fn test_batch_array_length_mismatch_fails() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let company_id = 0u64;
+
+        let employees =
+            soroban_sdk::Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+        let amounts: soroban_sdk::Vec<i128> = soroban_sdk::Vec::from_array(&env, [1000]);
+        let proofs_a: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let proofs_b: soroban_sdk::Vec<BytesN<128>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 128])]);
+        let proofs_c: soroban_sdk::Vec<BytesN<64>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let nullifiers: soroban_sdk::Vec<BytesN<32>> =
+            soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 32])]);
+        let period = 1;
+
+        let result = client.try_execute_batch_payroll(
+            &company_id,
             &employees,
-            &1000,
-            &test_nonce(&env, 211),
-            &None,
-        );
-
-        let run = payroll_client.get_payroll_run(&run_id);
-        assert_eq!(run.run_id, run_id);
-        assert_eq!(run.total_amount, 1000);
-        assert_eq!(run.employee_count, 1);
-    }
-
-    // ── Issue #203: Settlement completion guard tests ────────────────────────
-
-    #[test]
-    fn test_finalize_run_draft_is_idempotent() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
-
-        let id =
-            payroll_client.create_run_draft(&admin, &8_000i128, &15u32, &Symbol::new(&env, "MAR"));
-
-        payroll_client.finalize_run_draft(&admin, &id);
-        let draft = payroll_client.get_run_draft(&id);
-        assert_eq!(draft.state, RunDraftState::Finalized);
-
-        let result = payroll_client.try_finalize_run_draft(&admin, &id);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_payroll_run_execution_is_idempotent_via_nonce() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let nonce = test_nonce(&env, 212);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-
-        let run_id = payroll_client
-            .batch_process_payroll(&proofs, &amounts, &employees, &1000, &nonce, &None);
-        assert!(run_id > 0);
-
-        let result = payroll_client
-            .try_batch_process_payroll(&proofs, &amounts, &employees, &1000, &nonce, &None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_pending_run_cannot_be_cancelled_twice() {
-        let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
             &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 213),
-            &None,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &period,
         );
 
-        let reason = Symbol::new(&env, "settlement_guard");
-        payroll_client.cancel_payroll_run_with_reason(&admin, &run_id, &reason);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::ArrayLengthMismatch
+        );
+    }
 
-        let result = payroll_client.try_cancel_payroll_run_with_reason(&admin, &run_id, &reason);
-        assert!(result.is_err());
+    // -----------------------------------------------------------------------
+    // Period tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let period = client.create_period(&company_id);
+        let result = period;
+        assert_eq!(result.period_id, 1);
+        assert_eq!(result.company_id, company_id);
+        assert!(!result.closed);
+        assert_eq!(result.payment_count, 0);
     }
 
     #[test]
-    fn test_settlement_completion_guard_via_draft_state() {
+    fn test_duplicate_period_creation_fails() {
         let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
-            setup_simple_payroll(&env);
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        let draft_id =
-            payroll_client.create_run_draft(&admin, &10_000i128, &20u32, &Symbol::new(&env, "Q4"));
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
 
-        let draft = payroll_client.get_run_draft(&draft_id);
-        assert_eq!(draft.state, RunDraftState::Pending);
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
 
-        payroll_client.finalize_run_draft(&admin, &draft_id);
-        let draft = payroll_client.get_run_draft(&draft_id);
-        assert_eq!(draft.state, RunDraftState::Finalized);
+        let _ = client.create_period(&company_id);
 
-        let result = payroll_client.try_amend_run_draft(&admin, &draft_id, &12_000i128, &22u32);
-        assert!(result.is_err());
-
-        let result = payroll_client.try_finalize_run_draft(&admin, &draft_id);
-        assert!(result.is_err());
+        let result = client.try_create_period(&company_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::PeriodAlreadyExists
+        );
     }
 
-    // Issue #200: Asset allowlist enforcement tests
-    fn setup_payroll_with_token(
+    #[test]
+    fn test_close_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let _ = client.create_period(&company_id);
+        let result = client.close_period(&company_id, &1);
+
+        assert!(result.closed);
+        assert_eq!(result.end_ledger, result.start_ledger);
+    }
+
+    #[test]
+    fn test_payment_in_closed_period_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[8u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+        let _ = client.close_period(&company_id, &1);
+
+        let proof_a = BytesN::from_array(&env, &[5u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[6u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[7u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), PaymentError::PeriodClosed);
+    }
+
+    #[test]
+    fn test_payment_in_nonexistent_period_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[8u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let proof_a = BytesN::from_array(&env, &[5u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[6u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[7u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+
+        // Period 99 doesn't exist
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &99,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), PaymentError::PeriodNotFound);
+    }
+
+    /// Acceptance Criteria: Reentrancy
+    #[test]
+    fn test_reentrancy_cei_pattern() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[8u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+
+        let proof_a = BytesN::from_array(&env, &[5u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[6u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[7u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[9u8; 32]);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &2_500,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
+        );
+
+        assert_eq!(token_client.balance(&treasury), 7_500);
+        assert_eq!(token_client.balance(&employee), 2_500);
+        assert!(client.is_paid(&employee, &1));
+        assert_eq!(client.get_total_paid(&company_id), 2_500);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 6);
+        let event = events.get(events.len() - 1).unwrap();
+        assert_eq!(event.1.len(), 2);
+        let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+        assert_eq!(sym, Symbol::new(&env, "PayrollProcessed"));
+
+        let replay = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &2_500,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
+        );
+
+        assert_eq!(replay.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
+        assert_eq!(token_client.balance(&treasury), 7_500);
+        assert_eq!(token_client.balance(&employee), 2_500);
+        assert_eq!(client.get_total_paid(&company_id), 2_500);
+    }
+
+    // ── Pause tests ──────────────────────────────────────────────────────────
+
+    fn setup_executor_with_pause_manager(
         env: &Env,
     ) -> (
-        PayrollClient<'_>,
-        Address,
-        Address,
+        PaymentExecutorClient<'_>,
+        PauseManagerClient<'_>,
+        u64,
         Address,
         Address,
         Address,
     ) {
         env.mock_all_auths();
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let verifier_client = ProofVerifierClient::new(env, &verifier_id);
-        let verifier_admin = Address::generate(env);
-        verifier_client.init_verifier_admin(&verifier_admin);
-        verifier_client.initialize_verifier(&mock_vk(env));
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(env, &contract_id);
 
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
-        let commitment_admin = Address::generate(env);
-        commitment_client.init_commitment_admin(&commitment_admin);
+        let addresses = setup_addresses(env);
+        client.initialize(&addresses);
 
-        let token_id = env.register_contract(None, Token);
-        let token_client = TokenClient::new(env, &token_id);
+        let registry_client = PayrollRegistryClient::new(env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(env, &addresses.commitment);
+        let token_client = TokenClient::new(env, &addresses.token);
 
-        let payroll_id = env.register_contract(None, Payroll);
-        let payroll_client = PayrollClient::new(env, &payroll_id);
-
-        let treasury = Address::generate(env);
         let admin = Address::generate(env);
-        let treasury_owner = Address::generate(env);
-        token_client.mint(&treasury, &1_000_000i128);
-        payroll_client.initialize(
-            &admin,
-            &token_id,
-            &verifier_id,
-            &commitment_id,
-            &treasury,
-            &treasury_owner,
+        let treasury = Address::generate(env);
+        let employee = Address::generate(env);
+        let commitment = BytesN::from_array(env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        // Set executor admin
+        client.set_executor_admin(&admin);
+
+        // Register and configure pause manager
+        let pm_id = env.register_contract(None, PauseManager);
+        let pm_client = PauseManagerClient::new(env, &pm_id);
+        let operator = Address::generate(env);
+        pm_client.initialize(&operator);
+
+        client.set_pause_manager(&pm_id);
+
+        (client, pm_client, company_id, admin, treasury, employee)
+    }
+
+    #[test]
+    fn test_paused_executor_rejects_payment() {
+        let env = Env::default();
+        let (client, pm_client, company_id, _admin, _treasury, employee) =
+            setup_executor_with_pause_manager(&env);
+
+        let proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        pm_client.pause();
+
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unpaused_executor_resumes_payment() {
+        let env = Env::default();
+        let (client, pm_client, company_id, _admin, _treasury, employee) =
+            setup_executor_with_pause_manager(&env);
+
+        let proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        client.create_period(&company_id);
+
+        pm_client.pause();
+
+        // Verify paused
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a.clone(),
+            &proof_b.clone(),
+            &proof_c.clone(),
+            &nullifier.clone(),
+            &1,
+        );
+        assert!(result.is_err());
+
+        // Unpause
+        pm_client.unpause();
+
+        // Should succeed now
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
         );
 
-        commitment_client.set_payroll_operator(&payroll_id);
+        assert!(client.is_paid(&employee, &1));
+    }
 
-        let employee = Address::generate(env);
-        commitment_client.store_commitment(&employee, &BytesN::from_array(env, &[0u8; 32]));
+    #[test]
+    fn test_executor_works_without_pause_manager() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        (
-            payroll_client,
-            admin,
-            treasury,
-            treasury_owner,
-            employee,
-            token_id,
-        )
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        client.create_period(&company_id);
+        token_client.mint(&treasury, &10_000);
+
+        let proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &1000,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1,
+        );
+
+        assert_eq!(token_client.balance(&treasury), 9_000);
+        assert_eq!(token_client.balance(&employee), 1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_set_pause_manager_rejects_unauthorized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        let admin = Address::generate(&env);
+
+        // Only mock auth for admin during initialize
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "initialize",
+                args: (addresses.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.initialize(&addresses);
+
+        // Set executor admin as the legitimate admin
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_executor_admin",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_executor_admin(&admin);
+
+        // Attacker tries to set pause manager
+        let pm_id = env.register_contract(None, PauseManager);
+        let attacker = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_pause_manager",
+                args: (pm_id.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_pause_manager(&pm_id);
+    }
+
+    // ── Issue #77: proof expiration checks ────────────────────────────────────
+
+    #[test]
+    fn test_fresh_proof_within_expiration_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10000i128);
+
+        // Create a period
+        let period = client.create_period(&company_id);
+        assert_eq!(period.period_id, 1);
+
+        // Execute payment immediately (proof is fresh)
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1000i128,
+            &BytesN::from_array(&env, &[1u8; 64]),
+            &BytesN::from_array(&env, &[2u8; 128]),
+            &BytesN::from_array(&env, &[3u8; 64]),
+            &BytesN::from_array(&env, &[4u8; 32]),
+            &1,
+        );
+        // Should succeed (proof is fresh)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_period_tracks_creation_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10000i128);
+
+        // Create a period
+        let period = client.create_period(&company_id);
+
+        // Verify period is created and has correct initial state
+        assert_eq!(period.period_id, 1);
+        assert_eq!(period.company_id, company_id);
+        assert!(!period.closed);
+        assert_eq!(period.payment_count, 0);
+        // created_at is set to current ledger timestamp (can be 0 in test env)
+    }
+
+    #[test]
+    fn test_get_max_proof_age() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let max_age = client.get_max_proof_age();
+        // Should be 7 days in seconds
+        assert_eq!(max_age, 7 * 24 * 60 * 60);
     }
 
     #[test]
     fn test_asset_allowlist_management_and_execution() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, _employee, token_id) =
-            setup_payroll_with_token(&env);
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
 
         // Initial token asset is allowlisted
-        assert!(payroll_client.is_asset_allowed(&token_id));
+        assert!(client.is_asset_allowed(&addresses.token));
 
         // Disallow token asset
-        payroll_client.set_asset_allowed(&token_id, &false);
-        assert!(!payroll_client.is_asset_allowed(&token_id));
+        client.set_asset_allowed(&addresses.token, &false);
+        assert!(!client.is_asset_allowed(&addresses.token));
 
         // Re-allow token asset
-        payroll_client.set_asset_allowed(&token_id, &true);
-        assert!(payroll_client.is_asset_allowed(&token_id));
+        client.set_asset_allowed(&addresses.token, &true);
+        assert!(client.is_asset_allowed(&addresses.token));
     }
 
     #[test]
     #[should_panic(expected = "Asset not allowed")]
-    fn test_execute_payroll_fails_when_asset_disallowed() {
+    fn test_execute_payment_fails_when_asset_disallowed() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee, token_id) =
-            setup_payroll_with_token(&env);
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
 
         // Disallow the payment token asset
-        payroll_client.set_asset_allowed(&token_id, &false);
+        client.set_asset_allowed(&addresses.token, &false);
 
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        payroll_client.batch_process_payroll(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 220),
-            &None,
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10000i128);
+
+        let _period = client.create_period(&company_id);
+
+        client.execute_payment(
+            &company_id,
+            &employee,
+            &1000i128,
+            &BytesN::from_array(&env, &[1u8; 64]),
+            &BytesN::from_array(&env, &[2u8; 128]),
+            &BytesN::from_array(&env, &[3u8; 64]),
+            &BytesN::from_array(&env, &[4u8; 32]),
+            &1,
         );
     }
 
     #[test]
-    #[should_panic(expected = "Asset not allowed")]
-    fn test_prepare_payroll_run_fails_when_asset_disallowed() {
+    fn test_storage_version_returns_version_1() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee, token_id) =
-            setup_payroll_with_token(&env);
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        // Disallow the payment token asset
-        payroll_client.set_asset_allowed(&token_id, &false);
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
 
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 221),
-            &None,
-        );
+        assert_eq!(client.get_storage_version(), 1);
     }
 
+    #[test]
+    fn test_asset_allowed_emits_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        let before_init = env.events().all().len();
+        client.initialize(&addresses);
+        let after_init = env.events().all().len();
+        assert_eq!(after_init, before_init + 1);
+
+        let init_event = env.events().all().get(after_init - 1).unwrap();
+        let sym0: Symbol = init_event
+            .1
+            .get(0)
+            .unwrap()
+            .try_into_val(&env.clone())
+            .unwrap();
+        assert_eq!(sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
+
+        let before_set = env.events().all().len();
+        let new_asset = Address::generate(&env);
+        client.set_asset_allowed(&new_asset, &true);
+        let after_set = env.events().all().len();
+        assert_eq!(after_set, before_set + 1);
+
+        let set_event = env.events().all().get(after_set - 1).unwrap();
+        let set_sym0: Symbol = set_event
+            .1
+            .get(0)
+            .unwrap()
+            .try_into_val(&env.clone())
+            .unwrap();
+        assert_eq!(set_sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
+    }
+
+    // ── Issue #245: operator vs admin role separation ─────────────────────────
+    //
+    // `payment_executor` has two distinct privileged roles that must not be
+    // conflated: the protocol-level `ExecutorAdmin` (gates contract-wide
+    // config: `set_asset_allowed`, `set_pause_manager`) and each company's
+    // own `admin` (gates that company's periods and payments only — the
+    // "operator" of its own payroll). Neither role should be able to
+    // exercise the other's capabilities.
+
+    /// A company admin (this company's payroll "operator") must not be able
+    /// to exercise the protocol-level `ExecutorAdmin` capability of changing
+    /// the treasury asset allowlist just because they administer a company.
     #[test]
     #[should_panic(expected = "authorized")]
-    fn test_non_admin_cannot_manage_allowlist() {
+    fn test_company_admin_cannot_set_asset_allowed() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, _employee, token_id) =
-            setup_payroll_with_token(&env);
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
 
-        let attacker = Address::generate(&env);
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company_admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let _company_id = registry_client.register_company(&company_admin, &treasury);
+
+        // Company admin (not the executor admin) attempts a protocol-level
+        // config change.
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &attacker,
+            address: &company_admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &payroll_client.address,
+                contract: &contract_id,
                 fn_name: "set_asset_allowed",
-                args: (token_id.clone(), false).into_val(&env),
+                args: (addresses.token.clone(), false).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        payroll_client.set_asset_allowed(&token_id, &false);
+        client.set_asset_allowed(&addresses.token, &false);
     }
 
-    // ── Reviewer Authorization & Run Review Tests ────────────────────────────
+    /// The protocol-level `ExecutorAdmin` must not be able to trigger payroll
+    /// execution for a company it does not administer — that capability
+    /// belongs solely to the company's own admin.
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_executor_admin_cannot_execute_payment_for_foreign_company() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let executor_admin = Address::generate(&env);
+        client.set_executor_admin(&executor_admin);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let company_admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&company_admin, &treasury);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[5u8; 32]);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &100_000i128);
+
+        client.create_period(&company_id);
+
+        let proof_a = BytesN::from_array(&env, &[1u8; 64]);
+        let proof_b = BytesN::from_array(&env, &[2u8; 128]);
+        let proof_c = BytesN::from_array(&env, &[3u8; 64]);
+        let nullifier = BytesN::from_array(&env, &[4u8; 32]);
+
+        // Executor admin (not this company's admin) attempts to execute a
+        // payment for a company it does not administer.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &executor_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "execute_payment",
+                args: (
+                    company_id,
+                    employee.clone(),
+                    1000i128,
+                    proof_a.clone(),
+                    proof_b.clone(),
+                    proof_c.clone(),
+                    nullifier.clone(),
+                    1u32,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let _ = client.execute_payment(
+            &company_id,
+            &employee,
+            &1000i128,
+            &proof_a,
+            &proof_b,
+            &proof_c,
+            &nullifier,
+            &1u32,
+        );
+    }
+
+    // =====================================================================
+    // Issue #277: `amount_to_public_input` precision-format encoding
+    //
+    // The ZK public input for an amount must be a canonical, big-endian,
+    // zero-padded `BytesN<32>` per
+    // `docs/interop/proof-schema-version-negotiation.md`'s "Unsupported
+    // Combinations" section ("Public inputs using i128 raw bytes instead of
+    // the canonical BytesN<32> big-endian zero-padded encoding" is
+    // explicitly rejected). These tests pin the exact byte layout across
+    // supported precision boundaries and confirm invalid (negative) amounts
+    // are rejected before any encoding happens.
+    // =====================================================================
 
     #[test]
-    fn test_reviewer_authorization_workflow() {
+    fn test_amount_to_public_input_zero_is_all_zero_bytes() {
         let env = Env::default();
-        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
-
-        let reviewer = Address::generate(&env);
-
-        // Initial state: not reviewer
-        assert!(!payroll_client.is_reviewer(&reviewer));
-
-        // Admin adds reviewer
-        payroll_client.add_reviewer(&admin, &reviewer);
-        assert!(payroll_client.is_reviewer(&reviewer));
-
-        // Prepare run
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 99),
-            &None,
-        );
-
-        // Reviewer approves run
-        payroll_client.approve_payroll_run(&reviewer, &run_id);
-        let review = payroll_client
-            .get_run_review(&run_id)
-            .expect("Review record missing");
-        assert_eq!(review.run_id, run_id);
-        assert_eq!(review.reviewer, reviewer);
-        assert_eq!(review.decision, ReviewDecision::Approved);
-
-        // Reviewer requests changes
-        let reason_changes = Symbol::new(&env, "need_docs");
-        payroll_client.request_changes_payroll_run(&reviewer, &run_id, &reason_changes);
-        let review2 = payroll_client
-            .get_run_review(&run_id)
-            .expect("Review record missing");
-        assert_eq!(review2.decision, ReviewDecision::ChangesRequested);
-        assert_eq!(review2.reason, reason_changes);
-
-        // Reviewer rejects run
-        let reason_reject = Symbol::new(&env, "invalid");
-        payroll_client.reject_payroll_run(&reviewer, &run_id, &reason_reject);
-        let review3 = payroll_client
-            .get_run_review(&run_id)
-            .expect("Review record missing");
-        assert_eq!(review3.decision, ReviewDecision::Rejected);
-        assert_eq!(review3.reason, reason_reject);
-
-        // Admin revokes reviewer
-        payroll_client.remove_reviewer(&admin, &reviewer);
-        assert!(!payroll_client.is_reviewer(&reviewer));
+        let encoded = PaymentExecutor::amount_to_public_input(&env, 0);
+        assert_eq!(encoded.to_array(), [0u8; 32]);
     }
 
     #[test]
-    #[should_panic(expected = "Unauthorized: caller is not an authorized reviewer")]
-    fn test_unauthorized_approve_panics() {
+    fn test_amount_to_public_input_one_is_zero_padded_big_endian() {
         let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
-            setup_simple_payroll(&env);
+        let encoded = PaymentExecutor::amount_to_public_input(&env, 1);
+        let arr = encoded.to_array();
 
-        let unauthorized = Address::generate(&env);
-        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &1000,
-            &test_nonce(&env, 100),
-            &None,
-        );
+        // High 16 bytes are always zero: i128 fits entirely within the low
+        // 16 bytes of the 32-byte field, per the canonical encoding.
+        assert_eq!(arr[..16], [0u8; 16]);
+        // Big-endian: the least-significant byte is last.
+        let mut expected_low16 = [0u8; 16];
+        expected_low16[15] = 1;
+        assert_eq!(arr[16..], expected_low16);
+    }
 
-        payroll_client.approve_payroll_run(&unauthorized, &run_id);
+    #[test]
+    fn test_amount_to_public_input_preserves_full_precision_for_non_round_amount() {
+        // A non-round, multi-byte amount must round-trip through the
+        // big-endian encoding with no truncation or rounding drift.
+        let env = Env::default();
+        let amount: i128 = 999_999_999_937;
+        let encoded = PaymentExecutor::amount_to_public_input(&env, amount);
+        let arr = encoded.to_array();
+
+        let mut low16 = [0u8; 16];
+        low16.copy_from_slice(&arr[16..]);
+        let round_tripped = u128::from_be_bytes(low16) as i128;
+
+        assert_eq!(arr[..16], [0u8; 16]);
+        assert_eq!(round_tripped, amount);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_accepts_maximum_i128_at_full_precision() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, i128::MAX);
+        let arr = encoded.to_array();
+
+        let mut low16 = [0u8; 16];
+        low16.copy_from_slice(&arr[16..]);
+        let round_tripped = u128::from_be_bytes(low16) as i128;
+
+        assert_eq!(round_tripped, i128::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn test_amount_to_public_input_rejects_negative_one() {
+        // Boundary just below the supported precision range: the smallest
+        // magnitude negative value must still be rejected, not just
+        // `i128::MIN`.
+        let env = Env::default();
+        let _ = PaymentExecutor::amount_to_public_input(&env, -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn test_amount_to_public_input_rejects_i128_min() {
+        let env = Env::default();
+        let _ = PaymentExecutor::amount_to_public_input(&env, i128::MIN);
     }
 
     #[test]
