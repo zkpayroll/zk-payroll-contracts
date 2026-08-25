@@ -82,12 +82,8 @@ fn test_admin_handover_success_and_role_transfer() {
     assert!(client.get_pending_admin_handover().is_none());
 
     // Verify new admin can perform admin operations
-    let draft_id = client.create_run_draft(
-        &pending_admin,
-        &10_000i128,
-        &5u32,
-        &Symbol::new(&env, "Q1"),
-    );
+    let draft_id =
+        client.create_run_draft(&pending_admin, &10_000i128, &5u32, &Symbol::new(&env, "Q1"));
     assert_eq!(draft_id, 1);
 }
 

@@ -786,7 +786,10 @@ pub fn emit_audit_pause_manager_set(e: &Env, pause_manager: Address) {
 /// Emitted when locked payroll funds are updated (#343).
 pub fn emit_locked_funds_updated(e: &Env, asset: Address, locked_amount: i128) {
     e.events().publish(
-        (Symbol::new(e, "treasury"), Symbol::new(e, "locked_funds_updated")),
+        (
+            Symbol::new(e, "treasury"),
+            Symbol::new(e, "locked_funds_updated"),
+        ),
         (asset, locked_amount),
     );
 }
