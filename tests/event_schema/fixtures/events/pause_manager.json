@@ -1,0 +1,53 @@
+{
+  "pause_manager.initialized": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PauseManager" },
+      { "type": "Symbol", "value": "initialized" }
+    ],
+    "data": [{ "name": "operator", "type": "Address" }]
+  },
+  "pause_manager.paused": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PauseManager" },
+      { "type": "Symbol", "value": "paused" }
+    ],
+    "data": []
+  },
+  "pause_manager.unpaused": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PauseManager" },
+      { "type": "Symbol", "value": "unpaused" }
+    ],
+    "data": []
+  },
+  "pause_manager.op_proposed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PauseManager" },
+      { "type": "Symbol", "value": "op_proposed" }
+    ],
+    "data": [
+      { "name": "current", "type": "Address" },
+      { "name": "new_op", "type": "Address" }
+    ]
+  },
+  "pause_manager.op_rotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PauseManager" },
+      { "type": "Symbol", "value": "op_rotated" }
+    ],
+    "data": [{ "name": "new_op", "type": "Address" }]
+  },
+  "pause_manager.op_cancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PauseManager" },
+      { "type": "Symbol", "value": "op_cancelled" }
+    ],
+    "data": [{ "name": "current", "type": "Address" }]
+  }
+}

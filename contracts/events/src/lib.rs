@@ -148,6 +148,52 @@ pub fn emit_run_executed(e: &Env, run_id: u64, total_spend: i128) {
     );
 }
 
+/// Emitted when a long-running payroll batch starts checkpointing.
+pub fn emit_batch_checkpoint_started(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+    checkpoint_index: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "batch_checkpoint_started")),
+        (employer, batch_root, asset, execution_nonce, checkpoint_index),
+    );
+}
+
+/// Emitted when a payroll batch checkpoint advances without exposing salary rows.
+pub fn emit_batch_checkpoint_updated(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+    checkpoint_index: u32,
+    state: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "batch_checkpoint_updated")),
+        (employer, batch_root, asset, execution_nonce, checkpoint_index, state),
+    );
+}
+
+/// Emitted when a batch checkpoint is resumed after an interruption.
+pub fn emit_batch_checkpoint_resumed(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+    checkpoint_index: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "batch_checkpoint_resumed")),
+        (employer, batch_root, asset, execution_nonce, checkpoint_index),
+    );
+}
+
 /// Emitted when a payroll run draft is created.
 pub fn emit_draft_created(e: &Env, draft_id: u64, admin: Address, period_label: Symbol) {
     e.events().publish(
@@ -224,6 +270,30 @@ pub fn emit_admin_rotated(e: &Env, old_admin: Address, new_admin: Address) {
 pub fn emit_admin_rotation_cancelled(e: &Env, caller: Address) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "admin_rot_cancel")),
+        caller,
+    );
+}
+
+/// Emitted when an admin handover is requested (#339).
+pub fn emit_admin_handover_requested(e: &Env, current_admin: Address, pending_admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "admin_handover_req")),
+        (current_admin, pending_admin),
+    );
+}
+
+/// Emitted when an admin handover is accepted (#339).
+pub fn emit_admin_handover_accepted(e: &Env, old_admin: Address, new_admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "admin_handover_acc")),
+        (old_admin, new_admin),
+    );
+}
+
+/// Emitted when a pending admin handover is cancelled (#339).
+pub fn emit_admin_handover_cancelled(e: &Env, caller: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "admin_handover_can")),
         caller,
     );
 }
@@ -702,4 +772,79 @@ pub fn emit_audit_summary_exported(
 pub fn emit_audit_pause_manager_set(e: &Env, pause_manager: Address) {
     e.events()
         .publish((Symbol::new(e, "AuditPauseMgrSet"),), (pause_manager,));
+}
+
+/// Emitted when locked payroll funds are updated (#343).
+pub fn emit_locked_funds_updated(e: &Env, asset: Address, locked_amount: i128) {
+    e.events().publish(
+        (Symbol::new(e, "treasury"), Symbol::new(e, "locked_funds_updated")),
+        (asset, locked_amount),
+    );
+}
+
+/// Emitted when a multi-signer quorum approval payload reference is consumed (#334).
+pub fn emit_quorum_consumed(e: &Env, batch_root: BytesN<32>, employer: Address, nonce: BytesN<32>) {
+    e.events().publish(
+        (Symbol::new(e, "signing"), Symbol::new(e, "quorum_consumed")),
+        (batch_root, employer, nonce),
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Compliance Hold Events (#333)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a compliance hold is placed on a batch, employee group, or employer (#333).
+pub fn emit_compliance_hold_placed(
+    e: &Env,
+    hold_id: u64,
+    scope: Symbol,
+    target: Address,
+    reason_code: Symbol,
+    placed_by: Address,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "hold_placed")),
+        (hold_id, scope, target, reason_code, placed_by),
+    );
+}
+
+/// Emitted when a compliance hold is released (#333).
+pub fn emit_compliance_hold_released(e: &Env, hold_id: u64, released_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "hold_released")),
+        (hold_id, released_by),
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Funding Reservation Expiry Events (#337)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a funding reservation expires (#337).
+pub fn emit_reservation_expired(e: &Env, asset: Address, amount: i128, expired_at: u64) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "reservation_expired")),
+        (asset, amount, expired_at),
+    );
+}
+
+/// Emitted when an expired reservation is released and funds become available (#337).
+pub fn emit_reservation_expiry_released(e: &Env, asset: Address, released_amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "reservation_released")),
+        (asset, released_amount),
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Payroll Archival Events (#335)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a payroll run is archived for long-term reporting (#335).
+pub fn emit_payroll_run_archived(e: &Env, run_id: u64, archived_by: Address, archive_reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_archived")),
+        (run_id, archived_by, archive_reason),
+    );
 }

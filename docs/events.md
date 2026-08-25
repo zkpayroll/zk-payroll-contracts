@@ -463,6 +463,23 @@ Settlement receipts provide stable references for reporting after a run is
 marked reconciled. The payload intentionally omits private payroll values such
 as total amount, individual payment amounts, employee count, and employee
 addresses.
+### Payroll lifecycle ordering
+
+For the cross-call payroll lifecycle, consumers should process the legacy
+`payroll` topics in this order:
+
+1. `run_prepared` - a pending run was created.
+2. `run_approved` - an authorized reviewer recorded approval.
+3. `payment_executed` - an individual payment completed.
+4. `run_executed` - the execution batch completed.
+5. `reconciliation_updated` with `Reconciled` - settlement completed.
+
+The preparation and execution calls allocate separate run IDs in the current
+API. Consumers must use the event payload run ID when correlating records and
+must not infer correlation from event position alone. Event-ordering tests
+assert topics only; they do not log or export payroll amounts, commitments, or
+employee addresses. A failed or unauthorized approval reverts and emits no
+`run_approved` event.
 
 #### `payroll / deposit`
 

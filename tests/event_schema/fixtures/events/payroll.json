@@ -1,0 +1,329 @@
+{
+  "payroll.initialized": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "initialized" }
+    ],
+    "data": [
+      { "name": "admin", "type": "Address" },
+      { "name": "token", "type": "Address" },
+      { "name": "verifier", "type": "Address" },
+      { "name": "commitment", "type": "Address" },
+      { "name": "treasury", "type": "Address" },
+      { "name": "treasury_owner", "type": "Address" }
+    ]
+  },
+  "payroll.pause_mgr_set": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "pause_mgr_set" }
+    ],
+    "data": [{ "name": "pause_manager", "type": "Address" }]
+  },
+  "payroll.deposit": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "deposit" }
+    ],
+    "data": [
+      { "name": "from", "type": "Address" },
+      { "name": "amount", "type": "i128" },
+      { "name": "deposit_id", "type": "BytesN<32>" }
+    ]
+  },
+  "payroll.meta_committed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "meta_committed" }
+    ],
+    "data": [{ "name": "metadata_hash", "type": "BytesN<32>" }]
+  },
+  "payroll.meta_bound": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "meta_bound" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "metadata_hash", "type": "BytesN<32>" }
+    ]
+  },
+  "payroll.draft_committed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_committed" }
+    ],
+    "data": [{ "name": "draft_hash", "type": "BytesN<32>" }]
+  },
+  "payroll.emrg_requested": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "emrg_requested" }
+    ],
+    "data": [
+      { "name": "amount", "type": "i128" },
+      { "name": "recipient", "type": "Address" }
+    ]
+  },
+  "payroll.emrg_approved": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "emrg_approved" }
+    ],
+    "data": [
+      { "name": "amount", "type": "i128" },
+      { "name": "recipient", "type": "Address" }
+    ]
+  },
+  "payroll.emrg_cancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "emrg_cancelled" }
+    ],
+    "data": [{ "name": "caller", "type": "Address" }]
+  },
+  "payroll.run_prepared": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_prepared" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "total_spend", "type": "i128" }
+    ]
+  },
+  "payroll.run_cancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_cancelled" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "total_amount", "type": "i128" }
+    ]
+  },
+  "payroll.payment_executed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "payment_executed" }
+    ],
+    "data": [
+      { "name": "employee", "type": "Address" },
+      { "name": "amount", "type": "i128" }
+    ]
+  },
+  "payroll.run_executed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_executed" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "total_spend", "type": "i128" }
+    ]
+  },
+  "payroll.draft_created": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_created" }
+    ],
+    "data": [
+      { "name": "draft_id", "type": "u64" },
+      { "name": "admin", "type": "Address" },
+      { "name": "period_label", "type": "Symbol" }
+    ]
+  },
+  "payroll.draft_amended": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_amended" }
+    ],
+    "data": [
+      { "name": "draft_id", "type": "u64" },
+      { "name": "new_total", "type": "i128" },
+      { "name": "amendment_count", "type": "u32" }
+    ]
+  },
+  "payroll.draft_finalized": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_finalized" }
+    ],
+    "data": [
+      { "name": "draft_id", "type": "u64" },
+      { "name": "total", "type": "i128" },
+      { "name": "amendment_count", "type": "u32" }
+    ]
+  },
+  "payroll.draft_submitted": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_submitted" }
+    ],
+    "data": [
+      { "name": "draft_id", "type": "u64" },
+      { "name": "admin", "type": "Address" }
+    ]
+  },
+  "payroll.draft_cancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_cancelled" }
+    ],
+    "data": [
+      { "name": "draft_id", "type": "u64" },
+      { "name": "admin", "type": "Address" }
+    ]
+  },
+  "payroll.draft_expired": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "draft_expired" }
+    ],
+    "data": [
+      { "name": "draft_id", "type": "u64" },
+      { "name": "admin", "type": "Address" }
+    ]
+  },
+  "payroll.reconciliation_updated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "reconciliation_updated" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "status", "type": "Symbol" }
+    ]
+  },
+  "payroll.admin_proposed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "admin_proposed" }
+    ],
+    "data": [
+      { "name": "current_admin", "type": "Address" },
+      { "name": "new_admin", "type": "Address" }
+    ]
+  },
+  "payroll.admin_rotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "admin_rotated" }
+    ],
+    "data": [
+      { "name": "old_admin", "type": "Address" },
+      { "name": "new_admin", "type": "Address" }
+    ]
+  },
+  "payroll.admin_rot_cancel": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "admin_rot_cancel" }
+    ],
+    "data": [{ "name": "caller", "type": "Address" }]
+  },
+  "payroll.treasury_proposed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "treasury_proposed" }
+    ],
+    "data": [
+      { "name": "current_owner", "type": "Address" },
+      { "name": "new_owner", "type": "Address" }
+    ]
+  },
+  "payroll.treasury_rotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "treasury_rotated" }
+    ],
+    "data": [
+      { "name": "old_owner", "type": "Address" },
+      { "name": "new_owner", "type": "Address" }
+    ]
+  },
+  "payroll.treas_rot_cancel": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "treas_rot_cancel" }
+    ],
+    "data": [{ "name": "caller", "type": "Address" }]
+  },
+  "payroll.reviewer_added": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "reviewer_added" }
+    ],
+    "data": [{ "name": "reviewer", "type": "Address" }]
+  },
+  "payroll.reviewer_removed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "reviewer_removed" }
+    ],
+    "data": [{ "name": "reviewer", "type": "Address" }]
+  },
+  "payroll.run_approved": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_approved" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "reviewer", "type": "Address" }
+    ]
+  },
+  "payroll.run_rejected": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_rejected" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "reviewer", "type": "Address" },
+      { "name": "reason", "type": "Symbol" }
+    ]
+  },
+  "payroll.changes_requested": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "changes_requested" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "reviewer", "type": "Address" },
+      { "name": "reason", "type": "Symbol" }
+    ]
+  }
+}

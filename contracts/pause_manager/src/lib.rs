@@ -197,7 +197,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn initialize(&self, operator: &Address) {
         let _: () = self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "initialize"),
             Self::single_arg(self.0, operator.clone()),
         );
@@ -205,7 +205,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn pause(&self) {
         let _: () = self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "pause"),
             Self::empty_args(self.0),
         );
@@ -213,7 +213,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn unpause(&self) {
         let _: () = self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "unpause"),
             Self::empty_args(self.0),
         );
@@ -221,7 +221,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn is_paused(&self) -> bool {
         self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "is_paused"),
             Self::empty_args(self.0),
         )
@@ -229,7 +229,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn propose_operator_rotation(&self, current_operator: &Address, new_operator: &Address) {
         let _: () = self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "propose_operator_rotation"),
             Self::two_args(self.0, current_operator.clone(), new_operator.clone()),
         );
@@ -237,7 +237,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn accept_operator_rotation(&self, new_operator: &Address) {
         let _: () = self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "accept_operator_rotation"),
             Self::single_arg(self.0, new_operator.clone()),
         );
@@ -245,7 +245,7 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn cancel_operator_rotation(&self, current_operator: &Address) {
         let _: () = self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "cancel_operator_rotation"),
             Self::single_arg(self.0, current_operator.clone()),
         );
@@ -253,15 +253,15 @@ impl<'a> PauseManagerClient<'a> {
 
     pub fn get_pending_operator_rotation(&self) -> Option<PendingOperatorRotation> {
         self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "get_pending_operator_rotation"),
-            (),
+            Self::empty_args(self.0),
         )
     }
 
     pub fn get_operator(&self) -> Address {
         self.0.invoke_contract(
-            &self.1,
+            self.1,
             &Symbol::new(self.0, "get_operator"),
             Self::empty_args(self.0),
         )
