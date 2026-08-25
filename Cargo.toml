@@ -9,6 +9,7 @@ members = [
     "tests/storage",
     "tests/access-control",
     "tests/events",
+    "tests/disputes",
 ]
 exclude = ["fuzz"]
 

@@ -176,6 +176,39 @@ pub struct RunReview {
     pub reviewed_at: u64,
 }
 
+// ── Issue #342: dispute freeze/thaw controls ─────────────────────────────────
+
+/// Lifecycle status of a payroll dispute.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DisputeStatus {
+    Active = 0,
+    Resolved = 1,
+}
+
+/// A payroll dispute record scoped to an employer, period, and batch root.
+///
+/// While `status` is `Active`, the associated payroll run is frozen: it
+/// cannot be finalized, archived, or pruned. Only the admin or an address
+/// granted the dispute-authority role may open or resolve a dispute.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Dispute {
+    pub dispute_id: u64,
+    pub run_id: u64,
+    pub employer: Address,
+    pub period: Symbol,
+    pub batch_root: BytesN<32>,
+    pub opened_by: Address,
+    pub opened_at: u64,
+    pub open_reason: Symbol,
+    pub status: DisputeStatus,
+    pub resolved_by: Option<Address>,
+    pub resolved_at: Option<u64>,
+    pub resolution_reason: Option<Symbol>,
+}
+
 // ── Issue #91: privileged-role rotation ──────────────────────────────────────
 
 /// Pending two-step role-rotation request.
@@ -337,6 +370,14 @@ pub enum DataKey {
     AuthorizedReviewer(Address),
     /// Review record for a payroll run.
     RunReview(u64),
+    /// Auto-increment counter for dispute IDs (#342).
+    DisputeCounter,
+    /// Dispute record scoped to employer, period, and batch root (#342).
+    Dispute(u64),
+    /// Marks the id of the active dispute freezing a given run, if any (#342).
+    ActiveDisputeForRun(u64),
+    /// Authorized dispute-resolution role registration (#342).
+    DisputeAuthority(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1069,6 +1110,7 @@ impl Payroll {
     pub fn finalize_payroll_run(e: Env, admin: Address, run_id: u64) {
         Self::require_not_paused(&e);
         Self::validate_run_id(run_id);
+        Self::require_run_not_disputed(&e, run_id);
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1941,6 +1983,7 @@ impl Payroll {
     /// cannot trigger execution, state transitions, or treasury mutations.
     pub fn archive_payroll_run(e: Env, admin: Address, run_id: u64) {
         Self::validate_run_id(run_id);
+        Self::require_run_not_disputed(&e, run_id);
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -1988,6 +2031,252 @@ impl Payroll {
     pub fn is_run_archived(e: Env, run_id: u64) -> bool {
         Self::validate_run_id(run_id);
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+    }
+
+    /// Permanently remove an archived payroll run's on-chain record once its
+    /// retention window has been satisfied off-chain (issue #342).
+    ///
+    /// This is an irreversible cleanup action. It requires the run to have
+    /// already been archived, and is blocked while the run has an active
+    /// dispute, mirroring the guards on `finalize_payroll_run` and
+    /// `archive_payroll_run`.
+    pub fn prune_payroll_run(e: Env, admin: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
+        Self::require_run_not_disputed(&e, run_id);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if !e.storage().persistent().has(&DataKey::ArchivedRun(run_id)) {
+            panic!("Run must be archived before it can be pruned");
+        }
+
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PayrollRun(run_id));
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ArchivedRun(run_id));
+
+        payroll_events::emit_run_pruned(&e, run_id, admin);
+    }
+
+    // ── Issue #342: dispute freeze/thaw controls ─────────────────────────────
+
+    /// Grant dispute-authority permission to an address. Only the admin may call.
+    ///
+    /// Dispute authorities may open and resolve disputes in addition to the
+    /// admin, who always implicitly holds this permission.
+    pub fn add_dispute_authority(e: Env, admin: Address, authority: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::DisputeAuthority(authority.clone()), &true);
+
+        payroll_events::emit_dispute_authority_added(&e, authority);
+    }
+
+    /// Revoke dispute-authority permission from an address. Only the admin may call.
+    pub fn remove_dispute_authority(e: Env, admin: Address, authority: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        e.storage()
+            .persistent()
+            .remove(&DataKey::DisputeAuthority(authority.clone()));
+
+        payroll_events::emit_dispute_authority_removed(&e, authority);
+    }
+
+    /// Return `true` if the address may open or resolve disputes: the
+    /// contract admin, or an address explicitly granted dispute authority.
+    pub fn is_dispute_authority(e: Env, address: Address) -> bool {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if address == addrs.admin {
+            return true;
+        }
+        e.storage()
+            .persistent()
+            .get(&DataKey::DisputeAuthority(address))
+            .unwrap_or(false)
+    }
+
+    fn require_dispute_authority(e: &Env, caller: &Address) {
+        if !Self::is_dispute_authority(e.clone(), caller.clone()) {
+            panic!("Unauthorized: caller is not an authorized dispute authority");
+        }
+    }
+
+    /// Panic if `run_id` has an active dispute. Called by every irreversible
+    /// lifecycle action (finalize, archive, prune) to enforce the freeze.
+    fn require_run_not_disputed(e: &Env, run_id: u64) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::ActiveDisputeForRun(run_id))
+        {
+            panic!("Run is under active dispute");
+        }
+    }
+
+    /// Open a dispute against a payroll run, freezing finalization, archival,
+    /// and pruning until the dispute is resolved (issue #342).
+    ///
+    /// Only the admin or an authorized dispute authority may open a dispute.
+    /// The dispute record is scoped to the employer (contract admin), the
+    /// caller-supplied period label, and the batch root committed for the
+    /// disputed run, giving auditors a stable reference for the freeze.
+    pub fn open_dispute(
+        e: Env,
+        caller: Address,
+        run_id: u64,
+        period: Symbol,
+        batch_root: BytesN<32>,
+        reason: Symbol,
+    ) -> u64 {
+        Self::validate_run_id(run_id);
+        Self::validate_symbol_not_empty(&e, &period, "period");
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_symbol_not_empty(&e, &reason, "reason");
+        Self::require_dispute_authority(&e, &caller);
+        caller.require_auth();
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        // The run must exist, either pending finalization or already executed.
+        if !e.storage().persistent().has(&DataKey::PayrollRun(run_id))
+            && !e.storage().persistent().has(&DataKey::PendingRun(run_id))
+        {
+            panic!("Run not found");
+        }
+
+        if e.storage()
+            .persistent()
+            .has(&DataKey::ActiveDisputeForRun(run_id))
+        {
+            panic!("Run already has an active dispute");
+        }
+
+        let dispute_id = e
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeCounter)
+            .unwrap_or(0u64)
+            + 1;
+        e.storage()
+            .persistent()
+            .set(&DataKey::DisputeCounter, &dispute_id);
+
+        let dispute = Dispute {
+            dispute_id,
+            run_id,
+            employer: addrs.admin,
+            period: period.clone(),
+            batch_root: batch_root.clone(),
+            opened_by: caller.clone(),
+            opened_at: e.ledger().timestamp(),
+            open_reason: reason.clone(),
+            status: DisputeStatus::Active,
+            resolved_by: None,
+            resolved_at: None,
+            resolution_reason: None,
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::Dispute(dispute_id), &dispute);
+        e.storage()
+            .persistent()
+            .set(&DataKey::ActiveDisputeForRun(run_id), &dispute_id);
+
+        payroll_events::emit_dispute_opened(
+            &e, dispute_id, run_id, caller, period, batch_root, reason,
+        );
+
+        dispute_id
+    }
+
+    /// Resolve (thaw) an active dispute with a reason code (issue #342).
+    ///
+    /// Only the admin or an authorized dispute authority may resolve a
+    /// dispute. Once resolved, the associated run is no longer frozen and
+    /// normal lifecycle actions (finalize, archive, prune) may continue.
+    pub fn resolve_dispute(e: Env, caller: Address, dispute_id: u64, resolution_reason: Symbol) {
+        Self::validate_symbol_not_empty(&e, &resolution_reason, "resolution_reason");
+        Self::require_dispute_authority(&e, &caller);
+        caller.require_auth();
+
+        let key = DataKey::Dispute(dispute_id);
+        let mut dispute: Dispute = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Dispute not found");
+        if dispute.status != DisputeStatus::Active {
+            panic!("Dispute is not active");
+        }
+
+        dispute.status = DisputeStatus::Resolved;
+        dispute.resolved_by = Some(caller.clone());
+        dispute.resolved_at = Some(e.ledger().timestamp());
+        dispute.resolution_reason = Some(resolution_reason.clone());
+        e.storage().persistent().set(&key, &dispute);
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDisputeForRun(dispute.run_id));
+
+        payroll_events::emit_dispute_resolved(
+            &e,
+            dispute_id,
+            dispute.run_id,
+            caller,
+            resolution_reason,
+        );
+    }
+
+    /// Return the dispute record for the given dispute id.
+    pub fn get_dispute(e: Env, dispute_id: u64) -> Dispute {
+        e.storage()
+            .persistent()
+            .get(&DataKey::Dispute(dispute_id))
+            .expect("Dispute not found")
+    }
+
+    /// Return `true` if the run currently has an active dispute, `false` otherwise.
+    pub fn is_run_disputed(e: Env, run_id: u64) -> bool {
+        e.storage()
+            .persistent()
+            .has(&DataKey::ActiveDisputeForRun(run_id))
     }
 
     // ── Reviewer Authorization & Run Review Entrypoints ─────────────────────
