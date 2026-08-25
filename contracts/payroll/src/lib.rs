@@ -1,9 +1,9 @@
 #![no_std]
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
 };
-use soroban_sdk::xdr::ToXdr;
 
 use pause_manager::PauseManagerClient;
 use proof_verifier::ProofVerifierClient;
@@ -2112,7 +2112,9 @@ impl Payroll {
 
     /// Check if a quorum approval payload hash has already been consumed.
     pub fn is_quorum_consumed(e: Env, quorum_hash: BytesN<32>) -> bool {
-        e.storage().persistent().has(&DataKey::ConsumedQuorum(quorum_hash))
+        e.storage()
+            .persistent()
+            .has(&DataKey::ConsumedQuorum(quorum_hash))
     }
 
     /// Verify signer quorum requirements and consume the quorum approval reference once.
@@ -2149,11 +2151,17 @@ impl Payroll {
             panic!("Quorum approval payload already consumed: replay rejected");
         }
 
-        e.storage()
-            .persistent()
-            .set(&DataKey::ConsumedQuorum(q_hash.clone()), &e.ledger().timestamp());
+        e.storage().persistent().set(
+            &DataKey::ConsumedQuorum(q_hash.clone()),
+            &e.ledger().timestamp(),
+        );
 
-        payroll_events::emit_quorum_consumed(&e, payload.batch_root, payload.employer, payload.nonce);
+        payroll_events::emit_quorum_consumed(
+            &e,
+            payload.batch_root,
+            payload.employer,
+            payload.nonce,
+        );
         q_hash
     }
 
@@ -5072,7 +5080,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Insufficient available treasury balance: funds locked for pending payroll")]
+    #[should_panic(
+        expected = "Insufficient available treasury balance: funds locked for pending payroll"
+    )]
     fn test_withdrawal_guardrails_rejects_underfunding() {
         let env = Env::default();
         let (payroll_client, _admin, treasury, treasury_owner, employee, token_id) =
