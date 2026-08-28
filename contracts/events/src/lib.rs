@@ -81,6 +81,17 @@ pub fn emit_pause_manager_set(e: &Env, pause_manager: Address) {
     );
 }
 
+/// Emitted when an asset is added to or removed from the employer allowlist.
+///
+/// The event contains only the asset address and resulting status; it does not
+/// expose payroll data or other employer-sensitive information.
+pub fn emit_asset_allowlist_updated(e: &Env, asset: Address, allowed: bool) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "asset_allowlist_updated")),
+        (asset, allowed),
+    );
+}
+
 /// Emitted when a deposit is made to the treasury.
 pub fn emit_deposit(e: &Env, from: Address, amount: i128, deposit_id: BytesN<32>) {
     e.events().publish(

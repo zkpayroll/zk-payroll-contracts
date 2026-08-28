@@ -1245,7 +1245,9 @@ impl Payroll {
         addrs.admin.require_auth();
         e.storage()
             .persistent()
-            .set(&DataKey::AllowedAsset(asset), &allowed);
+            .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
+
+        payroll_events::emit_asset_allowlist_updated(&e, asset, allowed);
     }
 
     /// Check if an asset token is allowlisted for payroll payouts.

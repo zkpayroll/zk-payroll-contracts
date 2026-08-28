@@ -22,6 +22,17 @@
     ],
     "data": [{ "name": "pause_manager", "type": "Address" }]
   },
+  "payroll.asset_allowlist_updated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "asset_allowlist_updated" }
+    ],
+    "data": [
+      { "name": "asset", "type": "Address" },
+      { "name": "allowed", "type": "bool" }
+    ]
+  },
   "payroll.deposit": {
     "schema_version": 1,
     "topics": [
