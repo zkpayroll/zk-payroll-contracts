@@ -1,0 +1,20 @@
+[package]
+name = "init_matrix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+payroll = { path = "../../contracts/payroll" }
+payroll_registry = { path = "../../contracts/payroll_registry" }
+payment_executor = { path = "../../contracts/payment_executor" }
+pause_manager = { path = "../../contracts/pause_manager" }
+token = { path = "../../contracts/token" }
+proof_verifier = { path = "../../contracts/proof_verifier" }
+salary_commitment = { path = "../../contracts/salary_commitment" }
+audit_module = { path = "../../contracts/audit_module" }
