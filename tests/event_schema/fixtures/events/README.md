@@ -1,8 +1,8 @@
-# Event schema fixtures
+#Event schema fixtures
 
 This directory pins the wire shape of every Soroban event emitted through
 `payroll_events` (`contracts/events/src/lib.rs`). Each file is a JSON map,
-keyed `"<contract-domain>.<event>"`, of the topics and payload fields that
+keyed `"<contract-domain>.<event>`, of the topics and payload fields that
 event is expected to publish:
 
 ```json
@@ -25,27 +25,48 @@ event is expected to publish:
   carries a per-invocation identifier (`Address`, `u64`, ...) only records
   its `type`, since the value is naturally dynamic.
 - `data` is also positional — Soroban events don't carry field names on the
-  wire — so `name` here is documentation for the humans and tools consuming
+  wire — `nome` here is documentation for the humans and tools consuming
   the event; only `type` (and field order/count) is actually enforced.
 - `schema_version` is a per-event, repo-only counter. It is **not** part of
   the on-chain payload; consumers key off event name plus shape. Bump it
   whenever you deliberately change that event's topics or data, so a
   changelog entry / consumer migration is easy to find in git blame.
 
+## Running the tests
+
+The event schema snapshot tests are run with:
+
+```shs
+cargo test -p event_schema_snapshots
+```
+
+To run a single domain's tests or a specific case, use a test filter:
+
+```shs
+cargo test -p event_schema_snapshots payroll       # all payroll tests
+cargo test -p event_schema_snapshots case_deposit  # specific scenario
+```
+
+## Privacy expectations
+
+When adding or updating fixtures, use only dummy data — no real addresses,
+names, or secrets. `Address` values should come from a test keypair or be
+clearly fake. This repo is public and fixtures are read by many tools.
+
 ## How the tests use this
 
-`tests/event_schema/src/<domain>.rs` has one `#[test]` per contract domain.
+`tests/event_schema/src/<domain>.rs` has one `[#test]` per contract domain.
 Each test:
 
-1. Calls the real `payroll_events::emit_*` helper with fixture input values,
+1. Calls the real `payroll_events::emit_*`  helper with fixture input values,
    inside a registered dummy contract frame.
 2. Asserts the published **topics** equal the exact tuple the emitter
-   constructs (`assert_eq!` on the whole `Vec<Val>` — order, count, and
+   constructs (`assert_eq`! on the whole `Vec<Val>` — order, count, and
    values all have to match).
 3. Decodes the published **data** into the exact Rust type the emitter
    passed in and asserts it back against the input values. If a field is
    added, removed, reordered, or retyped, this decode fails (or the
-   `assert_eq!` after it fails).
+   `assert_eql` after it fails).
 4. Builds an `EventSchema` description of what it just observed and
    compares the whole domain's map against the checked-in fixture here.
 
@@ -75,6 +96,8 @@ to what gets published on-chain.
 1. Add the `emit_*` helper to `contracts/events/src/lib.rs`.
 2. Add a `case_*` function for it in the right `tests/event_schema/src/<domain>.rs`
    (or create a new domain module + fixture file for a new contract), following
-   the existing cases as a template.
+   the existing cases as a template. Name the function descriptively:
+   `case_<event_name>_<scenario>`, e.g. `case_deposit_happy_path` or
+   `case_deposit_empty_amount`.
 3. Add its entry to the fixture JSON with `schema_version: 1`.
 4. Run `cargo test -p event_schema_snapshots`.
