@@ -181,7 +181,13 @@ fn test_execution_with_correct_treasury_context() {
     assert_eq!(token.balance(&employee), 1_000);
 }
 
+/// The placeholder token contract omits `from.require_auth()` on transfer
+/// (see `contracts/token`), so a mismatched-treasury authorization cannot be
+/// rejected at the token layer today. A production SEP-41 token enforces it.
+/// This test pins the current behavior so swapping in a real token surfaces
+/// here.
 #[test]
+fn test_mismatched_treasury_auth_not_enforced_by_placeholder_token() {
 #[ignore = "SEP-41 token auth check requires SEP-41 WASM contract"]
 #[should_panic(expected = "authorized")]
 fn test_mismatched_treasury_account_rejection() {
@@ -234,6 +240,17 @@ fn test_mismatched_treasury_account_rejection() {
         &proof_c,
         &nullifier,
         &1,
+    );
+
+    // The transfer went through despite the mismatched authorization entry,
+    // because the placeholder token never checks `from`'s authorization.
+    assert_eq!(
+        ::token::TokenClient::new(&env, &token_id).balance(&treasury),
+        99_000
+    );
+    assert_eq!(
+        ::token::TokenClient::new(&env, &token_id).balance(&employee),
+        1_000
     );
 }
 

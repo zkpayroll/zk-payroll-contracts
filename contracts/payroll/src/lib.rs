@@ -1,6 +1,8 @@
 #![no_std]
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, token as soroban_token,
+    Address, BytesN, Env, String, Symbol, Vec,
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
     Env, Symbol, Vec,
 };
@@ -373,6 +375,37 @@ pub enum CompanyState {
     Incomplete,
 }
 
+// ── Issue: deployment parameter validation ───────────────────────────────────
+
+/// Maximum accepted length for a recorded network id / passphrase label.
+pub const MAX_NETWORK_ID_LEN: u32 = 128;
+
+/// Typed errors raised when deployment parameters fail validation.
+///
+/// These surface misconfiguration at initialization time — before any payroll
+/// operation can run — instead of letting a bad wiring break payments later.
+#[contracterror]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DeploymentError {
+    /// `initialize` was called on an already-initialized contract.
+    AlreadyInitialized = 1,
+    /// Two dependency contracts (token, verifier, commitment) were wired to
+    /// the same address.
+    DuplicateDependency = 2,
+    /// A role address (admin, treasury, treasury_owner) points at one of the
+    /// wired dependency contracts.
+    RoleConflictsWithDependency = 3,
+    /// A deployment parameter points at the payroll contract itself.
+    SelfReference = 4,
+    /// A role-gated configuration call was made before `initialize`.
+    NotInitialized = 5,
+    /// The network id has already been recorded; it is immutable once set.
+    NetworkIdAlreadySet = 6,
+    /// The supplied network id is empty or exceeds `MAX_NETWORK_ID_LEN`.
+    InvalidNetworkId = 7,
+}
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 // Issue #196: Storage Key Versioning Strategy
 //
@@ -492,6 +525,10 @@ pub enum DataKey {
     CompanyState,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
+    /// Allowed payout assets (mirrors payment_executor #175).
+    AllowedAsset(Address),
+    /// Recorded target network id for this deployment (one-time, immutable).
+    NetworkId,
     /// Allowed asset token map for payroll payouts.
     AllowedAsset(Address),
     /// Checkpointed payroll batch execution keyed by a privacy-safe tuple.
@@ -640,6 +677,45 @@ pub struct ComplianceEvidencePointer {
 #[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl Payroll {
+    /// Validate deployment parameters before any state is written.
+    fn validate_deployment_params(
+        e: &Env,
+        admin: &Address,
+        token: &Address,
+        verifier: &Address,
+        commitment: &Address,
+        treasury: &Address,
+        treasury_owner: &Address,
+    ) -> Result<(), DeploymentError> {
+        let self_addr = e.current_contract_address();
+
+        // No deployment parameter may point at the payroll contract itself.
+        for addr in [admin, token, verifier, commitment, treasury, treasury_owner] {
+            if *addr == self_addr {
+                return Err(DeploymentError::SelfReference);
+            }
+        }
+
+        // Dependency contracts must be distinct deployments. Wiring two roles
+        // to one contract (e.g. reusing the token ID for the verifier) is a
+        // classic deploy-time copy/paste mistake that silently breaks payroll.
+        if token == verifier || token == commitment || verifier == commitment {
+            return Err(DeploymentError::DuplicateDependency);
+        }
+
+        // Role addresses must not collide with wired dependency contracts;
+        // otherwise authorization for one role would implicitly gate another
+        // component. Role addresses may be accounts or standalone contracts
+        // and may coincide with each other (single-operator deployments).
+        for role in [admin, treasury, treasury_owner] {
+            if *role == *token || *role == *verifier || *role == *commitment {
+                return Err(DeploymentError::RoleConflictsWithDependency);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn initialize(
         e: Env,
         admin: Address,
@@ -648,11 +724,20 @@ impl Payroll {
         commitment: Address,
         treasury: Address,
         treasury_owner: Address,
-    ) {
+    ) -> Result<(), DeploymentError> {
         let key = DataKey::Addresses;
         if e.storage().persistent().has(&key) {
-            panic!("Already initialized")
+            return Err(DeploymentError::AlreadyInitialized);
         }
+        Self::validate_deployment_params(
+            &e,
+            &admin,
+            &token,
+            &verifier,
+            &commitment,
+            &treasury,
+            &treasury_owner,
+        )?;
         let addrs = ContractAddresses {
             admin,
             token,
@@ -679,6 +764,53 @@ impl Payroll {
             addrs.treasury.clone(),
             treasury_owner.clone(),
         );
+        Ok(())
+    }
+
+    /// Record the target network identifier for this deployment (one-time).
+    ///
+    /// Soroban contracts cannot read the network passphrase on-chain, so the
+    /// operator records it explicitly at deployment time. Post-deploy checks
+    /// compare this value against `stellar network ls` output to catch
+    /// wrong-network deployments. The value is public configuration data —
+    /// never include private payroll values here.
+    ///
+    /// Requires authorization from the configured `admin`.
+    pub fn set_network_id(
+        e: Env,
+        admin: Address,
+        network_id: String,
+    ) -> Result<(), DeploymentError> {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .ok_or(DeploymentError::NotInitialized)?;
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if e.storage().persistent().has(&DataKey::NetworkId) {
+            return Err(DeploymentError::NetworkIdAlreadySet);
+        }
+        if network_id.is_empty() || network_id.len() > MAX_NETWORK_ID_LEN {
+            return Err(DeploymentError::InvalidNetworkId);
+        }
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::NetworkId, &network_id);
+        e.events().publish(
+            (Symbol::new(&e, "network_id_set"),),
+            (network_id, e.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    /// Read the recorded network identifier, if one was set.
+    pub fn get_network_id(e: Env) -> Option<String> {
+        e.storage().persistent().get(&DataKey::NetworkId)
 
         // #360 — initialize storage version tracking
         Self::initialize_storage_version(&e);
@@ -2112,6 +2244,8 @@ impl Payroll {
         e.storage().persistent().get(&DataKey::PendingRun(run_id))
     }
 
+    /// Cancel a pending payroll run without executing any payments
+    /// (issues #198 and #218).
     /// Finalize a pending payroll run, executing payments and creating a
     /// permanent `PayrollRun` record (issue #198).
     ///
@@ -2187,6 +2321,7 @@ impl Payroll {
     ///
     /// Only the admin may cancel. The `reason` is recorded in the event for
     /// audit trails. No funds are transferred; this is a pure cleanup operation.
+    /// The run is marked `Cancelled` in the canonical run-state timeline (#159).
     ///
     /// Finalized runs cannot be cancelled retroactively. The run nonce remains
     /// permanently spent after cancellation (one-time-use for audit integrity).
@@ -2242,6 +2377,10 @@ impl Payroll {
 
         // Remove the pending run from storage if present
         e.storage().persistent().remove(&pending_key);
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
+
+        // Record the canonical Cancelled state for SDK/dashboard consumers
+        // (#159) so the run timeline reflects the cancellation.
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
 
         // Emit cancellation event with reason for audit trail
@@ -3281,6 +3420,15 @@ impl Payroll {
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
     }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::token::{Token, TokenClient};
+    use pause_manager::{PauseManager, PauseManagerClient};
+    use proof_verifier::{ProofVerifier, VerificationKey};
+    use salary_commitment::SalaryCommitmentContract;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Env, IntoVal};
     // ── Reviewer Authorization & Run Review Entrypoints ─────────────────────
 
     /// Grant reviewer authorization to an address. Only the admin may call.
@@ -5976,6 +6124,16 @@ mod tests {
             &test_nonce(&env, 220),
             &None,
         );
+        assert_eq!(
+            payroll_client.get_payroll_run_state(&run_id),
+            PayrollRunState::Submitted
+        );
+
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "state_check"));
+        assert_eq!(
+            payroll_client.get_payroll_run_state(&run_id),
+            PayrollRunState::Cancelled
+        );
     }
 
     #[test]
@@ -5997,6 +6155,7 @@ mod tests {
             &test_nonce(&env, 221),
             &None,
         );
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "terminal_guard"));
     }
 
     #[test]
@@ -6120,6 +6279,8 @@ mod tests {
             &0u32,
         );
 
+        // Cancel the pending run
+        payroll_client.cancel_payroll_run(&admin, &run_id, &Symbol::new(&env, "cleanup"));
         let checkpoint = payroll_client.get_batch_execution_checkpoint(
             &employer,
             &batch_root,
@@ -6892,6 +7053,7 @@ mod tests {
     #[test]
     fn test_nonce_monotonicity_sequential_nonces_accepted() {
         let env = Env::default();
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
         let (payroll_client, admin, _treasury, _treasury_owner, employee) =
             setup_simple_payroll(&env);
 
@@ -6900,6 +7062,12 @@ mod tests {
         let (proofs1, amounts1, employees1) = single_payment_batch(&env, &employee, 1000);
         payroll_client.prepare_payroll_run(&proofs1, &amounts1, &employees1, &1000, &nonce1, &None);
 
+    #[test]
+    #[should_panic(expected = "Deposit already processed")]
+    fn test_deposit_replay_with_same_id_rejected() {
+        let env = Env::default();
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
         // Second nonce (greater than first) should also be accepted
         let nonce2 = test_nonce(&env, 2);
         let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 1000);
@@ -6916,6 +7084,7 @@ mod tests {
     #[test]
     fn test_nonce_monotonicity_repeated_nonce_rejected() {
         let env = Env::default();
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee) =
         let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
             setup_simple_payroll(&env);
 

@@ -136,16 +136,17 @@ fn make_proof(env: &Env, seed: u8) -> (BytesN<64>, BytesN<128>, BytesN<64>, Byte
 // 1. execute_batch_payroll partial failure — earlier payments survive
 // ===========================================================================
 
-/// execute_batch_payroll is NOT atomic.
+/// A failed batch call is reverted atomically by the host.
 ///
-/// When the second employee in a three-employee batch has a duplicate nullifier
-/// (ProofAlreadyUsed), the batch returns Err. The first employee, processed
-/// before the failure, must remain permanently paid. The third employee, never
-/// reached, must remain unpaid.
+/// When the second employee in a three-employee batch has a duplicate
+/// nullifier (ProofAlreadyUsed), the batch returns Err and the host rolls
+/// back every state change made by the batch — including the first
+/// employee's payment. Only payments from earlier successful calls (the
+/// pre-seeded second employee) persist.
 ///
-/// Recovery: open a new period and pay the third employee successfully.
+/// Recovery: pay the missed employees individually in the same open period.
 #[test]
-fn test_batch_partial_failure_earlier_payments_are_permanent() {
+fn test_batch_failure_reverts_fully_and_individual_payments_recover() {
     let env = Env::default();
     let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
         setup_system(&env);
@@ -205,6 +206,31 @@ fn test_batch_partial_failure_earlier_payments_are_permanent() {
     );
     assert_eq!(result.unwrap_err().unwrap(), PaymentError::ProofAlreadyUsed);
 
+    // Execution is atomic: the errored batch call is reverted wholesale by
+    // the host, so no employee touched by the batch is marked paid.
+    assert!(
+        !executor.is_paid(&emp1, &1),
+        "failed batch must not leave emp1 paid"
+    );
+    assert!(
+        !executor.is_paid(&emp3, &1),
+        "emp3 must be unpaid after batch failure"
+    );
+    // Only the pre-seeded emp2 payment (its own successful call) survives.
+    assert_eq!(executor.get_total_paid(&company_id), 300);
+
+    // Recovery: pay the missed employees individually in the same open period.
+    executor.execute_payment(&company_id, &emp1, &100, &pa1, &pb1, &pc1, &null1, &1);
+    executor.execute_payment(&company_id, &emp3, &200, &pa3, &pb3, &pc3, &null3, &1);
+    assert!(
+        executor.is_paid(&emp1, &1),
+        "emp1 must be recoverable individually"
+    );
+    assert!(
+        executor.is_paid(&emp3, &1),
+        "emp3 must be recoverable individually"
+    );
+    assert_eq!(executor.get_total_paid(&company_id), 100 + 300 + 200);
     // Batch execution returned an error — frame reverted cleanly.
     assert!(
         !executor.is_paid(&emp1, &1),
@@ -479,9 +505,10 @@ fn test_payment_against_nonexistent_period_leaves_state_pristine() {
 // 5. Partial batch failure — remaining employees can be paid individually
 // ===========================================================================
 
-/// After a batch fails mid-way (index 1 is AlreadyPaid), the operator
-/// can recover by paying the remaining employee individually in the same
-/// open period without any double-payment.
+/// After a batch fails mid-way (index 1 is AlreadyPaid), the host reverts
+/// the whole batch atomically. The operator can still recover by paying
+/// the missed employees individually in the same open period without any
+/// double-payment.
 #[test]
 fn test_partial_batch_failure_individual_retry_completes_payroll() {
     let env = Env::default();
@@ -552,6 +579,16 @@ fn test_partial_batch_failure_individual_retry_completes_payroll() {
     );
     assert_eq!(batch_err.unwrap_err().unwrap(), PaymentError::AlreadyPaid);
 
+    // Execution is atomic: the errored batch call is reverted wholesale by
+    // the host, so emp1 (index 0) is not marked paid either.
+    assert!(
+        !executor.is_paid(&emp1, &1),
+        "failed batch must not leave emp1 paid"
+    );
+    // emp3 was never reached.
+    assert!(
+        !executor.is_paid(&emp3, &1),
+        "emp3 must be unpaid after batch failure"
     // Batch execution returned an error — frame reverted cleanly.
     assert!(
         !executor.is_paid(&emp1, &1),
@@ -561,7 +598,10 @@ fn test_partial_batch_failure_individual_retry_completes_payroll() {
         !executor.is_paid(&emp3, &1),
         "emp3 remains unpaid after batch rollback"
     );
+    // Only the pre-paid emp2 amount survives.
+    assert_eq!(executor.get_total_paid(&company_id), 400);
 
+    // Recovery: pay the missed employees individually in the same open period.
     // Recovery: pay emp1 and emp3 individually in the same open period.
     executor.execute_payment(&company_id, &emp1, &100, &pa1, &pb1, &pc1, &null1, &1);
     executor.execute_payment(&company_id, &emp3, &200, &pa3, &pb3, &pc3, &null3, &1);

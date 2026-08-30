@@ -134,7 +134,7 @@ intervention.
 |----------|-----------------------|-------------------|
 | **Submitting v0 proofs (3 public inputs) to a v1 verifier** | VK `ic.len()` mismatch; `verify_payment_proof` returns `false` immediately | Regenerate proofs against the v1 circuit; see proof schema doc |
 | **Calling `initialize_verifier` a second time on an existing verifier** | Contract panics with `"Verifier already initialized"` | Deploy a new `proof_verifier` instance; no in-place re-init |
-| **Calling `initialize` on `payroll` or `payment_executor` a second time** | Contracts panic with `"Already initialized"` | Contracts are single-init; a new deployment is required for address changes |
+| **Calling `initialize` on `payroll` or `payment_executor` a second time** | Contracts return `DeploymentError::AlreadyInitialized (1)` (typed error, not a string panic) | Contracts are single-init; a new deployment is required for address changes |
 | **Routing payments to a period that has been closed** | `payment_executor` returns `PaymentError::PeriodClosed (5)` | Open a new period; closed periods are immutable |
 | **Reading a `PayrollRun` by a run_id that was never written** | `payroll` panics with `"Run not found"` | Run IDs are contiguous starting at 1; query `RunCounter` to find the valid range |
 | **Using a revoked salary commitment for proof generation** | `salary_commitment.is_commitment_active()` returns `false`; on-chain proof will fail | Fetch the current active commitment via `get_commitment` before generating proofs |

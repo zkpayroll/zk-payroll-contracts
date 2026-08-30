@@ -509,7 +509,9 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 
 **Behavior**: One-time initialization. Stores dependent contract addresses.
 
-**Errors**: `panic!("Already initialized")`
+**Errors**: `DeploymentError::AlreadyInitialized (1)` if already initialized;
+`DuplicateDependency (2)` if any two of the dependency addresses are equal;
+`SelfReference (3)` if a dependency address equals the contract's own address.
 
 ---
 
@@ -700,7 +702,39 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 | `treasury`   | `Address` | Treasury address       |
 | **Returns**  | `()`      | void                   |
 
-**Errors**: `panic!("Already initialized")`
+**Behavior**: One-time initialization. Validates deployment parameters before
+storing them (self-reference, duplicate dependencies, role/dependency
+collisions).
+
+**Errors**: `DeploymentError::AlreadyInitialized (1)` if already initialized;
+`DuplicateDependency (2)` if any two of the dependency addresses are equal;
+`SelfReference (3)` if a dependency address equals the contract's own address;
+`RoleConflictsWithDependency (4)` if an admin/role address collides with a
+dependency address.
+
+---
+
+#### `set_network_id`
+
+| Field        | Type     | Description                              |
+|--------------|----------|------------------------------------------|
+| `admin`      | `Address`| Payroll admin                            |
+| `network_id` | `String` | Network identifier (1..=128 bytes)       |
+| **Returns**  | `()`     | void                                     |
+
+**Behavior**: Optional, one-time, admin-gated. Stores a network identifier and
+emits a `network_id_set` event.
+
+**Errors**: `DeploymentError::NotInitialized (5)` if the contract is not yet
+initialized; panics `"Unauthorized"` if the caller is not the admin;
+`NetworkIdAlreadySet (6)` on repeat; `InvalidNetworkId (7)` if empty or longer
+than `MAX_NETWORK_ID_LEN` (128 bytes).
+
+---
+
+#### `get_network_id`
+
+**Returns**: `Option<String>` — the stored network identifier, if set.
 
 ---
 
@@ -1321,6 +1355,25 @@ All events are published via `env.events().publish(topic, payload)`.
 | `InsufficientScope`  | 5    | Scope insufficient for requested operation     |
 | `CommitmentMismatch` | 6    | Hash does not match stored commitment          |
 | `InvalidViewKey`     | 7    | Supplied key does not match stored record      |
+
+### Typed Errors (`DeploymentError`)
+
+Raised by `payroll::initialize`, `payroll::set_network_id`, and
+`payment_executor::initialize`.
+
+| Variant                        | Code | Description                                              |
+|--------------------------------|------|----------------------------------------------------------|
+| `AlreadyInitialized`           | 1    | Contract has already been initialized                    |
+| `DuplicateDependency`          | 2    | Two dependency addresses are identical                   |
+| `RoleConflictsWithDependency`  | 3    | An admin/role address collides with a dependency address |
+| `SelfReference`                | 4    | A dependency address equals the contract's own address   |
+| `NotInitialized`               | 5    | Contract not yet initialized (`set_network_id`)          |
+| `NetworkIdAlreadySet`          | 6    | Network identifier already stored (one-time)             |
+| `InvalidNetworkId`             | 7    | Empty or > `MAX_NETWORK_ID_LEN` (128) bytes              |
+
+> Note: variant discriminants differ per contract — `payment_executor`
+> defines only `AlreadyInitialized (1)`, `DuplicateDependency (2)`,
+> `SelfReference (3)`.
 
 ---
 

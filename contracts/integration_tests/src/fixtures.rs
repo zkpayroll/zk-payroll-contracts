@@ -5,12 +5,14 @@
 ///
 /// All fixtures are deterministic and documented in `docs/fixtures-guide.md`.
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 #[allow(dead_code, clippy::module_inception)]
 pub mod fixtures {
     use soroban_sdk::{Address, BytesN, Env};
 
     // ── Company Fixtures ─────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub struct CompanyFixture {
         pub id: u64,
         pub name: &'static str,
@@ -33,6 +35,7 @@ pub mod fixtures {
 
     // ── Employee Fixtures ────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub struct EmployeeFixture {
         pub id: u8,
         pub name: &'static str,
@@ -104,6 +107,7 @@ pub mod fixtures {
 
     // ── Payroll Period Fixtures ──────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub struct PayrollPeriodFixture {
         pub label: &'static str,
         pub company_id: u64,
@@ -153,18 +157,34 @@ pub mod fixtures {
 
         #[test]
         fn test_employee_fixtures_load() {
-            assert_eq!(ALICE.salary, 5000);
-            assert_eq!(ALICE.name, "Alice");
-            assert_eq!(ALICE.blinding_factor, 123);
-
-            assert_eq!(BOB.salary, 3500);
-            assert_eq!(CAROL.salary, 7200);
+            let fixtures = [
+                (&ALICE, 5000u64, "Alice", 123u8),
+                (&BOB, 3500, "Bob", 156),
+                (&CAROL, 7200, "Carol", 189),
+                (&DAVID, 4500, "David", 111),
+                (&EMMA, 6000, "Emma", 222),
+                (&FRANK, 5500, "Frank", 233),
+            ];
+            for (fixture, salary, name, blinding_factor) in fixtures {
+                assert_eq!(fixture.salary, salary);
+                assert_eq!(fixture.name, name);
+                assert_eq!(fixture.blinding_factor, blinding_factor);
+            }
         }
 
         #[test]
         #[allow(clippy::assertions_on_constants)]
         fn test_payroll_period_fixtures() {
             assert_eq!(Q1_2024_ACME.company_id, 0);
+
+            let periods = [
+                (&Q1_2024_ACME, false),
+                (&Q2_2024_ACME, true),
+                (&FEB_2024_GLOBALPAY, false),
+            ];
+            for (period, active) in periods {
+                assert_eq!(period.is_active, active);
+            }
             assert!(!Q1_2024_ACME.is_active);
 
             assert!(Q2_2024_ACME.is_active);

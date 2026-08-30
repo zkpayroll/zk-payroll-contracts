@@ -234,14 +234,49 @@ mod e2e {
             "Payment nullifier must be recorded after execution"
         );
 
-        // 4. Events must have been emitted across the full flow:
-        //      - `CompanyRegistered`  from payroll_registry.register_company (setup)
-        //      - `CommitmentUpdated`  from salary_commitment.store_commitment (onboarding)
-        //      - `EmployeeAdded`      from payroll_registry.add_employee    (onboarding)
-        //      - `CommitmentLocked`   from salary_commitment.lock_commitment_updates (execution)
-        //      - `payment_executed`   from payroll.batch_process_payroll     (execution)
-        //      - `run_executed`       from payroll.batch_process_payroll     (execution)
+        // 4. Events must have been emitted across the full flow, in order:
+        //      - ("payroll", "initialized")     from payroll.initialize (setup)
+        //      - `PayrollOperatorSet`           from salary_commitment.set_payroll_operator (setup)
+        //      - `CompanyRegistered`            from payroll_registry.register_company (setup)
+        //      - `CommitmentUpdated`            from salary_commitment.store_commitment (onboarding)
+        //      - `EmployeeAdded`                from payroll_registry.add_employee (onboarding)
+        //      - `NullifierRecorded`            from salary_commitment.record_nullifier (execution)
+        //      - `CommitmentLocked`             from salary_commitment.lock_commitment_updates (execution)
+        //      - ("payroll", "payment_executed") from payroll.batch_process_payroll (execution)
+        //      - ("payroll", "run_state")       from payroll state timeline (execution)
+        //      - ("payroll", "run_executed")    from payroll.batch_process_payroll (execution)
         let events = env.events().all();
+        assert_eq!(
+            events.len(),
+            10,
+            "Expected 10 events across setup, onboarding, and execution"
+        );
+
+        let expected_topics: [&str; 10] = [
+            "initialized",
+            "PayrollOperatorSet",
+            "CompanyRegistered",
+            "CommitmentUpdated",
+            "EmployeeAdded",
+            "NullifierRecorded",
+            "CommitmentLocked",
+            "payment_executed",
+            "run_state",
+            "run_executed",
+        ];
+        for (i, expected) in expected_topics.iter().enumerate() {
+            let topics = events.get(i as u32).unwrap().1;
+            // Payroll-domain events use a ("payroll", <name>) topic tuple;
+            // every other emitter puts the event name first.
+            let first: Symbol = topics.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+            let idx = if first == Symbol::new(env, "payroll") {
+                1
+            } else {
+                0
+            };
+            let sym: Symbol = topics.get(idx).unwrap().try_into_val(&env.clone()).unwrap();
+            assert_eq!(sym, Symbol::new(env, expected), "event at position {}", i);
+        }
         let mut has_company = false;
         let mut has_commitment = false;
         let mut has_employee = false;

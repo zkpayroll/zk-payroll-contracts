@@ -28,6 +28,7 @@ use payroll::{Payroll, PayrollClient, ReconciliationStatus};
 use payroll_registry::{EmployeeStatus, PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
 use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, Vec};
 use token::{Token, TokenClient};
 
@@ -202,6 +203,8 @@ impl MigrationContext {
             &self.treasury_owner,
         );
 
+        // Note: audit_module has no admin-init entrypoint; its view-key
+        // granter is the contract's own address and state begins empty.
         // Initialize audit module
         let _audit_client = AuditModuleClient::new(env, &self.audit_id);
     }
@@ -209,6 +212,12 @@ impl MigrationContext {
     /// Write full v1 state: companies, employees, payroll runs, audit permissions, etc.
     pub fn write_full_v1_state(&mut self, env: &Env) {
         env.mock_all_auths();
+        env.ledger().set_timestamp(1_700_000_000);
+
+        // Give the simulated chain a deterministic non-zero time so records
+        // that carry timestamps (payroll runs, emergency requests) hold
+        // realistic values.
+        use soroban_sdk::testutils::Ledger as _;
         env.ledger().set_timestamp(1_700_000_000);
 
         // ── Companies ────────────────────────────────────────────────────
@@ -253,6 +262,8 @@ impl MigrationContext {
         let _old_commitment = state_fixtures::seed_bytes32(env, 0xAA);
         let new_commitment = state_fixtures::seed_bytes32(env, 0xBB);
         commitment_client.update_commitment(&self.alice, &new_commitment);
+        // Keep the registry's copy of the active commitment in sync with the
+        // rotated commitment stored in the commitment contract.
         registry_client.update_commitment(&self.company_id_1, &self.alice, &new_commitment);
         self.has_commitment_history = true;
 
@@ -387,6 +398,19 @@ impl MigrationContext {
     pub fn run_migration_v1_to_v2(&self, env: &Env) {
         env.mock_all_auths();
 
+        // In a real migration, this function would:
+        // 1. Read old-format keys (e.g., DataKey::Company(u64))
+        // 2. Transform data to new format
+        // 3. Write new-format keys (e.g., DataKey::CompanyV2(u64))
+        // 4. Optionally remove old keys after migration window
+
+        // For now, assert that pre-upgrade data is still accessible. Each
+        // block is gated on the corresponding state flag so reduced setups
+        // (which populate only part of the state) still work.
+        if self.has_companies {
+            let registry_client = PayrollRegistryClient::new(env, &self.registry_id);
+            let _company1 = registry_client.get_company(&self.company_id_1);
+            let _company2 = registry_client.get_company(&self.company_id_2);
         // For now, assert that pre-upgrade data is still accessible.
         if self.has_companies {
             let registry_client = PayrollRegistryClient::new(env, &self.registry_id);

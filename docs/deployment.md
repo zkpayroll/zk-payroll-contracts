@@ -62,6 +62,27 @@ soroban contract invoke --id $EXECUTOR_ID --source admin --network testnet -- \
   --verifier $VERIFIER_ID
 ```
 
+### Deployment Parameter Validation
+
+Both `payroll::initialize` and `payment_executor::initialize` validate their
+parameters before storing them. A call that violates a rule fails with a typed
+`DeploymentError` (instead of silently wiring a broken deployment):
+
+| Rule | Error |
+| --- | --- |
+| The contract has already been initialized | `AlreadyInitialized` (1) |
+| Any two dependency addresses are identical | `DuplicateDependency` (2) |
+| A dependency address equals the contract's own address | `SelfReference` (3) |
+| (`payroll` only) An admin/role address collides with a dependency address | `RoleConflictsWithDependency` (4) |
+
+The `payroll` contract additionally exposes an optional, admin-gated,
+one-time network identifier:
+
+- `set_network_id(admin, network_id)` — stores a non-empty string of at most
+  `MAX_NETWORK_ID_LEN` (128) bytes; rejects repeats with
+  `NetworkIdAlreadySet` and over-long values with `InvalidNetworkId`.
+- `get_network_id()` — returns the stored identifier, if any.
+
 ## 4. Smoke-test Checklist
 1. **Register a Company**: Use the registry contract to create a new company record (providing the admin and treasury addresses).
 2. **Add an Employee**: Add a Poseidon commitment for a test employee under the registered company.

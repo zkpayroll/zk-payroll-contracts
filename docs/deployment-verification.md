@@ -221,8 +221,9 @@ Each contract has a distinct init contract. Confirm the post-init state:
   `initialize_verifier(vk)` have both been called (each panics with
   `Already initialized` / `Verifier already initialized` on a second call).
   Confirm via `get_verifier_admin` and `get_verification_key` (see §3 / §4).
-- [ ] **`payment_executor`** — `initialize(addresses)` has been called (panics
-  `Already initialized` on repeat) and `set_executor_admin(admin)` has been
+- [ ] **`payment_executor`** — `initialize(addresses)` has been called (a
+  repeat call returns `DeploymentError::AlreadyInitialized (1)`) and
+  `set_executor_admin(admin)` has been
   set (panics `Executor admin already set` on repeat). Confirm storage schema
   version and the initial allowed asset:
 
@@ -249,7 +250,8 @@ stellar contract invoke --id $PAUSE_ID --source $SOURCE --network $NETWORK -- is
 **Expected output:** `false` on a fresh deploy.
 
 - [ ] **`payroll`** — `initialize(admin, token, verifier, commitment, treasury,
-  treasury_owner)` has been called (panics `Already initialized` on repeat)
+  treasury_owner)` has been called (a repeat call returns
+  `DeploymentError::AlreadyInitialized (1)`)
   and the run counter starts at `0`. `set_pause_manager(pause_manager)` has
   been wired if pausability is required. Confirm via the indirect admin check
   in §3.6 (there is no `get_addresses` getter).
