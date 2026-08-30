@@ -115,6 +115,22 @@ impl SalaryCommitmentContract {
         payroll_events::emit_payroll_operator_set(&env, operator);
     }
 
+    /// Remove the delegated payroll operator. Only the HR admin may call.
+    /// Emits a privacy-safe event indicating the operator address that was
+    /// removed. This does not disclose any payroll-sensitive values.
+    pub fn remove_payroll_operator(env: Env) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        let key = DataKey::PayrollOperator;
+        let prev: Option<Address> = env.storage().persistent().get(&key);
+        if prev.is_none() {
+            panic!("No payroll operator set");
+        }
+        let prev_op = prev.unwrap();
+        env.storage().persistent().remove(&key);
+        payroll_events::emit_payroll_operator_removed(&env, prev_op);
+    }
+
     /// Lock an employee's commitment to prevent updates via `update_commitment`
     /// or `rotate_commitment`. Both the HR admin and the delegated payroll
     /// operator may call.
@@ -736,6 +752,42 @@ mod tests {
 
         // Attempt to rotate employee B onto employee A's active commitment.
         client.update_commitment(&employee_b, &commitment_a);
+    }
+
+    #[test]
+    fn test_remove_payroll_operator_emits_event() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let operator = Address::generate(&env);
+        // Set operator first
+        client.set_payroll_operator(&operator);
+
+        let before = env.events().all().len();
+        // Remove the operator
+        client.remove_payroll_operator();
+        let events = env.events().all();
+        assert_eq!(events.len(), before + 1);
+
+        // Find an event whose topics/data include our removal symbol and operator
+        let mut found_symbol = false;
+        let mut found_operator = false;
+        for ev in events.iter() {
+            for i in 0..ev.1.len() {
+                if let Ok(s) = ev.1.get(i).unwrap().try_into_val::<Symbol>(&env.clone()) {
+                    if s == Symbol::new(&env, "PayrollOperatorRemoved") {
+                        found_symbol = true;
+                    }
+                }
+                if let Ok(a) = ev.1.get(i).unwrap().try_into_val::<Address>(&env.clone()) {
+                    if a == operator {
+                        found_operator = true;
+                    }
+                }
+            }
+        }
+        assert!(found_symbol, "PayrollOperatorRemoved event not emitted");
+        assert!(found_operator, "Removed operator address not present in event data");
     }
 
     /// A commitment value that was rotated out (archived) can never be

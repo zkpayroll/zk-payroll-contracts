@@ -611,6 +611,14 @@ pub fn emit_payroll_operator_set(e: &Env, operator: Address) {
         .publish((Symbol::new(e, "PayrollOperatorSet"),), (operator,));
 }
 
+/// Emitted when the payroll operator is removed.
+/// This event intentionally publishes only the operator address that was
+/// removed and does not include any payroll-sensitive values.
+pub fn emit_payroll_operator_removed(e: &Env, operator: Address) {
+    e.events()
+        .publish((Symbol::new(e, "PayrollOperatorRemoved"),), (operator,));
+}
+
 /// Emitted when a commitment admin rotation is proposed.
 pub fn emit_commitment_admin_proposed(e: &Env, current_admin: Address, new_admin: Address) {
     e.events().publish(
