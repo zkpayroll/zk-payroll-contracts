@@ -70,6 +70,14 @@ Do not bump `schema_version` for a change that only affects this
 repo's tests (e.g. reordering `case_*` calls) — only for an actual change
 to what gets published on-chain.
 
+## Employer onboarding fixtures
+
+`employer_onboarding.json` pins the cross-contract event shapes that SDK and
+dashboard consumers rely on during company registration and employee onboarding.
+See `tests/event_schema/src/employer_onboarding.rs` and
+`contracts/payroll_registry/tests/employer_onboarding_events.rs` for the
+success, failure, and ordering checks that guard these integration points.
+
 ## Adding a new event
 
 1. Add the `emit_*` helper to `contracts/events/src/lib.rs`.

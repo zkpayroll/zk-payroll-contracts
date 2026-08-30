@@ -16,7 +16,8 @@
 //! - `support.rs` — shared capture/compare scaffolding.
 //! - one module per contract domain (`payroll`, `registry`,
 //!   `salary_commitment`, `payment_executor`, `pause_manager`,
-//!   `audit_module`), each with one `#[test]` per emitted event.
+//!   `audit_module`, `employer_onboarding`), each with one `#[test]` per emitted
+//!   event (or onboarding flow).
 //! - `fixtures/events/*.json` — the checked-in expected schema per domain.
 //! - `fixtures/events/README.md` — how to update a fixture on an intentional
 //!   schema change.
@@ -24,6 +25,7 @@
 mod support;
 
 mod audit_module;
+mod employer_onboarding;
 mod pause_manager;
 mod payment_executor;
 mod payroll;
