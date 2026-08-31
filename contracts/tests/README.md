@@ -2,6 +2,8 @@
 
 This guide provides solutions for common issues encountered when setting up the local environment and running tests for ZK Payroll contracts.
 
+> **Environment variables and test expectations:** see [contracts/README.md](../README.md) for the full list of deployment variables (`NETWORK`, `SOURCE`, contract IDs), debugging flags (`RUST_BACKTRACE`), and a manual QA checklist.
+
 ## 1. Environment Setup Issues
 
 ### Missing `wasm32-unknown-unknown` Target
