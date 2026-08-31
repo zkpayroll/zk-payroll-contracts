@@ -11,9 +11,7 @@ mod storage_defaults {
     use payroll_registry::{EmployeeStatus, PayrollRegistry, PayrollRegistryClient};
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
-    use soroban_sdk::{
-        testutils::Address as _, Address, BytesN, Env, Symbol, Vec,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Symbol, Vec};
     use token::Token;
 
     fn mock_vk(env: &Env) -> VerificationKey {
@@ -350,17 +348,11 @@ mod storage_defaults {
 
         let vk_res = audit_client.try_get_view_key(&auditor);
         assert!(vk_res.is_err());
-        assert_eq!(
-            vk_res.unwrap_err().unwrap(),
-            AuditError::KeyNotFound
-        );
+        assert_eq!(vk_res.unwrap_err().unwrap(), AuditError::KeyNotFound);
 
         let exp_res = audit_client.try_get_expiration(&auditor);
         assert!(exp_res.is_err());
-        assert_eq!(
-            exp_res.unwrap_err().unwrap(),
-            AuditError::KeyNotFound
-        );
+        assert_eq!(exp_res.unwrap_err().unwrap(), AuditError::KeyNotFound);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -391,7 +383,9 @@ mod storage_defaults {
 
         // Verify pending rotations default to None
         assert!(registry_client.get_pending_admin_rotation(&0u64).is_none());
-        assert!(registry_client.get_pending_treasury_rotation(&0u64).is_none());
+        assert!(registry_client
+            .get_pending_treasury_rotation(&0u64)
+            .is_none());
     }
 
     #[test]

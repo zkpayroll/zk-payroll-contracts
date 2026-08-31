@@ -85,6 +85,7 @@ fn setup_system<'a>(
 
     let commitment_admin = Address::generate(env);
     commitment_client.init_commitment_admin(&commitment_admin);
+    commitment_client.set_payroll_operator(&executor_id);
 
     let admin = Address::generate(env);
     let treasury = Address::generate(env);
@@ -572,7 +573,7 @@ fn test_partial_batch_failure_individual_retry_completes_payroll() {
         executor.is_paid(&emp3, &1),
         "emp3 must succeed after individual recovery"
     );
-    assert_eq!(executor.get_total_paid(&company_id), 100 + 400 + 200);
+    assert_eq!(executor.get_total_paid(&company_id), 400 + 100 + 200);
 }
 
 // ===========================================================================

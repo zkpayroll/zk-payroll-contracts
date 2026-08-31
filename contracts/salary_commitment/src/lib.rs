@@ -406,6 +406,9 @@ impl SalaryCommitmentContract {
         env: Env,
         reference_id: soroban_sdk::String,
     ) -> Option<Address> {
+        if reference_id.is_empty() || reference_id.len() > 256 {
+            return None;
+        }
         let key = DataKey::ReferenceIdIndex(reference_id);
         env.storage().persistent().get(&key)
     }

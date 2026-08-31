@@ -1,0 +1,84 @@
+{
+  "salary_commitment.CommitmentUpdated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CommitmentUpdated" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "commitment", "type": "BytesN<32>" }]
+  },
+  "salary_commitment.CommitmentRotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CommitmentRotated" },
+      { "type": "Address" }
+    ],
+    "data": [
+      { "name": "old_commitment", "type": "BytesN<32>" },
+      { "name": "new_commitment", "type": "BytesN<32>" }
+    ]
+  },
+  "salary_commitment.CommitmentLocked": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CommitmentLocked" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "salary_commitment.CommitmentUnlocked": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CommitmentUnlocked" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "salary_commitment.ReferenceIdSet": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "ReferenceIdSet" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "reference_id", "type": "String" }]
+  },
+  "salary_commitment.NullifierRecorded": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "NullifierRecorded" }],
+    "data": [{ "name": "nullifier", "type": "BytesN<32>" }]
+  },
+  "salary_commitment.PayrollOperatorSet": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "PayrollOperatorSet" }],
+    "data": [{ "name": "operator", "type": "Address" }]
+  },
+  "salary_commitment.AdminRotationProposed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AdminRotationProposed" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "new_admin", "type": "Address" }]
+  },
+  "salary_commitment.AdminRotationAccepted": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AdminRotationAccepted" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "salary_commitment.AdminRotationCancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AdminRotationCancelled" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "salary_commitment.CommitPauseMgrSet": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "CommitPauseMgrSet" }],
+    "data": [{ "name": "pause_manager", "type": "Address" }]
+  }
+}

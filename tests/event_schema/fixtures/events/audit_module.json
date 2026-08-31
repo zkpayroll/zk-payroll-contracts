@@ -1,0 +1,57 @@
+{
+  "audit_module.ViewKeyGenerated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "ViewKeyGenerated" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "expiration_ledger", "type": "u32" }]
+  },
+  "audit_module.AuditAccessRevoked": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AuditAccessRevoked" },
+      { "type": "Address" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "audit_module.AuditSuccessful": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AuditSuccessful" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "scope", "type": "Symbol" }]
+  },
+  "audit_module.AggregateAuditGenerated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AggregateAuditGenerated" },
+      { "type": "Address" }
+    ],
+    "data": [
+      { "name": "company_id", "type": "Symbol" },
+      { "name": "period_start", "type": "u64" },
+      { "name": "period_end", "type": "u64" }
+    ]
+  },
+  "audit_module.AuditSummaryExported": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "AuditSummaryExported" },
+      { "type": "Address" }
+    ],
+    "data": [
+      { "name": "company_id", "type": "Symbol" },
+      { "name": "period_start", "type": "u64" },
+      { "name": "period_end", "type": "u64" },
+      { "name": "total", "type": "u32" }
+    ]
+  },
+  "audit_module.AuditPauseMgrSet": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "AuditPauseMgrSet" }],
+    "data": [{ "name": "pause_manager", "type": "Address" }]
+  }
+}

@@ -17,30 +17,18 @@
 //!
 //! let mut ctx = setup_full_v1_state(&env);
 //! // Apply upgrade / migration function
-//! ctx.simulate_upgrade_v2();
-//! // Assert all state is preserved
-//! assert_post_migration_invariants(&env, &ctx);
-//! ```
+#![allow(unused_imports, unused_variables)]
 
-use audit_module::{AuditModule, AuditModuleClient, AuditScope, ViewKeyRecord};
+use audit_module::{AuditModule, AuditModuleClient};
 use pause_manager::{PauseManager, PauseManagerClient};
 use payment_executor::{
     ContractAddresses as ExecutorContractAddresses, PaymentExecutor, PaymentExecutorClient,
 };
-use payroll::{
-    ContractAddresses as PayrollContractAddresses, Payroll, PayrollClient, PayrollRun,
-    ReconciliationStatus,
-};
-use payroll_registry::{
-    CompanyInfo, EmployeeStatus, PayrollRegistry, PayrollRegistryClient, PendingCompanyRotation,
-};
+use payroll::{Payroll, PayrollClient, ReconciliationStatus};
+use payroll_registry::{EmployeeStatus, PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
-use salary_commitment::{
-    SalaryCommitment, SalaryCommitmentContract, SalaryCommitmentContractClient,
-};
-use soroban_sdk::{
-    testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, IntoVal, Symbol, Vec,
-};
+use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, Vec};
 use token::{Token, TokenClient};
 
 use crate::state_fixtures;
@@ -176,7 +164,7 @@ impl MigrationContext {
         // Initialize commitment contract admin
         let commitment_client = SalaryCommitmentContractClient::new(env, &self.commitment_id);
         commitment_client.init_commitment_admin(&self.admin);
-        commitment_client.set_payroll_operator(&self.payroll_operator);
+        commitment_client.set_payroll_operator(&self.payroll_id);
 
         // Initialize token & mint to treasury
         let token_client = TokenClient::new(env, &self.token_id);
@@ -221,7 +209,7 @@ impl MigrationContext {
     /// Write full v1 state: companies, employees, payroll runs, audit permissions, etc.
     pub fn write_full_v1_state(&mut self, env: &Env) {
         env.mock_all_auths();
-        env.ledger().with_mut(|l| l.timestamp = 1000);
+        env.ledger().set_timestamp(1_700_000_000);
 
         // ── Companies ────────────────────────────────────────────────────
         let registry_client = PayrollRegistryClient::new(env, &self.registry_id);
@@ -276,7 +264,7 @@ impl MigrationContext {
         self.has_nullifiers = true;
 
         // ── Payroll runs ─────────────────────────────────────────────────
-        let payroll_client = PayrollClient::new(env, &self.payroll_id);
+        let _payroll_client = PayrollClient::new(env, &self.payroll_id);
 
         // Historical run 1: Reconciled
         // We directly write to simulate pre-existing runs with specific statuses
@@ -360,6 +348,7 @@ impl MigrationContext {
         // ── Mark flags ───────────────────────────────────────────────────
         self.has_companies = true;
         self.has_employees = true;
+        self.has_payroll_runs = true;
     }
 
     /// Simulate an upgrade by re-registering the v2 contract and re-initializing.
@@ -398,29 +387,23 @@ impl MigrationContext {
     pub fn run_migration_v1_to_v2(&self, env: &Env) {
         env.mock_all_auths();
 
-        // In a real migration, this function would:
-        // 1. Read old-format keys (e.g., DataKey::Company(u64))
-        // 2. Transform data to new format
-        // 3. Write new-format keys (e.g., DataKey::CompanyV2(u64))
-        // 4. Optionally remove old keys after migration window
-
         // For now, assert that pre-upgrade data is still accessible.
-        let registry_client = PayrollRegistryClient::new(env, &self.registry_id);
         if self.has_companies {
+            let registry_client = PayrollRegistryClient::new(env, &self.registry_id);
             let _company1 = registry_client.get_company(&self.company_id_1);
             if self.company_id_2 > 0 {
                 let _company2 = registry_client.get_company(&self.company_id_2);
             }
         }
 
-        let commitment_client = SalaryCommitmentContractClient::new(env, &self.commitment_id);
         if self.has_employees {
+            let commitment_client = SalaryCommitmentContractClient::new(env, &self.commitment_id);
             assert!(commitment_client.has_commitment(&self.alice));
             assert!(commitment_client.has_commitment(&self.bob));
         }
 
-        let payroll_client = PayrollClient::new(env, &self.payroll_id);
         if self.has_payroll_runs {
+            let payroll_client = PayrollClient::new(env, &self.payroll_id);
             let _run1 = payroll_client.get_payroll_run(&self.run_id_1);
             let _run2 = payroll_client.get_payroll_run(&self.run_id_2);
         }
