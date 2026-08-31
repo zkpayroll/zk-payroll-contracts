@@ -11,7 +11,7 @@ members = [
     "tests/events",
     "tests/event_schema",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "contracts/tests"]
 
 
 [workspace.package]
