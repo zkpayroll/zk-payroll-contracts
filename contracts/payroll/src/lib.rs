@@ -106,8 +106,8 @@ pub struct PayrollRun {
 /// Pending emergency withdrawal request (issue #104).
 ///
 /// Withdrawal requires two separate authorised actions:
-/// 1. `request_emergency_withdrawal` — called by the `treasury_owner`.
-/// 2. `approve_emergency_withdrawal` — called by the `admin`.
+/// 1. `request_emergency_withdrawal` ? called by the `treasury_owner`.
+/// 2. `approve_emergency_withdrawal` ? called by the `admin`.
 ///
 /// This two-step design ensures neither role can unilaterally drain funds.
 #[contracttype]
@@ -150,7 +150,7 @@ pub struct BatchCheckpoint {
     pub failed: bool,
 }
 
-// ── Issue #89: payroll amendment flow ────────────────────────────────────────
+// ?? Issue #89: payroll amendment flow ????????????????????????????????????????
 
 /// Lifecycle state of a payroll run draft.
 ///
@@ -160,10 +160,19 @@ pub struct BatchCheckpoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum RunDraftState {
+    /// Newly created via `create_run_draft`, or freshly amended. Amendable
+    /// and cancellable. The only state a duplicate-period check (#398)
+    /// blocks a new draft against.
     Pending = 0,
+    /// Locked in via `finalize_run_draft`; no longer amendable. Awaiting
+    /// submission into an executable payroll run.
     Finalized = 1,
+    /// Converted into a real payroll run via `submit_run_draft`. Terminal —
+    /// the draft record itself is no longer actionable past this point.
     Submitted = 2,
+    /// Withdrawn by the admin before submission. Terminal.
     Cancelled = 3,
+    /// Timed out before being finalized/submitted. Terminal.
     Expired = 4,
 }
 
@@ -185,7 +194,7 @@ pub struct PayrollRunDraft {
     pub amendment_count: u32,
 }
 
-// ── Reviewer Authorization & Run Review ─────────────────────────────────────
+// ?? Reviewer Authorization & Run Review ?????????????????????????????????????
 
 /// Review decision outcome for a payroll run.
 #[contracttype]
@@ -208,7 +217,7 @@ pub struct RunReview {
     pub reviewed_at: u64,
 }
 
-// ── Issue #91: privileged-role rotation ──────────────────────────────────────
+// ?? Issue #91: privileged-role rotation ??????????????????????????????????????
 
 /// Pending two-step role-rotation request.
 ///
@@ -224,7 +233,7 @@ pub struct PendingRotation {
     pub proposed_at: u64,
 }
 
-// ── Issue #339: Admin Handover Record ───────────────────────────────────────
+// ?? Issue #339: Admin Handover Record ???????????????????????????????????????
 
 /// Record of a pending admin handover requiring acceptance.
 #[contracttype]
@@ -235,7 +244,7 @@ pub struct PendingAdminHandover {
     pub requested_at: u64,
 }
 
-// ── Issue #334: Signer Quorum Approval Payload ──────────────────────────────
+// ?? Issue #334: Signer Quorum Approval Payload ??????????????????????????????
 
 /// Multi-signer approval payload bound to batch root, employer, period, asset, nonce, and policy version.
 #[contracttype]
@@ -249,7 +258,7 @@ pub struct QuorumApprovalPayload {
     pub policy_version: u32,
 }
 
-// ── Issue #333: Compliance Hold State ─────────────────────────────────────────
+// ?? Issue #333: Compliance Hold State ?????????????????????????????????????????
 
 /// Scope of a compliance hold affecting payroll execution.
 #[contracttype]
@@ -281,7 +290,7 @@ pub struct ComplianceHold {
     pub is_active: bool,
 }
 
-// ── Issue #337: Funding Reservation Expiry ─────────────────────────────────────
+// ?? Issue #337: Funding Reservation Expiry ?????????????????????????????????????
 
 /// Funding reservation with expiry policy for asset-specific reservations.
 ///
@@ -296,7 +305,7 @@ pub struct ReservationExpiry {
     pub created_at: u64,
 }
 
-// ── Issue #335: Payroll Run Archival ───────────────────────────────────────────
+// ?? Issue #335: Payroll Run Archival ???????????????????????????????????????????
 
 /// Archive marker for finalized payroll runs, enabling long-term record retention.
 ///
@@ -312,7 +321,7 @@ pub struct ArchiveMarker {
     pub archive_reason: Symbol,
 }
 
-// ── Issue #402: Safe Treasury Balance Summary ──────────────────────────────────
+// ?? Issue #402: Safe Treasury Balance Summary ??????????????????????????????????
 
 /// Safe treasury balance summary by asset (#402).
 ///
@@ -329,7 +338,7 @@ pub struct SafeTreasurySummary {
     pub blocked_balance: i128,
 }
 
-// ── Issue #404: Cancelled Batch Read Status ────────────────────────────────────
+// ?? Issue #404: Cancelled Batch Read Status ????????????????????????????????????
 
 /// Safe metadata for a cancelled payroll batch (#404).
 ///
@@ -348,12 +357,32 @@ pub struct CancelledBatchStatus {
     pub is_cancelled: bool,
 }
 
-// ── Issue #403: Payroll Approval Expiry ────────────────────────────────────────
+// ?? Issue #352: Payroll Batch Split Validation ??????????????????????????????????
+
+/// Tracking metadata for batch splits to preserve original aggregate commitment (#352).
+///
+/// When a large payroll batch is split into smaller child batches, this structure
+/// records the relationship between the parent batch and its children, along with
+/// aggregate commitment data to ensure the sum of child batches equals the original.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchSplitRecord {
+    pub parent_run_id: u64,
+    pub child_run_id: u64,
+    pub parent_total: i128,
+    pub parent_employee_count: u32,
+    pub child_total: i128,
+    pub child_employee_count: u32,
+    pub split_at: u64,
+    pub split_by: Address,
+}
+
+// ?? Issue #403: Payroll Approval Expiry ????????????????????????????????????????
 
 /// Default maximum validity age for reviewer approvals (7 days in seconds) (#403).
 pub const DEFAULT_APPROVAL_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
-// ── Issue #147: company lifecycle state ──────────────────────────────────────────
+// ?? Issue #147: company lifecycle state ??????????????????????????????????????????
 
 /// Lifecycle state of the company operating this payroll contract.
 ///
@@ -363,7 +392,7 @@ pub const DEFAULT_APPROVAL_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompanyState {
-    /// Normal operating state — payroll execution permitted.
+    /// Normal operating state ? payroll execution permitted.
     Active,
     /// Operations suspended; payroll execution rejected until set to Active.
     Paused,
@@ -373,7 +402,7 @@ pub enum CompanyState {
     Incomplete,
 }
 
-// ── Storage keys ──────────────────────────────────────────────────────────────
+// ?? Storage keys ??????????????????????????????????????????????????????????????
 // Issue #196: Storage Key Versioning Strategy
 //
 // ## Overview
@@ -397,7 +426,7 @@ pub enum CompanyState {
 //    - After migration window, the old variant can be removed in a future release
 //
 // 4. **Parameterized keys**: Many keys are parameterized (e.g., `PayrollRun(u64)`).
-//    This design is forward-compatible — new fields can be added to the stored
+//    This design is forward-compatible ? new fields can be added to the stored
 //    struct without changing the key structure.
 //
 // 5. **Persistent vs Temporary storage**: Keys map to Persistent storage unless
@@ -405,11 +434,11 @@ pub enum CompanyState {
 //    key namespace to avoid upgrade confusion.
 //
 // ## Upgrade-safe patterns
-// - ✅ Adding new key variants (append-only)
-// - ✅ Adding fields to structs stored under existing keys (Soroban XDR evolution)
-// - ✅ Creating parallel V2 keys and migrating data over time
-// - ❌ Changing the type signature of an existing key variant (breaks deserialization)
-// - ❌ Reusing a key variant for a different data type (silent corruption)
+// - ? Adding new key variants (append-only)
+// - ? Adding fields to structs stored under existing keys (Soroban XDR evolution)
+// - ? Creating parallel V2 keys and migrating data over time
+// - ? Changing the type signature of an existing key variant (breaks deserialization)
+// - ? Reusing a key variant for a different data type (silent corruption)
 //
 // ## Example future upgrade scenarios
 //
@@ -488,6 +517,13 @@ pub enum DataKey {
     CompanyBalance(Address),
     /// Marks a completed payroll run as archived for long-term reporting (#146).
     ArchivedRun(u64),
+    /// Marks a run as having an unresolved audit challenge open against it
+    /// (#374). Set/cleared by the admin; blocks archival while present.
+    ChallengedRun(u64),
+    /// Tracks the active (Pending) draft id for a given period_label, so a
+    /// second draft can't be created for the same period while one is
+    /// already pending (#398).
+    ActiveDraftForPeriod(Symbol),
     /// Company lifecycle state gate for payroll execution (#147).
     CompanyState,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
@@ -526,6 +562,10 @@ pub enum DataKey {
     MigrationReadiness,
     /// Cancelled payroll batch status record (#404).
     CancelledBatchRecord(u64),
+    /// Batch split record linking parent and child batch runs (#352).
+    BatchSplitRecord(u64, u64),
+    /// Aggregate batch split tracker per parent run (#352).
+    BatchSplitTracker(u64),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -588,7 +628,7 @@ pub struct EmployerNonceSequenceState {
     pub last_nonce: BytesN<32>,
 }
 
-// ── Issue #361: Compliance Evidence Pointer Validation ─────────────────────────
+// ?? Issue #361: Compliance Evidence Pointer Validation ?????????????????????????
 
 /// Scope of a compliance evidence pointer.
 ///
@@ -680,7 +720,7 @@ impl Payroll {
             treasury_owner.clone(),
         );
 
-        // #360 — initialize storage version tracking
+        // #360 ? initialize storage version tracking
         Self::initialize_storage_version(&e);
     }
 
@@ -878,7 +918,7 @@ impl Payroll {
             .get(&DataKey::EmployerNonceSequence(employer))
     }
 
-    // ── Issue #361: Compliance Evidence Pointer Validation ─────────────────────────
+    // ?? Issue #361: Compliance Evidence Pointer Validation ?????????????????????????
 
     /// Create a new compliance evidence pointer for off-chain encrypted evidence (#361).
     ///
@@ -1025,7 +1065,7 @@ impl Payroll {
         e.crypto().sha256(&data).into()
     }
 
-    // ── Issue #360: Storage Version Migration Checks ─────────────────────────────
+    // ?? Issue #360: Storage Version Migration Checks ?????????????????????????????
 
     /// Current contract storage version.
     ///
@@ -1860,7 +1900,7 @@ impl Payroll {
         payroll_events::emit_draft_committed(&e, draft_hash);
     }
 
-    /// Request an emergency treasury withdrawal (step 1 of 2 — issue #104).
+    /// Request an emergency treasury withdrawal (step 1 of 2 ? issue #104).
     ///
     /// Only the `treasury_owner` may submit a request. A pending request is
     /// stored on-chain and must be separately approved by the `admin` via
@@ -1914,7 +1954,7 @@ impl Payroll {
         payroll_events::emit_emergency_requested(&e, amount, recipient);
     }
 
-    /// Approve and execute a pending emergency withdrawal (step 2 of 2 — issue #104).
+    /// Approve and execute a pending emergency withdrawal (step 2 of 2 ? issue #104).
     ///
     /// Only the `admin` may approve. On approval the treasury funds are
     /// transferred to the recipient specified in the request and the pending
@@ -1988,9 +2028,9 @@ impl Payroll {
         e.storage().persistent().get(&DataKey::EmergencyRequest)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ?????????????????????????????????????????????????????????????????????????
     // Payroll run cancellation (issue #75)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ?????????????????????????????????????????????????????????????????????????
 
     /// Prepare a pending payroll run for later finalization or cancellation.
     ///
@@ -2010,7 +2050,7 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
-        // #360 — validate storage version for sensitive operation
+        // #360 ? validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "prepare_payroll_run");
 
         let count = proofs.len();
@@ -2042,7 +2082,7 @@ impl Payroll {
             BytesN::from_array(&e, &[0u8; 32])
         };
 
-        // #379 — reject a batch that pays the same wallet twice.
+        // #379 ? reject a batch that pays the same wallet twice.
         Self::validate_no_duplicate_employees(&employees);
 
         let mut total: i128 = 0;
@@ -2066,7 +2106,7 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
 
-        // #362 — validate nonce monotonicity for this employer
+        // #362 ? validate nonce monotonicity for this employer
         Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
 
         addrs.admin.require_auth();
@@ -2081,7 +2121,7 @@ impl Payroll {
         // Mark nonce as consumed (store run_id for auditability).
         e.storage().persistent().set(&nonce_key, &run_id);
 
-        // #362 — update nonce sequence tracking for this employer
+        // #362 ? update nonce sequence tracking for this employer
         Self::update_nonce_sequence(&e, &addrs.admin, &nonce);
 
         // Store the pending run
@@ -2265,7 +2305,7 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
-        // #360 — validate storage version for sensitive operation
+        // #360 ? validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll");
 
         Self::validate_non_zero_digest(&e, &nonce, "nonce");
@@ -2284,26 +2324,26 @@ impl Payroll {
 
         assert!(count <= MAX_BATCH, "Batch too large");
 
-        // #103 — reject duplicate run nonces before any other work.
+        // #103 ? reject duplicate run nonces before any other work.
         let nonce_key = DataKey::RunNonce(nonce.clone());
         if e.storage().persistent().has(&nonce_key) {
             panic!("Duplicate run nonce: this payroll batch has already been submitted");
         }
 
-        // #102 — if a draft hash is supplied, verify a pre-commitment exists.
+        // #102 ? if a draft hash is supplied, verify a pre-commitment exists.
         let resolved_draft_hash: BytesN<32> = if let Some(ref dh) = draft_hash {
             let commit_key = DataKey::DraftCommitment(dh.clone());
             if !e.storage().persistent().has(&commit_key) {
                 panic!("Draft hash not pre-committed: call commit_draft first");
             }
-            // Consume the commitment — one run per pre-committed draft.
+            // Consume the commitment ? one run per pre-committed draft.
             e.storage().persistent().remove(&commit_key);
             dh.clone()
         } else {
             BytesN::from_array(&e, &[0u8; 32])
         };
 
-        // #379 — reject a batch that pays the same wallet twice.
+        // #379 ? reject a batch that pays the same wallet twice.
         Self::validate_no_duplicate_employees(&employees);
 
         let mut total: i128 = 0;
@@ -2327,7 +2367,7 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
 
-        // #362 — validate nonce monotonicity for this employer
+        // #362 ? validate nonce monotonicity for this employer
         Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
 
         // Validate treasury asset allowlist
@@ -2351,10 +2391,10 @@ impl Payroll {
 
         let run_id = Self::derive_run_id(&e);
 
-        // #103 — mark nonce as consumed (store run_id for auditability).
+        // #103 ? mark nonce as consumed (store run_id for auditability).
         e.storage().persistent().set(&nonce_key, &run_id);
 
-        // #362 — update nonce sequence tracking for this employer
+        // #362 ? update nonce sequence tracking for this employer
         Self::update_nonce_sequence(&e, &addrs.admin, &nonce);
 
         let token_client = soroban_token::Client::new(&e, &addrs.token);
@@ -2400,7 +2440,7 @@ impl Payroll {
 
             token_client.transfer(&addrs.treasury, &employee, &amount);
 
-            // #178 — lock the employee's commitment so it cannot be silently
+            // #178 ? lock the employee's commitment so it cannot be silently
             // altered after payroll has been executed for this period.
             commitment_client.lock_commitment_updates(&employee);
 
@@ -2428,7 +2468,7 @@ impl Payroll {
         run_id
     }
 
-    // ── Issue #89: payroll amendment flow ────────────────────────────────────
+    // ?? Issue #89: payroll amendment flow ????????????????????????????????????
 
     /// Create a correctable payroll run draft.
     ///
@@ -2458,6 +2498,15 @@ impl Payroll {
             panic!("total_amount must be positive");
         }
 
+        // Issue #398: reject a duplicate draft for a period that already has
+        // one pending. Cleared when the existing draft leaves Pending
+        // (finalize/cancel/expire) — not wired into those paths in this
+        // pass, so a stale entry here would need a follow-up cleanup there.
+        let period_key = DataKey::ActiveDraftForPeriod(period_label.clone());
+        if e.storage().persistent().has(&period_key) {
+            panic!("A pending draft already exists for this payroll period");
+        }
+
         let counter: u64 = e
             .storage()
             .persistent()
@@ -2481,6 +2530,9 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
+        e.storage()
+            .persistent()
+            .set(&period_key, &draft_id);
 
         payroll_events::emit_draft_created(&e, draft_id, admin, period_label);
 
@@ -2526,9 +2578,14 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
-        e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "draft_amended")),
-            (draft_id, new_total_amount, draft.amendment_count),
+        payroll_events::emit_draft_amended(&e, draft_id, new_total_amount, draft.amendment_count);
+        payroll_events::emit_draft_updated(
+            &e,
+            draft_id,
+            draft.period_label.clone(),
+            new_total_amount,
+            new_employee_count,
+            draft.amendment_count,
         );
     }
 
@@ -2564,8 +2621,8 @@ impl Payroll {
             .expect("Run not found");
 
         // Issue #244: settlement completion is final. Once a run has reached
-        // `Completed`, reject any further reconciliation update — including a
-        // repeat `Reconciled` call — so settlement cannot be replayed or
+        // `Completed`, reject any further reconciliation update ? including a
+        // repeat `Reconciled` call ? so settlement cannot be replayed or
         // finalized more than once for the same payroll run.
         let current_state = Self::get_payroll_run_state_internal(&e, run_id);
         if current_state == PayrollRunState::Completed {
@@ -2754,7 +2811,7 @@ impl Payroll {
         payroll_events::emit_draft_expired(&e, draft_id, admin);
     }
 
-    // ── Issue #91: privileged-role rotation ──────────────────────────────────
+    // ?? Issue #91: privileged-role rotation ??????????????????????????????????
 
     /// Propose a new admin (step 1 of 2).
     ///
@@ -2956,9 +3013,9 @@ impl Payroll {
             .get(&DataKey::PendingTreasuryRotation)
     }
 
-    // ── Issue #339: Admin Handover Safety Checks ─────────────────────────────
+    // ?? Issue #339: Admin Handover Safety Checks ?????????????????????????????
 
-    /// Request a new admin handover requiring explicit acceptance (step 1 of 2 — issue #339).
+    /// Request a new admin handover requiring explicit acceptance (step 1 of 2 ? issue #339).
     pub fn request_admin_handover(e: Env, current_admin: Address, pending_admin: Address) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
@@ -2987,7 +3044,7 @@ impl Payroll {
         payroll_events::emit_admin_handover_requested(&e, current_admin, pending_admin);
     }
 
-    /// Accept an admin handover (step 2 of 2 — issue #339).
+    /// Accept an admin handover (step 2 of 2 ? issue #339).
     pub fn accept_admin_handover(e: Env, pending_admin: Address) {
         Self::require_not_paused(&e);
         let handover: PendingAdminHandover = e
@@ -3045,7 +3102,7 @@ impl Payroll {
         e.storage().persistent().get(&DataKey::PendingAdminHandover)
     }
 
-    // ── Issue #343: Treasury Withdrawal Guardrails ───────────────────────────
+    // ?? Issue #343: Treasury Withdrawal Guardrails ???????????????????????????
 
     /// Get total locked payroll funds for an asset.
     pub fn get_locked_funds(e: Env, asset: Address) -> i128 {
@@ -3083,7 +3140,7 @@ impl Payroll {
         payroll_events::emit_locked_funds_updated(e, asset, new_locked);
     }
 
-    // ── Issue #334: Signer Quorum Replay Protection ──────────────────────────
+    // ?? Issue #334: Signer Quorum Replay Protection ??????????????????????????
 
     /// Compute cryptographic hash binding all fields of a signer quorum approval payload.
     pub fn hash_quorum_payload(e: Env, payload: QuorumApprovalPayload) -> BytesN<32> {
@@ -3152,7 +3209,7 @@ impl Payroll {
         q_hash
     }
 
-    // ── Issue #177: metadata hash verification ──────────────────────────────
+    // ?? Issue #177: metadata hash verification ??????????????????????????????
 
     /// Return the metadata hash bound to a completed payroll run.
     ///
@@ -3190,7 +3247,7 @@ impl Payroll {
         run.metadata_hash == expected_hash
     }
 
-    // ── Issue #147: company state management ─────────────────────────────────
+    // ?? Issue #147: company state management ?????????????????????????????????
 
     /// Set the company lifecycle state.
     ///
@@ -3223,7 +3280,7 @@ impl Payroll {
             .unwrap_or(CompanyState::Active)
     }
 
-    // ── Issue #146: archived payroll run queries ──────────────────────────────
+    // ?? Issue #146: archived payroll run queries ??????????????????????????????
 
     /// Mark a completed payroll run as archived for long-term reporting.
     ///
@@ -3247,6 +3304,11 @@ impl Payroll {
             panic!("Run not found");
         }
 
+        // Issue #374: block archival while an audit challenge is unresolved.
+        if e.storage().persistent().has(&DataKey::ChallengedRun(run_id)) {
+            panic!("Run has an unresolved audit challenge");
+        }
+
         let archive_key = DataKey::ArchivedRun(run_id);
         if e.storage().persistent().has(&archive_key) {
             panic!("Run is already archived");
@@ -3255,6 +3317,44 @@ impl Payroll {
 
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_archived")),
+            run_id,
+        );
+    }
+
+    /// Marks `run_id` as having an unresolved audit challenge, blocking
+    /// `archive_payroll_run` until cleared (issue #374). Admin-only.
+    pub fn flag_run_challenged(e: Env, admin: Address, run_id: u64) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        e.storage().persistent().set(&DataKey::ChallengedRun(run_id), &true);
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "run_challenged")),
+            run_id,
+        );
+    }
+
+    /// Clears the challenged flag on `run_id`, allowing archival again
+    /// (issue #374). Admin-only.
+    pub fn clear_run_challenge(e: Env, admin: Address, run_id: u64) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        e.storage().persistent().remove(&DataKey::ChallengedRun(run_id));
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "run_challenge_cleared")),
             run_id,
         );
     }
@@ -3281,7 +3381,7 @@ impl Payroll {
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
     }
 
-    // ── Reviewer Authorization & Run Review Entrypoints ─────────────────────
+    // ?? Reviewer Authorization & Run Review Entrypoints ?????????????????????
 
     /// Grant reviewer authorization to an address. Only the admin may call.
     pub fn add_reviewer(e: Env, admin: Address, reviewer: Address) {
@@ -3425,9 +3525,9 @@ impl Payroll {
             .unwrap_or(0u64)
     }
 
-    // ────────────────────────────────────────────────────────────────────────────
+    // ????????????????????????????????????????????????????????????????????????????
     // Issue #333: Compliance Hold Functionality
-    // ────────────────────────────────────────────────────────────────────────────
+    // ????????????????????????????????????????????????????????????????????????????
 
     /// Place a compliance hold on a batch, employee group, or employer to block
     /// affected payroll execution while audit issues are resolved (#333).
@@ -3531,9 +3631,9 @@ impl Payroll {
             .get(&DataKey::ComplianceHold(hold_id))
     }
 
-    // ────────────────────────────────────────────────────────────────────────────
+    // ????????????????????????????????????????????????????????????????????????????
     // Issue #337: Funding Reservation Expiry Functionality
-    // ────────────────────────────────────────────────────────────────────────────
+    // ????????????????????????????????????????????????????????????????????????????
 
     /// Set or update the funding reservation expiry policy for an asset (#337).
     ///
@@ -3597,9 +3697,17 @@ impl Payroll {
             .get(&DataKey::ReservationExpiry(asset))
     }
 
-    // ────────────────────────────────────────────────────────────────────────────
+    /// Get reservation expiry policy or fail with a clear not-found message (#424).
+    pub fn get_required_reservation_expiry(e: Env, asset: Address) -> ReservationExpiry {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ReservationExpiry(asset))
+            .expect("Treasury reservation not found")
+    }
+
+    // ????????????????????????????????????????????????????????????????????????????
     // Issue #335: Payroll Archival Functionality
-    // ────────────────────────────────────────────────────────────────────────────
+    // ????????????????????????????????????????????????????????????????????????????
 
     /// Archive a finalized payroll run for long-term reporting (#335).
     ///
@@ -3665,7 +3773,7 @@ impl Payroll {
             .get(&DataKey::ArchiveMarker(run_id))
     }
 
-    // ── Issue #401: Batch Lock Timestamp Query Helper ────────────────────────
+    // ?? Issue #401: Batch Lock Timestamp Query Helper ????????????????????????
 
     /// Return the timestamp at which a payroll batch reached locked state (#401).
     ///
@@ -3692,7 +3800,7 @@ impl Payroll {
         None
     }
 
-    // ── Issue #402: Safe Treasury Balance Summary View ───────────────────────
+    // ?? Issue #402: Safe Treasury Balance Summary View ???????????????????????
 
     /// Return aggregate treasury balance summary for a given asset token (#402).
     ///
@@ -3723,7 +3831,7 @@ impl Payroll {
         }
     }
 
-    // ── Issue #403: Payroll Approval Expiry Validation ───────────────────────
+    // ?? Issue #403: Payroll Approval Expiry Validation ???????????????????????
 
     /// Check whether an approval for a payroll run has expired (#403).
     ///
@@ -3750,7 +3858,7 @@ impl Payroll {
         }
     }
 
-    // ── Issue #404: Cancelled Batch Read Status Helper ───────────────────────
+    // ?? Issue #404: Cancelled Batch Read Status Helper ???????????????????????
 
     /// Read safe cancellation metadata for a cancelled payroll batch (#404).
     ///
@@ -3762,6 +3870,80 @@ impl Payroll {
         e.storage()
             .persistent()
             .get(&DataKey::CancelledBatchRecord(run_id))
+    }
+
+    // ?? Issue #352: Payroll Batch Split Validation ??????????????????????????????????
+
+    /// Record a batch split to track parent-child relationships (#352).
+    /// Validates that child batch totals can be aggregated back to parent.
+    pub fn record_batch_split(
+        e: Env,
+        admin: Address,
+        parent_run_id: u64,
+        child_run_id: u64,
+        parent_total: i128,
+        parent_employee_count: u32,
+        child_total: i128,
+        child_employee_count: u32,
+    ) {
+        admin.require_auth();
+
+        if child_total <= 0 || parent_total <= 0 {
+            panic!("Batch amounts must be positive");
+        }
+
+        if child_total > parent_total {
+            panic!("Child batch total cannot exceed parent total");
+        }
+
+        if child_employee_count > parent_employee_count {
+            panic!("Child employee count cannot exceed parent count");
+        }
+
+        let split_record = BatchSplitRecord {
+            parent_run_id,
+            child_run_id,
+            parent_total,
+            parent_employee_count,
+            child_total,
+            child_employee_count,
+            split_at: e.ledger().timestamp(),
+            split_by: admin.clone(),
+        };
+
+        e.storage().persistent().set(
+            &DataKey::BatchSplitRecord(parent_run_id, child_run_id),
+            &split_record,
+        );
+
+        e.events().publish(
+            (Symbol::new(&e, "BatchSplitRecorded"), parent_run_id),
+            (child_run_id, child_total, e.ledger().timestamp()),
+        );
+    }
+
+    /// Get batch split record by parent and child run IDs (#352).
+    pub fn get_batch_split(e: Env, parent_run_id: u64, child_run_id: u64) -> Option<BatchSplitRecord> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::BatchSplitRecord(parent_run_id, child_run_id))
+    }
+
+    /// Validate that a batch split preserves the original aggregate commitment (#352).
+    /// This ensures that when a large batch is split, the sum of children equals the parent.
+    pub fn validate_batch_split_aggregate(
+        e: Env,
+        parent_run_id: u64,
+        expected_total_amount: i128,
+        expected_employee_count: u32,
+    ) -> bool {
+        let parent_run_key = DataKey::PayrollRun(parent_run_id);
+        if let Some(parent_run) = e.storage().persistent().get::<DataKey, PayrollRun>(&parent_run_key) {
+            parent_run.total_amount == expected_total_amount
+                && parent_run.employee_count == expected_employee_count
+        } else {
+            false
+        }
     }
 }
 
@@ -4158,7 +4340,7 @@ mod tests {
         payroll_client.set_pause_manager(&pm_id);
     }
 
-    // ── Issue #89: payroll amendment flow ────────────────────────────────────
+    // ?? Issue #89: payroll amendment flow ????????????????????????????????????
 
     #[test]
     fn test_create_run_draft_returns_incremental_id() {
@@ -4344,7 +4526,7 @@ mod tests {
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Expired));
     }
 
-    // ── Issue #103: per-payroll run nonce uniqueness ───────────────────────────
+    // ?? Issue #103: per-payroll run nonce uniqueness ???????????????????????????
 
     #[test]
     fn test_duplicate_nonce_is_rejected() {
@@ -4401,7 +4583,7 @@ mod tests {
         assert_eq!(run.nonce, nonce);
     }
 
-    // ── Issue #102: draft hash binding ────────────────────────────────────────
+    // ?? Issue #102: draft hash binding ????????????????????????????????????????
 
     #[test]
     fn test_draft_hash_binding_accepted_when_pre_committed() {
@@ -4487,7 +4669,7 @@ mod tests {
         payroll_client.create_run_draft(&attacker, &1_000i128, &1u32, &Symbol::new(&env, "MAY"));
     }
 
-    // ── Issue #91: admin/treasury rotation ───────────────────────────────────
+    // ?? Issue #91: admin/treasury rotation ???????????????????????????????????
 
     #[test]
     fn test_admin_rotation_full_flow() {
@@ -4566,7 +4748,7 @@ mod tests {
         assert!(run_id > 0);
     }
 
-    // ── Issue #104: emergency withdrawal workflow ─────────────────────────────
+    // ?? Issue #104: emergency withdrawal workflow ?????????????????????????????
 
     #[test]
     fn test_emergency_request_then_approve() {
@@ -4701,7 +4883,7 @@ mod tests {
         payroll_client.propose_admin_rotation(&admin, &new_admin2);
     }
 
-    // ── Issue #134: reconciliation status tracking ─────────────────────────────
+    // ?? Issue #134: reconciliation status tracking ?????????????????????????????
 
     #[test]
     fn test_new_run_is_unreconciled() {
@@ -4764,7 +4946,7 @@ mod tests {
         assert!(result.is_err(), "Completed runs must not be reopened");
     }
 
-    // ── Issue #244: payroll settlement replay guard ──────────────────────────
+    // ?? Issue #244: payroll settlement replay guard ??????????????????????????
 
     /// A repeat `Reconciled` call for an already-`Completed` run must be
     /// rejected, not silently re-accepted. Before this guard, calling
@@ -4871,9 +5053,9 @@ mod tests {
         );
     }
 
-    // ── Issue #75: payroll cancellation ──────────────────────────────────────
+    // ?? Issue #75: payroll cancellation ??????????????????????????????????????
 
-    // ── Issue #159: canonical payroll state machine ──────────────────────────
+    // ?? Issue #159: canonical payroll state machine ??????????????????????????
 
     #[test]
     fn test_payroll_state_machine_allows_canonical_forward_transitions() {
@@ -5113,7 +5295,7 @@ mod tests {
         payroll_client.cancel_payroll_run_with_reason(&admin, &999u64, &reason);
     }
 
-    // ── Issue #177: payroll run metadata hash checks ──────────────────────────
+    // ?? Issue #177: payroll run metadata hash checks ??????????????????????????
 
     #[test]
     fn test_commit_metadata_hash_stores_commitment() {
@@ -5124,7 +5306,7 @@ mod tests {
         let meta_hash = BytesN::from_array(&env, &[0xaau8; 32]);
         payroll_client.commit_metadata_hash(&admin, &meta_hash);
 
-        // Should not panic — commitment is stored.
+        // Should not panic ? commitment is stored.
     }
 
     #[test]
@@ -5315,7 +5497,7 @@ mod tests {
         payroll_client.deposit(&treasury, &100i128, &deposit_id);
     }
 
-    // ── Issue #180: failed execution rollback tests ──────────────────────────
+    // ?? Issue #180: failed execution rollback tests ??????????????????????????
 
     #[test]
     fn test_failed_proof_mid_batch_rolls_back_nonce() {
@@ -5327,13 +5509,13 @@ mod tests {
         let mut proofs = Vec::new(&env);
         let mut amounts = Vec::new(&env);
 
-        // Employee 1 — valid proof
+        // Employee 1 ? valid proof
         let emp1 = employee;
         employees.push_back(emp1.clone());
         proofs.push_back(mock_proof(&env));
         amounts.push_back(500i128);
 
-        // Employee 2 — will trigger proof failure (but proofs are mocked to always pass,
+        // Employee 2 ? will trigger proof failure (but proofs are mocked to always pass,
         // so instead we use a different employee without a commitment stored).
         let emp2 = Address::generate(&env);
         employees.push_back(emp2.clone());
@@ -5346,7 +5528,7 @@ mod tests {
         // Execution fails because emp2 has no stored commitment
         assert!(result.is_err());
 
-        // Verify the nonce was rolled back — should be usable in a new run
+        // Verify the nonce was rolled back ? should be usable in a new run
         let (proofs2, amounts2, employees2) = single_payment_batch(&env, &emp1, 500);
         let run_id = payroll_client.batch_process_payroll(
             &proofs2,
@@ -5388,7 +5570,7 @@ mod tests {
         let admin = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
 
-        // Mint only 100 tokens — NOT enough for the 1000 payment
+        // Mint only 100 tokens ? NOT enough for the 1000 payment
         token_client.mint(&treasury, &100i128);
         payroll_client.initialize(
             &admin,
@@ -5464,7 +5646,7 @@ mod tests {
             "No PayrollRun should exist after a failed execution"
         );
 
-        // Nonce is NOT consumed (rolled back) — can retry with corrected params
+        // Nonce is NOT consumed (rolled back) ? can retry with corrected params
         let run_id = payroll_client
             .batch_process_payroll(&proofs, &amounts, &employees, &500, &nonce, &None);
         assert!(run_id > 0, "Nonce must be reusable after failed execution");
@@ -5538,7 +5720,7 @@ mod tests {
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 500);
         payroll_client.batch_process_payroll(&proofs, &amounts, &employees, &500, &nonce, &None);
 
-        // Second attempt with same nonce — must fail permanently
+        // Second attempt with same nonce ? must fail permanently
         let (proofs2, amounts2, employees2) = single_payment_batch(&env, &employee, 500);
         payroll_client.batch_process_payroll(&proofs2, &amounts2, &employees2, &500, &nonce, &None);
     }
@@ -5588,7 +5770,7 @@ mod tests {
         proofs.push_back(mock_proof(&env)); // 1 proof
         let mut amounts = Vec::new(&env);
         amounts.push_back(500i128);
-        amounts.push_back(500i128); // 2 amounts — mismatch!
+        amounts.push_back(500i128); // 2 amounts ? mismatch!
         let mut employees = Vec::new(&env);
         employees.push_back(employee.clone());
 
@@ -5630,7 +5812,7 @@ mod tests {
         payroll_client.request_emergency_withdrawal(&treasury_owner, &500i128, &recipient);
     }
 
-    // ── Issue #191: deposit replay protection ────────────────────────────────
+    // ?? Issue #191: deposit replay protection ????????????????????????????????
 
     #[test]
     fn test_deposit_with_unique_id_succeeds() {
@@ -5666,7 +5848,7 @@ mod tests {
         payroll_client.deposit(&treasury, &500i128, &id2);
     }
 
-    // ── Issue #194: amount boundary validations ──────────────────────────────
+    // ?? Issue #194: amount boundary validations ??????????????????????????????
 
     #[test]
     #[should_panic(expected = "Amount must be positive")]
@@ -5748,7 +5930,7 @@ mod tests {
         );
     }
 
-    // ── Issue #196: Storage key versioning strategy tests ────────────────────
+    // ?? Issue #196: Storage key versioning strategy tests ????????????????????
 
     #[test]
     fn test_storage_keys_are_namespaced() {
@@ -5798,7 +5980,7 @@ mod tests {
         assert_eq!(run.employee_count, 1);
     }
 
-    // ── Issue #203: Settlement completion guard tests ────────────────────────
+    // ?? Issue #203: Settlement completion guard tests ????????????????????????
 
     #[test]
     fn test_finalize_run_draft_is_idempotent() {
@@ -6019,7 +6201,7 @@ mod tests {
         payroll_client.set_asset_allowed(&token_id, &false);
     }
 
-    // ── Reviewer Authorization & Run Review Tests ────────────────────────────
+    // ?? Reviewer Authorization & Run Review Tests ????????????????????????????
 
     #[test]
     fn test_reviewer_authorization_workflow() {
@@ -7199,9 +7381,9 @@ mod tests {
         assert_eq!(version.version, 1);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
     // #401: Batch Lock Timestamp Query Helper Tests
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
 
     #[test]
     fn test_batch_lock_timestamp_non_existent_run() {
@@ -7247,9 +7429,9 @@ mod tests {
         );
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
     // #402: Safe Treasury Balance Summary View Tests
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
 
     #[test]
     fn test_safe_treasury_summary_view() {
@@ -7295,9 +7477,9 @@ mod tests {
         assert_eq!(summary_released.available_balance, 1_000_000);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
     // #403: Payroll Approval Expiry Validation Tests
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
 
     #[test]
     fn test_payroll_approval_expiry_active_and_expired() {
@@ -7367,9 +7549,9 @@ mod tests {
         payroll_client.finalize_payroll_run(&admin, &run_id);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
     // #404: Cancelled Batch Read Status Helper Tests
-    // ═════════════════════════════════════════════════════════════════════════
+    // ?????????????????????????????????????????????????????????????????????????
 
     #[test]
     fn test_cancelled_batch_status_read_helper() {

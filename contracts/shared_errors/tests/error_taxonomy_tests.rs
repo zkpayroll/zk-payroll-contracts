@@ -64,6 +64,7 @@ mod error_taxonomy_tests {
         assert_eq!(TreasuryError::TreasuryLocked as u32, 404);
         assert_eq!(TreasuryError::InsufficientUnreservedBalance as u32, 405);
         assert_eq!(TreasuryError::InvalidAssetConfiguration as u32, 406);
+        assert_eq!(TreasuryError::ReservationNotFound as u32, 407);
 
         // State (500-599)
         assert_eq!(StateError::PayrollRunNotFound as u32, 500);
@@ -113,7 +114,7 @@ mod error_taxonomy_tests {
         assert!((payment_error as u32) >= 300 && (payment_error as u32) < 400);
 
         // Treasury: 400-499
-        let treasury_error = TreasuryError::InvalidAssetConfiguration;
+        let treasury_error = TreasuryError::ReservationNotFound;
         assert!((treasury_error as u32) >= 400 && (treasury_error as u32) < 500);
 
         // State: 500-599
