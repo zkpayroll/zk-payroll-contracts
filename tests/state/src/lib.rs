@@ -1,7 +1,5 @@
 #![cfg(test)]
 
-mod cancellation_state_cleanup_tests;
-
 use payroll::{Payroll, PayrollClient, RunDraftState};
 use proof_verifier::{ProofVerifier, VerificationKey};
 use salary_commitment::SalaryCommitmentContract;

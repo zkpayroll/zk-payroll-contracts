@@ -1,0 +1,111 @@
+{
+  "registry.CompanyRegistered": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyRegistered" },
+      { "type": "u64" }
+    ],
+    "data": [
+      { "name": "admin", "type": "Address" },
+      { "name": "treasury", "type": "Address" }
+    ]
+  },
+  "registry.EmployeeAdded": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "EmployeeAdded" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "commitment", "type": "BytesN<32>" }]
+  },
+  "registry.EmployeeRemoved": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "EmployeeRemoved" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "registry.CommitmentUpdated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CommitmentUpdated" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "new_commitment", "type": "BytesN<32>" }]
+  },
+  "registry.EmployeeStatusChanged": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "EmployeeStatusChanged" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [
+      { "name": "previous_status", "type": "Symbol" },
+      { "name": "new_status", "type": "Symbol" }
+    ]
+  },
+  "registry.RegistryPauseMgrSet": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "RegistryPauseMgrSet" }],
+    "data": [{ "name": "pause_manager", "type": "Address" }]
+  },
+  "registry.CompanyAdminProposed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyAdminProposed" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "new_admin", "type": "Address" }]
+  },
+  "registry.CompanyAdminRotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyAdminRotated" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "new_admin", "type": "Address" }]
+  },
+  "registry.CompanyAdminRotCancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyAdminRotCancelled" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": []
+  },
+  "registry.CompanyTreasProposed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyTreasProposed" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "new_treasury", "type": "Address" }]
+  },
+  "registry.CompanyTreasRotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyTreasRotated" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "new_treasury", "type": "Address" }]
+  },
+  "registry.CompanyTreasRotCancelled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyTreasRotCancelled" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": []
+  }
+}

@@ -862,6 +862,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "event_schema_snapshots"
+version = "0.1.0"
+dependencies = [
+ "payroll_events",
+ "serde",
+ "serde_json",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2419,6 +2429,13 @@ checksum = "75872d278a8f37ef87fa0ddbda7802605cb18344497949862c0d4dcb291eba60"
 dependencies = [
  "digest",
  "keccak",
+]
+
+[[package]]
+name = "shared_errors"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]

@@ -298,7 +298,7 @@ fn test_get_commitment_returns_employee_commitment() {
     assert_eq!(got, commitment);
 }
 
-// ── Issue #90: employee eligibility ──────────────────────────────────────────
+// ?? Issue #90: employee eligibility ??????????????????????????????????????????
 
 #[test]
 fn test_add_employee_sets_active_status() {
@@ -543,7 +543,7 @@ fn test_reactivate_employee_emits_lifecycle_event() {
     assert_eq!(emp_addr, employee);
 }
 
-// ── Issue #91: company admin/treasury rotation ────────────────────────────────
+// ?? Issue #91: company admin/treasury rotation ????????????????????????????????
 
 #[test]
 fn test_admin_rotation_full_flow() {
@@ -643,7 +643,7 @@ fn test_duplicate_admin_rotation_proposal_rejected() {
     client.propose_admin_rotation(&company_id, &admin, &new_admin);
 }
 
-// ── Issue #152: Duplicate company registration rejection tests ───────────────
+// ?? Issue #152: Duplicate company registration rejection tests ???????????????
 
 #[test]
 fn test_register_company_duplicate_registration_fails() {
@@ -674,11 +674,11 @@ fn test_register_company_duplicate_registration_panics() {
     client.register_company(&admin, &treasury);
 }
 
-// ── Issue #171: admin / treasury role-separation tests ───────────────────────
+// ?? Issue #171: admin / treasury role-separation tests ???????????????????????
 
 /// Role separation: holding the company's *treasury* address does not
 /// confer HR-admin privileges. `add_employee` must still require the
-/// registered company admin's signature — the treasury holder signing for
+/// registered company admin's signature ? the treasury holder signing for
 /// themselves is not enough.
 #[test]
 #[should_panic(expected = "authorized")]
@@ -704,7 +704,7 @@ fn test_treasury_cannot_add_employee() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[3u8; 32]);
 
-    // The company's own treasury address signs the call — a legitimate
+    // The company's own treasury address signs the call ? a legitimate
     // role in this system, just not the HR-admin role.
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &treasury,
@@ -719,7 +719,7 @@ fn test_treasury_cannot_add_employee() {
 }
 
 /// Role separation: the treasury address is not the admin, so it must be
-/// rejected when passed as `current_admin` to an admin-rotation call —
+/// rejected when passed as `current_admin` to an admin-rotation call ?
 /// business-logic identity checks, not just signatures, must hold.
 #[test]
 #[should_panic(expected = "Unauthorized: caller is not the company admin")]
@@ -838,4 +838,28 @@ fn test_cancel_treasury_rotation_emits_event() {
     assert_eq!(sym0, Symbol::new(&env, "TreasuryRotationCancelled"));
     let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
     assert_eq!(comp_id, company_id);
+}
+
+// -- Issue #422: employee active status query helper --------------------------
+
+#[test]
+fn test_is_employee_active_helper_tracks_status_without_exposing_commitment() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    assert!(!client.is_employee_active(&company_id, &employee));
+
+    client.add_employee(&company_id, &employee, &commitment);
+    assert!(client.is_employee_active(&company_id, &employee));
+
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    assert!(!client.is_employee_active(&company_id, &employee));
+
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
+    assert!(client.is_employee_active(&company_id, &employee));
 }
