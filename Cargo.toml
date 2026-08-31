@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["contracts/*", "cli", "tests/migrations", "tests/audit", "tests/events"]
-members = ["contracts/*", "cli", "tests/migrations", "tests/storage"]
 members = [
     "contracts/*",
     "cli",
     "tests/migrations",
+    "tests/audit",
+    "tests/event-ordering",
     "tests/metadata",
     "tests/state",
     "tests/storage",
@@ -13,7 +13,7 @@ members = [
     "tests/events",
     "tests/event_schema",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "contracts/tests"]
 
 
 [workspace.package]

@@ -254,7 +254,11 @@ name = "audit_revocation_event_tests"
 version = "0.1.0"
 dependencies = [
  "audit_module",
+ "payroll",
+ "proof_verifier",
+ "salary_commitment",
  "soroban-sdk",
+ "token",
 ]
 
 [[package]]
