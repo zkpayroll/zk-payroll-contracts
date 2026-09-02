@@ -16,12 +16,10 @@ Payroll execution requires appropriate authorization from both the company admin
 - **Treasury Auth**: Implicitly enforced by the token contract when `token_client.transfer(&company.treasury, ...)` is called. Soroban's auth framework requires the `company.treasury` signature to be present in the transaction auth entries.
 - **Asset Allowlist**: Checked via `is_asset_allowed()`.
 
-## Reserve Boundary Checks
-The treasury must hold at least the full payment amount before payroll execution. The payment executor transfers funds before recording the payment, nullifier, period count, or running total, so an insufficient reserve fails without creating a partial payment record.
+## Reservation Lookup Errors
+Treasury reservation reads have two surfaces:
 
-The payment executor boundary suite covers:
-- An exact reserve balance, which transfers successfully and leaves the treasury at zero.
-- A reserve one unit below the requested payment, which is rejected without changing balances or payment bookkeeping.
-- A zero reserve for a positive payment, which is rejected without changing balances or payment bookkeeping.
+- `get_reservation_expiry(asset)` returns `None` when the asset has no reservation policy.
+- `get_required_reservation_expiry(asset)` fails with `Treasury reservation not found` when callers require a reservation to exist before continuing.
 
-Operational callers should treat an insufficient-balance failure as an actionable funding error: replenish the registered treasury and retry with the same payment inputs only after confirming the failed transaction was not committed.
+SDKs and treasury screens should use the required helper when a missing reservation is a user-actionable not-found state, and should map `TreasuryError::ReservationNotFound` to a non-retryable configuration message.

@@ -15,11 +15,11 @@ contributors.
   amounts are NOT.
 
 > **Tip:** Pair this reference with:
-> - [monitoring/event-taxonomy.md](./monitoring/event-taxonomy.md) — the
+> - [monitoring/event-taxonomy.md](./monitoring/event-taxonomy.md) ? the
 >   canonical category taxonomy (`ONB`, `FND`, `EXE`, `AUD`, `SEC`).
 > - [monitoring/event-severity-mappings.md](./monitoring/event-severity-mappings.md)
->   — severity levels and alert routing guidance.
-> - [payload-examples.md](./payload-examples.md) — sample XDR payloads.
+>   ? severity levels and alert routing guidance.
+> - [payload-examples.md](./payload-examples.md) ? sample XDR payloads.
 
 ---
 
@@ -28,29 +28,29 @@ contributors.
 | Concept | Convention |
 |---------|------------|
 | `topics[0]` | `Symbol` event name (e.g. `"CompanyRegistered"`) |
-| `topics[1..]` | Primary identifiers (`company_id`, `employee`, `auditor`, …) |
+| `topics[1..]` | Primary identifiers (`company_id`, `employee`, `auditor`, ?) |
 | `data` | Payload tuple in declaration order |
 | Empty data | Serialised as `()` (Rust unit) |
-| Amount fields | `i128` raw token units — divide by token decimals before display |
+| Amount fields | `i128` raw token units ? divide by token decimals before display |
 | Timestamps | `u64` Unix seconds from `env.ledger().timestamp()` |
 | Ledger fields | `u32` from `env.ledger().sequence()` |
-| Identifiers | `company_id` is `u64` (registry) or `Symbol` (audit / batch facade — see notes) |
+| Identifiers | `company_id` is `u64` (registry) or `Symbol` (audit / batch facade ? see notes) |
 
-**Topic format — modern contracts**
+**Topic format ? modern contracts**
 
 ```
 topics = ( Symbol("<EventName>"), <primary_id_1>, <primary_id_2>, ... )
 data   = ( <payload_field_1>, <payload_field_2>, ... )
 ```
 
-**Topic format — `pause_manager`** (legacy two-symbol convention)
+**Topic format ? `pause_manager`** (legacy two-symbol convention)
 
 ```
 topics = ( Symbol("PauseManager"), Symbol("<verb>") )
 data   = ( <payload> ) | ()
 ```
 
-**Topic format — legacy `payroll` batch facade** (older contract path)
+**Topic format ? legacy `payroll` batch facade** (older contract path)
 
 ```
 topics = ( Symbol("payroll"), Symbol("<verb>") )
@@ -63,11 +63,11 @@ data   = ( <payload> )
 
 | Domain | Section | Primary contract(s) |
 |--------|---------|--------------------|
-| Employee lifecycle & onboarding | [§ Employee Events](#employee-events) | `payroll_registry`, `salary_commitment` |
-| Payroll execution & proof | [§ Payroll Events](#payroll-events) | `payment_executor`, `payroll` (legacy) |
-| Treasury administration | [§ Treasury Events](#treasury-events) | `payroll_registry`, `pause_manager` |
-| Audit & compliance | [§ Audit Events](#audit-events) | `audit_module` |
-| ZK proof verification | [§ Proof Events](#proof-events) | `proof_verifier` (cross-contract effects) |
+| Employee lifecycle & onboarding | [? Employee Events](#employee-events) | `payroll_registry`, `salary_commitment` |
+| Payroll execution & proof | [? Payroll Events](#payroll-events) | `payment_executor`, `payroll` (legacy) |
+| Treasury administration | [? Treasury Events](#treasury-events) | `payroll_registry`, `pause_manager` |
+| Audit & compliance | [? Audit Events](#audit-events) | `audit_module` |
+| ZK proof verification | [? Proof Events](#proof-events) | `proof_verifier` (cross-contract effects) |
 
 ---
 
@@ -76,7 +76,7 @@ data   = ( <payload> )
 These events track the lifecycle of employees and their commitment state.
 HR UIs, identity providers, and roster indexers subscribe to them.
 
-### `EmployeeAdded` — `payroll_registry`
+### `EmployeeAdded` ? `payroll_registry`
 
 Emitted when a new employee and their Poseidon commitment are registered
 under a company. Initial status defaults to `Active`.
@@ -94,7 +94,7 @@ data       (BytesN<32> commitment,)
 
 ---
 
-### `EmployeeRemoved` — `payroll_registry`
+### `EmployeeRemoved` ? `payroll_registry`
 
 Emitted when an employee record is permanently deleted from the registry.
 
@@ -111,7 +111,7 @@ data       ()
 
 ---
 
-### `EmployeeDeactivated` — `payroll_registry`
+### `EmployeeDeactivated` ? `payroll_registry`
 
 Emitted when a registered employee is marked `Inactive` via
 `set_employee_status`. Deactivated employees remain in storage but are not
@@ -137,7 +137,7 @@ data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledge
 
 ---
 
-### `EmployeeReactivated` — `payroll_registry`
+### `EmployeeReactivated` ? `payroll_registry`
 
 Emitted when a registered employee is marked `Active` via
 `set_employee_status`. Reactivated employees become eligible for payroll
@@ -163,7 +163,7 @@ data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledge
 
 ---
 
-### `EmployeeStatusUpdated` — `payroll_registry`
+### `EmployeeStatusUpdated` ? `payroll_registry`
 
 Emitted when a registered employee is moved to `Incomplete`. This state is
 used when required registration data is missing and should be treated as
@@ -182,12 +182,12 @@ data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledge
 
 ---
 
-### `CommitmentUpdated` — `salary_commitment`
+### `CommitmentUpdated` ? `salary_commitment`
 
 Emitted when a new commitment is stored (`store_commitment`) or an existing
 one is updated (`update_commitment`). The same event name is also emitted
 from `payroll_registry.update_commitment` with `(company_id, employee)` as
-the topic tuple — indexers MUST subscribe by contract address to
+the topic tuple ? indexers MUST subscribe by contract address to
 disambiguate.
 
 **From `salary_commitment`:**
@@ -209,12 +209,12 @@ data       (BytesN<32> new_commitment,)
 |----------|-----------|
 | `LOW` | Roster caches, salary-history builders, indexers |
 
-> ⚠️ A `CommitmentUpdated` followed by a `CommitmentRotated` in the same
+> ?? A `CommitmentUpdated` followed by a `CommitmentRotated` in the same
 > transaction indicates the old commitment has been invalidated.
 
 ---
 
-### `CommitmentRotated` — `salary_commitment`
+### `CommitmentRotated` ? `salary_commitment`
 
 Emitted when an existing commitment is **explicitly rotated** (old value
 revoked, new value stored). Indexers that cache commitments MUST replace
@@ -232,7 +232,7 @@ data       (BytesN<32> old_commitment, BytesN<32> new_commitment)
 
 ---
 
-### `CommitmentLocked` — `salary_commitment`
+### `CommitmentLocked` ? `salary_commitment`
 
 Emitted when an employee's commitment is locked to prevent silent updates
 during a finalized payroll draft or audited payroll run. After this event,
@@ -246,11 +246,11 @@ data       ()
 
 | Severity | Consumers |
 |----------|-----------|
-| `MEDIUM` (routine during payroll finalisation; treat as integrity signal — any unaccompanied unlock should be investigated) | HR UIs, compliance reviewers, monitoring |
+| `MEDIUM` (routine during payroll finalisation; treat as integrity signal ? any unaccompanied unlock should be investigated) | HR UIs, compliance reviewers, monitoring |
 
 ---
 
-### `CommitmentUnlocked` — `salary_commitment`
+### `CommitmentUnlocked` ? `salary_commitment`
 
 Emitted when an employee's commitment lock is cleared by the admin. Should
 only follow a previously observed `CommitmentLocked` for the same employee.
@@ -267,10 +267,10 @@ data       ()
 
 ---
 
-### `ReferenceIdSet` — `salary_commitment`
+### `ReferenceIdSet` ? `salary_commitment`
 
 Emitted when an external HR-system reference ID (e.g. `"EMP12345"`) is bound
-to an employee address. IDs are non-sensitive metadata only — never include
+to an employee address. IDs are non-sensitive metadata only ? never include
 salary or bank information.
 
 ```
@@ -285,7 +285,7 @@ data       (String reference_id,)
 
 ---
 
-### `AdminRotationProposed` — `salary_commitment`
+### `AdminRotationProposed` ? `salary_commitment`
 
 Step 1 of the two-step HR-admin rotation. Signals a pending change of the
 HR admin address. Must be followed by `AdminRotationAccepted` (rotates the
@@ -303,7 +303,7 @@ data       (Address new_admin,)
 
 ---
 
-### `AdminRotationAccepted` — `salary_commitment`
+### `AdminRotationAccepted` ? `salary_commitment`
 
 Step 2 of the rotation: the proposed admin has accepted and now holds the
 HR-admin role.
@@ -320,7 +320,7 @@ data       ()
 
 ---
 
-### `AdminRotationCancelled` — `salary_commitment`
+### `AdminRotationCancelled` ? `salary_commitment`
 
 The current admin cancelled a pending rotation before acceptance. The
 admin set did NOT change.
@@ -343,7 +343,7 @@ These events cover payroll periods, individual payment execution, and the
 proof-verified settlement step. Reconciliation tools, payment dashboards,
 and indexers MUST subscribe to this domain.
 
-### `PeriodCreated` — `payment_executor`
+### `PeriodCreated` ? `payment_executor`
 
 Emitted when a new payroll period is opened for a company. Periods are
 monotonically numbered per company. A new period cannot be opened while a
@@ -361,7 +361,7 @@ data       (u32 period_id,)
 
 ---
 
-### `PeriodClosed` — `payment_executor`
+### `PeriodClosed` ? `payment_executor`
 
 Emitted when a payroll period is closed. No further payments can be made
 against the period after this event.
@@ -378,7 +378,7 @@ data       (u32 period_id,)
 
 ---
 
-### `PayrollProcessed` — `payment_executor`
+### `PayrollProcessed` ? `payment_executor`
 
 Emitted after a successful private payment execution via the period-aware
 payment path. The included `amount` is a plaintext value (the off-chain
@@ -395,13 +395,13 @@ data       (Address employee, i128 amount, u32 period_id)
 |----------|-----------|
 | `LOW` (high-volume success) | Reconciliation tools, payment dashboards, per-company & per-period aggregators |
 
-> 📌 Distinguish from the legacy `payment_executed` event (§ Legacy Batch
+> ?? Distinguish from the legacy `payment_executed` event (? Legacy Batch
 > Events): `PayrollProcessed` carries `company_id` in `topics[1]` and
 > `period_id` in `data[2]`.
 
 ---
 
-### Legacy Batch Events — `payroll` (batch facade)
+### Legacy Batch Events ? `payroll` (batch facade)
 
 The older `payroll` contract uses a two-symbol topic convention. Treat it
 as a separate emission source, but normalise records into a common schema
@@ -449,6 +449,18 @@ assert topics only; they do not log or export payroll amounts, commitments, or
 employee addresses. A failed or unauthorized approval reverts and emits no
 `run_approved` event.
 
+
+#### `payroll / draft_updated`
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("draft_updated")
+data       (u64 draft_id, Symbol period_label, i128 total_amount, u32 employee_count, u32 amendment_count)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | SDKs, dashboards, draft-review indexers |
 #### `payroll / deposit`
 
 ```
@@ -461,7 +473,7 @@ data       (Address from, i128 amount)
 |----------|-----------|
 | `LOW` (treasury deposits) | Funding dashboards, treasury monitors |
 
-> ⚠️ The legacy `payroll` contract emits additional event types beyond the
+> ?? The legacy `payroll` contract emits additional event types beyond the
 > three enumerated above (for example `draft_amended`, run lifecycle and
 > submission events). This document only covers the high-priority, externally
 > documented topics. To enumerate the full surface, subscribe by contract
@@ -475,7 +487,7 @@ data       (Address from, i128 amount)
 Events describing company onboarding and privileged-role administration
 that affect treasury behavior (admin/treasury rotation, pause control).
 
-### `CompanyRegistered` — `payroll_registry`
+### `CompanyRegistered` ? `payroll_registry`
 
 Emitted when a new company is registered. Carries the initial admin and
 treasury addresses used for subsequent payment execution.
@@ -495,16 +507,16 @@ data       (Address admin, Address treasury)
 ### Privileged-Role Rotation Events (cross-contract cross-reference)
 
 The two-step rotation pattern is implemented in two contracts and emits the
-canonical topic names listed under [§ Employee Events](#employee-events) for
+canonical topic names listed under [? Employee Events](#employee-events) for
 `salary_commitment`, and under [`pause_manager` events](#pausemanager--paused--pausemanager) below for `pause_manager`. Subscribe **by contract address** to
 distinguish:
 
 | Contract | Event topic | Section |
 |----------|-------------|---------|
-| `salary_commitment` | `AdminRotationProposed` / `Accepted` / `Cancelled` | [§ Employee Events](#employee-events) |
-| `pause_manager` | `PauseManager / op_proposed` / `op_rotated` / `op_cancelled` | [§ pause_manager events](#pausemanager--paused--pausemanager) |
+| `salary_commitment` | `AdminRotationProposed` / `Accepted` / `Cancelled` | [? Employee Events](#employee-events) |
+| `pause_manager` | `PauseManager / op_proposed` / `op_rotated` / `op_cancelled` | [? pause_manager events](#pausemanager--paused--pausemanager) |
 
-> 📌 `payroll_registry` exposes `propose_*_rotation` / `accept_*_rotation` /
+> ?? `payroll_registry` exposes `propose_*_rotation` / `accept_*_rotation` /
 > `cancel_*_rotation` storage functions for company-level admin and treasury
 > roles but **does not emit rotation events**. Off-chain monitors tracking
 > privileged changes at the company level must poll registry storage or
@@ -512,7 +524,7 @@ distinguish:
 
 ---
 
-### `PauseManager / paused` — `pause_manager`
+### `PauseManager / paused` ? `pause_manager`
 
 Emitted when the system is paused. All payroll execution halts immediately
 until unpaused. Treat as `CRITICAL`.
@@ -529,7 +541,7 @@ data       ()
 
 ---
 
-### `PauseManager / unpaused` — `pause_manager`
+### `PauseManager / unpaused` ? `pause_manager`
 
 Emitted when the system resumes. Operators MUST verify the root cause of the
 preceding `paused` event before treating this as routine.
@@ -548,10 +560,10 @@ data       ()
 
 ## Audit Events
 
-Compliance-grade events from `audit_module`. They carry only metadata —
+Compliance-grade events from `audit_module`. They carry only metadata ?
 salary values are NEVER emitted, consistent with the privacy boundary.
 
-### `ViewKeyGenerated` — `audit_module`
+### `ViewKeyGenerated` ? `audit_module`
 
 Emitted when a view key is generated for an auditor. Includes the raw key
 bytes (auditor-address-bound) and the ledger at which the key expires.
@@ -568,17 +580,17 @@ data       (BytesN<32> key_bytes, u32 expiration_ledger)
 
 ---
 
-### `ViewKeyRevoked` — `audit_module` (historical)
+### `ViewKeyRevoked` ? `audit_module` (historical)
 
-> ⚠️ The canonical source only emits `AuditAccessRevoked` (see below). The
+> ?? The canonical source only emits `AuditAccessRevoked` (see below). The
 > name `ViewKeyRevoked` does not appear in the current `master` emission
-> surface — it is documented here only so that older indexers / external
+> surface ? it is documented here only so that older indexers / external
 > tooling can recognise it if they encounter it from legacy deployments.
 > **Treat `AuditAccessRevoked` as the authoritative event.**
 
 ---
 
-### `AuditAccessRevoked` — `audit_module`
+### `AuditAccessRevoked` ? `audit_module`
 
 Emitted when a view key is revoked before its expiration. Carries the
 revoking admin, the affected auditor, and the ledger timestamp at which
@@ -597,10 +609,10 @@ data       (u64 timestamp,)    // env.ledger().timestamp() at revocation
 
 ---
 
-### `AuditSuccessful` — `audit_module`
+### `AuditSuccessful` ? `audit_module`
 
 Emitted when an auditor's commitment verification passes. The second data
-field is a **keyed** commitment (`SHA-256(view_key ‖ commitment)`) — not the
+field is a **keyed** commitment (`SHA-256(view_key ? commitment)`) ? not the
 raw salary commitment, so it is safe to publish for off-chain auditing.
 
 ```
@@ -624,7 +636,7 @@ data       (AuditScope scope, BytesN<32> keyed_stored)
 
 ---
 
-### `AggregateAuditGenerated` — `audit_module`
+### `AggregateAuditGenerated` ? `audit_module`
 
 Emitted when an aggregate compliance report is generated for a company and
 period. No individual salary data is included.
@@ -635,7 +647,7 @@ topics[1]  Address auditor
 data       (Symbol company_id, u64 period_start, u64 period_end)
 ```
 
-> 📌 `company_id` here is the audit-module `Symbol` form (string-coerced
+> ?? `company_id` here is the audit-module `Symbol` form (string-coerced
 > identifier), which differs from the `u64` integer ID used by
 > `payroll_registry` and `payment_executor`.
 
@@ -645,11 +657,11 @@ data       (Symbol company_id, u64 period_start, u64 period_end)
 
 ---
 
-### `AuditSummaryExported` — `audit_module`
+### `AuditSummaryExported` ? `audit_module`
 
 Emitted when an exportable metadata summary is produced for external
 compliance tooling (issue #93). The summary includes only verification
-counts and metadata — never salary values.
+counts and metadata ? never salary values.
 
 ```
 topics[0]  Symbol("AuditSummaryExported")
@@ -675,9 +687,9 @@ public signal that a Groth16 proof was or was not verified.
 > monitors must listen for failed transactions and read the diagnostic
 > string from the host envelope.
 
-### Proof success — `PayrollProcessed`
+### Proof success ? `PayrollProcessed`
 
-Every `PayrollProcessed` event (§ Payroll Events) is also an implicit
+Every `PayrollProcessed` event (? Payroll Events) is also an implicit
 **proof-verification success**: the contract only emits it after
 `proof_verifier.verify` returned `true` and the asset allowlist passed.
 
@@ -687,9 +699,9 @@ Every `PayrollProcessed` event (§ Payroll Events) is also an implicit
 |--------------|-----------------|-------------------|
 | Success | `PayrollProcessed` event in same tx | Indexers may treat as authoritative proof-acceptance |
 | Failure (`CommitmentMismatch`, malformed proof, etc.) | Transaction reverts with host diagnostic | Detect via failed-tx monitoring; see [event-severity-mappings.md](./monitoring/event-severity-mappings.md) Exceptional Conditions |
-| Stale proof (`ProofExpired`, > 7 days) | `PaymentError::ProofExpired` reversion | Detect via failed-tx monitoring; § Operational Impact |
-| Replay attempt | `PaymentError::ProofAlreadyUsed` reversion | `CRITICAL` alert (see [alert-rules.md](./monitoring/alert-rules.md) § 2) |
-| Payment in closed period | `PaymentError::PeriodClosed` reversion | `MEDIUM` alert (see [alert-rules.md](./monitoring/alert-rules.md) § 6) |
+| Stale proof (`ProofExpired`, > 7 days) | `PaymentError::ProofExpired` reversion | Detect via failed-tx monitoring; ? Operational Impact |
+| Replay attempt | `PaymentError::ProofAlreadyUsed` reversion | `CRITICAL` alert (see [alert-rules.md](./monitoring/alert-rules.md) ? 2) |
+| Payment in closed period | `PaymentError::PeriodClosed` reversion | `MEDIUM` alert (see [alert-rules.md](./monitoring/alert-rules.md) ? 6) |
 
 | Severity | Consumers |
 |----------|-----------|
@@ -703,37 +715,37 @@ Quick-reference: which consumer types should subscribe to which domain.
 
 | Consumer | Employee | Payroll | Treasury | Audit | Proof |
 |----------|:--------:|:-------:|:--------:|:-----:|:-----:|
-| HR/Employee UI | ✓ | – | – | – | – |
-| Payroll operator UI | ✓ | ✓ | ✓ | – | – |
-| Payment indexer | ✓ | ✓ | ✓ | – | ✓ |
-| Reconciliation tool | – | ✓ | ✓ | ✓ | ✓ |
-| Treasury dashboard | – | ✓ | ✓ | – | – |
-| Compliance dashboard | – | ✓ | – | ✓ | – |
-| Audit-trace builder | ✓ | – | – | ✓ | ✓ |
-| Incident-response alerts | ✓ (locks) | ✓ | ✓ (pause) | ✓ (revokes) | ✓ (failed-tx) |
-| External compliance export | – | – | – | ✓ | – |
-| Identity provider / HR-system bridge | ✓ (`ReferenceIdSet`) | – | – | – | – |
+| HR/Employee UI | ? | ? | ? | ? | ? |
+| Payroll operator UI | ? | ? | ? | ? | ? |
+| Payment indexer | ? | ? | ? | ? | ? |
+| Reconciliation tool | ? | ? | ? | ? | ? |
+| Treasury dashboard | ? | ? | ? | ? | ? |
+| Compliance dashboard | ? | ? | ? | ? | ? |
+| Audit-trace builder | ? | ? | ? | ? | ? |
+| Incident-response alerts | ? (locks) | ? | ? (pause) | ? (revokes) | ? (failed-tx) |
+| External compliance export | ? | ? | ? | ? | ? |
+| Identity provider / HR-system bridge | ? (`ReferenceIdSet`) | ? | ? | ? | ? |
 
 ---
 
 ## Indexer Integration Notes
 
-- Subscribe **by contract address and topic discriminant** — multiple
+- Subscribe **by contract address and topic discriminant** ? multiple
   contracts emit events that overlap by name (e.g. `CommitmentUpdated` is
   emitted by both `salary_commitment` and `payroll_registry`).
 - Decode topics and data using `ScVal` (`Symbol`, `Address`, `u32`, `u64`,
   `i128`, `BytesN<N>`, tuples). The Stellar SDK's `EventFilter` is the
   recommended subscription mechanism.
-- `i128` amount fields are **raw token units** — divide by the token's
+- `i128` amount fields are **raw token units** ? divide by the token's
   decimal precision before storing or displaying.
 - The two payment paths (`payment_executor` and legacy `payroll`) use
-  different topic layouts — normalise records to a common schema keyed on
+  different topic layouts ? normalise records to a common schema keyed on
   `(company_id, employee, period, amount, ledger_sequence)` to avoid
   double-counting.
 - `company_id` is a `u64` integer in `payroll_registry` / `payment_executor`,
   but a `Symbol` string identifier in `audit_module`. Convert both to a
   stable off-chain UUID namespace when correlating across domains.
-- Failed proof verifications do NOT emit an event — monitor host-level
+- Failed proof verifications do NOT emit an event ? monitor host-level
   transaction failures and parse reversion diagnostics instead.
 
 ---
@@ -742,12 +754,12 @@ Quick-reference: which consumer types should subscribe to which domain.
 
 - This document covers the v0 event surface emitted by `master`. Older
   deployments may emit the legacy `payment_executed` and `ViewKeyRevoked`
-  names — see [interop/proof-schema-version-negotiation.md](./interop/proof-schema-version-negotiation.md)
+  names ? see [interop/proof-schema-version-negotiation.md](./interop/proof-schema-version-negotiation.md)
   for the negotiation protocol used when older and newer clients coexist.
 - New events MUST be added here AND in [event-taxonomy.md](./monitoring/event-taxonomy.md)
   AND [event-severity-mappings.md](./monitoring/event-severity-mappings.md)
   before a release ships.
-- Renaming an event is a **breaking change** — use topic aliases during
+- Renaming an event is a **breaking change** ? use topic aliases during
   deprecation windows, and document the migration window in release notes.
 
 ---
@@ -786,8 +798,8 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `AggregateAuditGenerated` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end)` |
 | `AuditSummaryExported` | `audit_module` | `(auditor)` | `(company_id, period_start, period_end, total)` |
 | `PauseManager / op_proposed` | `pause_manager` | `("PauseManager", "op_proposed")` | `(current_operator, new_operator)` |
-| `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address — single-value data)* |
-| `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address — single-value data)* |
+| `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address ? single-value data)* |
+| `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address ? single-value data)* |
 
 ---
 

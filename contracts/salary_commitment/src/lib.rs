@@ -31,19 +31,6 @@ pub struct SalaryCommitment {
     pub revoked: bool,
 }
 
-/// Versioned salary commitment record scoped for payroll amendments
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct VersionedSalaryCommitment {
-    pub employer: Address,
-    pub employee: Address,
-    pub period: u64,
-    pub batch: u64,
-    pub commitment: BytesN<32>,
-    pub version: u32,
-    pub created_at: u64,
-}
-
 /// Nullifier to prevent double-spending
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -126,6 +113,22 @@ impl SalaryCommitmentContract {
             .persistent()
             .set(&DataKey::PayrollOperator, &operator);
         payroll_events::emit_payroll_operator_set(&env, operator);
+    }
+
+    /// Remove the delegated payroll operator. Only the HR admin may call.
+    /// Emits a privacy-safe event indicating the operator address that was
+    /// removed. This does not disclose any payroll-sensitive values.
+    pub fn remove_payroll_operator(env: Env) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        let key = DataKey::PayrollOperator;
+        let prev: Option<Address> = env.storage().persistent().get(&key);
+        if prev.is_none() {
+            panic!("No payroll operator set");
+        }
+        let prev_op = prev.unwrap();
+        env.storage().persistent().remove(&key);
+        payroll_events::emit_payroll_operator_removed(&env, prev_op);
     }
 
     /// Lock an employee's commitment to prevent updates via `update_commitment`
@@ -261,17 +264,9 @@ impl SalaryCommitmentContract {
         updated
     }
 
-    pub const ROTATION_COOLDOWN_PERIOD: u64 = 86_400;
-
-    /// Get the cooldown period for standard commitment rotations (in seconds).
-    pub fn get_rotation_cooldown_period(_env: Env) -> u64 {
-        Self::ROTATION_COOLDOWN_PERIOD
-    }
-
     /// Rotate a salary commitment: archive the old one with `revoked = true`
     /// and store the new one. Old commitments CANNOT be used for future payroll
     /// proofs (see `is_commitment_active`).
-    /// Enforces a cooldown period since the last update (issue #331).
     /// Only the HR admin may call.
     ///
     /// Fails if the employee's commitment is currently locked (see
@@ -295,16 +290,6 @@ impl SalaryCommitmentContract {
             .get(&key)
             .expect("Commitment not found");
 
-        let current_time = env.ledger().timestamp();
-        if existing.updated_at > 0
-            && current_time
-                < existing
-                    .updated_at
-                    .saturating_add(Self::ROTATION_COOLDOWN_PERIOD)
-        {
-            panic!("Rotation cooldown period has not elapsed");
-        }
-
         // Mark active commitment as revoked
         existing.revoked = true;
         env.storage().persistent().set(&key, &existing);
@@ -316,59 +301,6 @@ impl SalaryCommitmentContract {
         let rotated = Self::store_commitment(env.clone(), employee.clone(), new_commitment);
 
         // Emit an explicit rotation event
-        payroll_events::emit_commitment_rotated(
-            &env,
-            employee,
-            existing.commitment,
-            rotated.commitment.clone(),
-        );
-
-        rotated
-    }
-
-    /// Rotate a salary commitment immediately under emergency conditions (issue #331).
-    /// Bypasses the standard rotation cooldown period.
-    /// Requires authorization from the HR admin.
-    pub fn rotate_commitment_emergency(
-        env: Env,
-        employee: Address,
-        new_commitment: BytesN<32>,
-        reason: Symbol,
-    ) -> SalaryCommitment {
-        Self::require_not_paused(&env);
-        Self::require_admin(&env);
-
-        if Self::is_commitment_locked(env.clone(), employee.clone()) {
-            panic!("Commitment is locked: cannot rotate until unlocked by admin");
-        }
-
-        let key = DataKey::Commitment(employee.clone());
-        let mut existing: SalaryCommitment = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("Commitment not found");
-
-        // Mark active commitment as revoked
-        existing.revoked = true;
-        env.storage().persistent().set(&key, &existing);
-
-        // Archive the revoked commitment
-        Self::archive_commitment(&env, &employee, &existing.commitment, existing.version);
-
-        // Store the new active commitment
-        let rotated = Self::store_commitment(env.clone(), employee.clone(), new_commitment.clone());
-
-        // Emit emergency rotation event
-        payroll_events::emit_emergency_commitment_rotated(
-            &env,
-            employee.clone(),
-            existing.commitment.clone(),
-            new_commitment.clone(),
-            reason,
-        );
-
-        // Emit standard rotation event for backwards compatibility with indexers
         payroll_events::emit_commitment_rotated(
             &env,
             employee,
@@ -726,8 +658,8 @@ impl SalaryCommitmentContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
-    use soroban_sdk::{Env, IntoVal, Symbol, TryFromVal, TryIntoVal};
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{Env, IntoVal, Symbol, TryIntoVal};
 
     fn setup_with_admin() -> (Env, soroban_sdk::Address, Address) {
         let env = Env::default();
@@ -820,6 +752,42 @@ mod tests {
 
         // Attempt to rotate employee B onto employee A's active commitment.
         client.update_commitment(&employee_b, &commitment_a);
+    }
+
+    #[test]
+    fn test_remove_payroll_operator_emits_event() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let operator = Address::generate(&env);
+        // Set operator first
+        client.set_payroll_operator(&operator);
+
+        let before = env.events().all().len();
+        // Remove the operator
+        client.remove_payroll_operator();
+        let events = env.events().all();
+        assert_eq!(events.len(), before + 1);
+
+        // Find an event whose topics/data include our removal symbol and operator
+        let mut found_symbol = false;
+        let mut found_operator = false;
+        for ev in events.iter() {
+            for i in 0..ev.1.len() {
+                if let Ok(s) = ev.1.get(i).unwrap().try_into_val::<Symbol>(&env.clone()) {
+                    if s == Symbol::new(&env, "PayrollOperatorRemoved") {
+                        found_symbol = true;
+                    }
+                }
+                if let Ok(a) = ev.1.get(i).unwrap().try_into_val::<Address>(&env.clone()) {
+                    if a == operator {
+                        found_operator = true;
+                    }
+                }
+            }
+        }
+        assert!(found_symbol, "PayrollOperatorRemoved event not emitted");
+        assert!(found_operator, "Removed operator address not present in event data");
     }
 
     /// A commitment value that was rotated out (archived) can never be
@@ -1281,114 +1249,97 @@ mod tests {
         client.set_payroll_operator(&operator);
     }
 
-    // ── Issue #331: Employee wallet rotation cooling periods & emergency rotation ─
+    // ── Employee Reference ID Tests ──────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "Rotation cooldown period has not elapsed")]
-    fn test_rotate_commitment_cooldown_enforced() {
+    fn test_set_and_get_employee_reference_id() {
         let (env, contract_id, _admin) = setup_with_admin();
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let employee = Address::generate(&env);
-        let cmt1 = BytesN::from_array(&env, &[1u8; 32]);
-        let cmt2 = BytesN::from_array(&env, &[2u8; 32]);
+        let reference_id = soroban_sdk::String::from_str(&env, "EMP-12345");
 
-        env.ledger().set_timestamp(1_000_000);
-        client.store_commitment(&employee, &cmt1);
+        assert!(client.get_employee_reference_id(&employee).is_none());
+        assert!(client.get_employee_by_reference_id(&reference_id).is_none());
 
-        // Try rotating before cooldown has elapsed (e.g. 10 hours later)
-        env.ledger().set_timestamp(1_000_000 + 36_000);
-        client.rotate_commitment(&employee, &cmt2);
+        client.set_employee_reference_id(&employee, &reference_id);
+
+        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), reference_id);
+        assert_eq!(client.get_employee_by_reference_id(&reference_id).unwrap(), employee);
     }
 
     #[test]
-    fn test_rotate_commitment_after_cooldown_succeeds() {
+    fn test_update_employee_reference_id() {
         let (env, contract_id, _admin) = setup_with_admin();
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let employee = Address::generate(&env);
-        let cmt1 = BytesN::from_array(&env, &[1u8; 32]);
-        let cmt2 = BytesN::from_array(&env, &[2u8; 32]);
+        let old_ref_id = soroban_sdk::String::from_str(&env, "EMP-OLD");
+        let new_ref_id = soroban_sdk::String::from_str(&env, "EMP-NEW");
 
-        env.ledger().set_timestamp(1_000_000);
-        client.store_commitment(&employee, &cmt1);
+        client.set_employee_reference_id(&employee, &old_ref_id);
+        assert_eq!(client.get_employee_by_reference_id(&old_ref_id).unwrap(), employee);
 
-        // Rotate after cooldown has elapsed (24 hours + 1 second)
-        env.ledger().set_timestamp(1_000_000 + 86_401);
-        let rotated = client.rotate_commitment(&employee, &cmt2);
-        assert_eq!(rotated.commitment, cmt2);
-        assert!(!rotated.revoked);
+        client.set_employee_reference_id(&employee, &new_ref_id);
+
+        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), new_ref_id);
+        assert_eq!(client.get_employee_by_reference_id(&new_ref_id).unwrap(), employee);
+        
+        // Old reverse mapping should be cleared
+        assert!(client.get_employee_by_reference_id(&old_ref_id).is_none());
     }
 
     #[test]
-    fn test_rotate_commitment_emergency_bypasses_cooldown() {
+    #[should_panic(expected = "Reference ID already assigned to another employee")]
+    fn test_set_duplicate_reference_id_panics() {
         let (env, contract_id, _admin) = setup_with_admin();
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
-        let employee = Address::generate(&env);
-        let cmt1 = BytesN::from_array(&env, &[1u8; 32]);
-        let cmt2 = BytesN::from_array(&env, &[2u8; 32]);
+        let employee1 = Address::generate(&env);
+        let employee2 = Address::generate(&env);
+        let reference_id = soroban_sdk::String::from_str(&env, "EMP-COLLISION");
 
-        env.ledger().set_timestamp(1_000_000);
-        client.store_commitment(&employee, &cmt1);
-
-        // Emergency rotation 5 seconds later should succeed
-        env.ledger().set_timestamp(1_000_005);
-        let reason = Symbol::new(&env, "compromised");
-        let rotated = client.rotate_commitment_emergency(&employee, &cmt2, &reason);
-        assert_eq!(rotated.commitment, cmt2);
-        assert!(!rotated.revoked);
-
-        // Verify history recorded
-        let history = client.get_commitment_history(&employee);
-        assert_eq!(history.len(), 1);
-        assert_eq!(history.get(0).unwrap().commitment, cmt1);
+        client.set_employee_reference_id(&employee1, &reference_id);
+        client.set_employee_reference_id(&employee2, &reference_id);
     }
 
     #[test]
-    fn test_rotate_commitment_emergency_emits_event() {
+    #[should_panic(expected = "Reference ID must be 1-256 characters")]
+    fn test_set_empty_reference_id_panics() {
         let (env, contract_id, _admin) = setup_with_admin();
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let employee = Address::generate(&env);
-        let cmt1 = BytesN::from_array(&env, &[1u8; 32]);
-        let cmt2 = BytesN::from_array(&env, &[2u8; 32]);
+        let reference_id = soroban_sdk::String::from_str(&env, "");
 
-        env.ledger().set_timestamp(1_000_000);
-        client.store_commitment(&employee, &cmt1);
-
-        let before = env.events().all().len();
-        let reason = Symbol::new(&env, "key_lost");
-        client.rotate_commitment_emergency(&employee, &cmt2, &reason);
-        let after = env.events().all().len();
-        assert!(after > before);
-
-        let events = env.events().all();
-        let has_emergency_event = events.iter().any(|e| {
-            if let Some(val0) = e.1.get(0) {
-                if let Ok(sym) = soroban_sdk::Symbol::try_from_val(&env, &val0) {
-                    return sym == Symbol::new(&env, "EmergencyWalletRotated");
-                }
-            }
-            false
-        });
-        assert!(has_emergency_event, "EmergencyWalletRotated event expected");
+        client.set_employee_reference_id(&employee, &reference_id);
     }
 
     #[test]
-    #[should_panic(expected = "Commitment is locked: cannot rotate until unlocked by admin")]
-    fn test_rotate_commitment_emergency_rejects_locked_commitment() {
-        let (env, contract_id, _admin) = setup_with_admin();
+    #[should_panic(expected = "authorized")]
+    fn test_unauthorized_set_reference_id_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
-
+        
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+        
+        let unauthorized_user = Address::generate(&env);
         let employee = Address::generate(&env);
-        let cmt1 = BytesN::from_array(&env, &[1u8; 32]);
-        let cmt2 = BytesN::from_array(&env, &[2u8; 32]);
+        let reference_id = soroban_sdk::String::from_str(&env, "EMP-999");
 
-        client.store_commitment(&employee, &cmt1);
-        client.lock_commitment_updates(&employee);
-
-        let reason = Symbol::new(&env, "emergency");
-        client.rotate_commitment_emergency(&employee, &cmt2, &reason);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &unauthorized_user,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_employee_reference_id",
+                args: (employee.clone(), reference_id.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        
+        client.set_employee_reference_id(&employee, &reference_id);
     }
 }

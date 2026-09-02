@@ -64,6 +64,7 @@ mod error_taxonomy_tests {
         assert_eq!(TreasuryError::TreasuryLocked as u32, 404);
         assert_eq!(TreasuryError::InsufficientUnreservedBalance as u32, 405);
         assert_eq!(TreasuryError::InvalidAssetConfiguration as u32, 406);
+        assert_eq!(TreasuryError::ReservationNotFound as u32, 407);
 
         // State (500-599)
         assert_eq!(StateError::PayrollRunNotFound as u32, 500);
@@ -102,31 +103,31 @@ mod error_taxonomy_tests {
 
         // Proof: 100-199
         let proof_error = ProofError::InvalidNullifier;
-        assert!(proof_error as u32 >= 100 && (proof_error as u32) < 200);
+        assert!((proof_error as u32) >= 100 && (proof_error as u32) < 200);
 
         // Audit: 200-299
         let audit_error = AuditError::InvalidResponseTimestamp;
-        assert!(audit_error as u32 >= 200 && (audit_error as u32) < 300);
+        assert!((audit_error as u32) >= 200 && (audit_error as u32) < 300);
 
         // Payment: 300-399
         let payment_error = PaymentError::ArrayLengthMismatch;
-        assert!(payment_error as u32 >= 300 && (payment_error as u32) < 400);
+        assert!((payment_error as u32) >= 300 && (payment_error as u32) < 400);
 
         // Treasury: 400-499
-        let treasury_error = TreasuryError::InvalidAssetConfiguration;
-        assert!(treasury_error as u32 >= 400 && (treasury_error as u32) < 500);
+        let treasury_error = TreasuryError::ReservationNotFound;
+        assert!((treasury_error as u32) >= 400 && (treasury_error as u32) < 500);
 
         // State: 500-599
         let state_error = StateError::ComplianceHoldActive;
-        assert!(state_error as u32 >= 500 && (state_error as u32) < 600);
+        assert!((state_error as u32) >= 500 && (state_error as u32) < 600);
 
         // Replay: 600-699
         let replay_error = ReplayError::InvalidPayloadContext;
-        assert!(replay_error as u32 >= 600 && (replay_error as u32) < 700);
+        assert!((replay_error as u32) >= 600 && (replay_error as u32) < 700);
 
         // Storage: 700-799
         let storage_error = StorageError::MigrationFailed;
-        assert!(storage_error as u32 >= 700 && (storage_error as u32) < 800);
+        assert!((storage_error as u32) >= 700 && (storage_error as u32) < 800);
     }
 
     /// Test that all error enums support the code() conversion method

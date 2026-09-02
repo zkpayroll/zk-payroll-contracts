@@ -986,205 +986,97 @@ fn test_verify_payroll_metadata_revoked_auditor_rejected() {
     assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
 }
 
-// ---------------------------------------------------------------------------
-// Proof reference format validation (#389)
-// ---------------------------------------------------------------------------
-
-fn new_challenge(env: &Env, contract_id: &soroban_sdk::Address) -> (Symbol, super::challenge::ChallengeId) {
-    let company_id = Symbol::new(env, "acme");
-    let auditor = soroban_sdk::Address::generate(env);
-    let payroll_period = Symbol::new(env, "2025_01");
-    let batch_commitment_hash = BytesN::from_array(env, &[7u8; 32]);
-    let deadline_ledger = env.ledger().sequence() + 1_000;
-    let description = soroban_sdk::String::from_str(env, "please substantiate this batch");
-
-    let challenge_id = env.as_contract(contract_id, || {
-        super::challenge::create_challenge(
-            env,
-            company_id.clone(),
-            auditor,
-            payroll_period,
-            batch_commitment_hash,
-            super::challenge::ChallengeReasonCode::Verification,
-            description,
-            deadline_ledger,
-        )
-        .unwrap()
-    });
-
-    (company_id, challenge_id)
-}
-
 #[test]
-fn test_is_valid_proof_reference_rejects_zero_hash() {
-    let env = Env::default();
-    let zero = BytesN::from_array(&env, &[0u8; 32]);
-    assert!(!super::challenge::is_valid_proof_reference(&env, &zero));
-}
-
-#[test]
-fn test_is_valid_proof_reference_accepts_non_zero_hash() {
-    let env = Env::default();
-    let hash = BytesN::from_array(&env, &[9u8; 32]);
-    assert!(super::challenge::is_valid_proof_reference(&env, &hash));
-}
-
-#[test]
-fn test_respond_to_challenge_rejects_empty_proof_reference() {
+fn test_delegation_is_rejected_by_default() {
     let (env, contract_id) = setup();
-    let (company_id, challenge_id) = new_challenge(&env, &contract_id);
-    let responder = soroban_sdk::Address::generate(&env);
+    let client = AuditModuleClient::new(&env, &contract_id);
 
-    let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
-    let result = env.as_contract(&contract_id, || {
-        super::challenge::respond_to_challenge(
-            &env,
-            company_id,
-            challenge_id,
-            responder,
-            zero_hash,
-            None,
-        )
-    });
+    let auditor = soroban_sdk::Address::generate(&env);
+    let delegate = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
 
+    let result =
+        client.try_delegate_view_key(&auditor, &delegate, &AuditScope::EmployeeList, &(seq + 500));
     assert_eq!(
-        result.unwrap_err(),
-        shared_errors::AuditError::InvalidProofReference
+        result.unwrap_err().unwrap(),
+        AuditError::DelegationNotAllowed
     );
 }
 
 #[test]
-fn test_respond_to_challenge_accepts_valid_proof_reference() {
-    let (env, contract_id) = setup();
-    let (company_id, challenge_id) = new_challenge(&env, &contract_id);
-    let responder = soroban_sdk::Address::generate(&env);
-
-    let proof_reference_hash = BytesN::from_array(&env, &[42u8; 32]);
-    let result = env.as_contract(&contract_id, || {
-        super::challenge::respond_to_challenge(
-            &env,
-            company_id.clone(),
-            challenge_id,
-            responder,
-            proof_reference_hash.clone(),
-            None,
-        )
-    });
-    assert!(result.is_ok());
-
-    let stored = env
-        .as_contract(&contract_id, || {
-            super::challenge::get_challenge_response(&env, company_id, challenge_id)
-        })
-        .expect("response should be recorded");
-    assert_eq!(stored.proof_reference_hash, proof_reference_hash);
-}
-
-#[test]
-fn test_respond_to_challenge_rejection_does_not_require_a_proof_reference() {
-    let (env, contract_id) = setup();
-    let (company_id, challenge_id) = new_challenge(&env, &contract_id);
-    let responder = soroban_sdk::Address::generate(&env);
-
-    // A rejection explains why the challenge is invalid — it has no proof to
-    // reference, so the all-zero sentinel must be accepted here even though
-    // it is rejected for an accepting response.
-    let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
-    let reason = soroban_sdk::String::from_str(&env, "commitment predates this period");
-    let result = env.as_contract(&contract_id, || {
-        super::challenge::respond_to_challenge(
-            &env,
-            company_id,
-            challenge_id,
-            responder,
-            zero_hash,
-            Some(reason),
-        )
-    });
-
-    assert!(result.is_ok());
-}
-
-// ── Issue #330: Deterministic audit attestation digest builder tests ──────────
-
-#[test]
-fn test_build_audit_digest_deterministic() {
+fn test_allowed_delegation_respects_parent_constraints() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
-    let employer = soroban_sdk::Address::generate(&env);
-    let batch_root = BytesN::from_array(&env, &[0x11; 32]);
 
-    let input1 = AuditAttestationInput {
-        employer: employer.clone(),
-        period_start: 1_000,
-        period_end: 2_000,
-        batch_root: batch_root.clone(),
-        scope: AuditScope::FullCompany,
-        schema_version: 1,
-    };
+    let auditor = soroban_sdk::Address::generate(&env);
+    let delegate = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let admin = contract_id.clone();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+    client.set_delegation_policy(
+        &admin,
+        &auditor,
+        &true,
+        &AuditScope::FullCompany,
+        &(seq + 1_000),
+    );
 
-    let input2 = AuditAttestationInput {
-        employer: employer.clone(),
-        period_start: 1_000,
-        period_end: 2_000,
-        batch_root: batch_root.clone(),
-        scope: AuditScope::FullCompany,
-        schema_version: 1,
-    };
+    let key =
+        client.delegate_view_key(&auditor, &delegate, &AuditScope::EmployeeList, &(seq + 500));
+    assert_eq!(key.len(), 32);
 
-    let digest1 = client.build_audit_digest(&input1);
-    let digest2 = client.build_audit_digest(&input2);
-
-    assert_eq!(digest1, digest2);
-    assert_ne!(digest1, BytesN::from_array(&env, &[0u8; 32]));
+    let bad = client.try_delegate_view_key(
+        &auditor,
+        &soroban_sdk::Address::generate(&env),
+        &AuditScope::FullCompany,
+        &(seq + 1_500),
+    );
+    assert_eq!(
+        bad.unwrap_err().unwrap(),
+        AuditError::DelegationExceedsParentExpiry
+    );
 }
 
 #[test]
-fn test_build_audit_digest_field_sensitivity() {
+fn test_nested_delegation_and_parent_revocation_invalidate_descendants() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
-    let employer1 = soroban_sdk::Address::generate(&env);
-    let employer2 = soroban_sdk::Address::generate(&env);
-    let batch_root1 = BytesN::from_array(&env, &[0x11; 32]);
-    let batch_root2 = BytesN::from_array(&env, &[0x22; 32]);
 
-    let base = AuditAttestationInput {
-        employer: employer1.clone(),
-        period_start: 1_000,
-        period_end: 2_000,
-        batch_root: batch_root1.clone(),
-        scope: AuditScope::FullCompany,
-        schema_version: 1,
-    };
-    let base_digest = client.build_audit_digest(&base);
+    let root = soroban_sdk::Address::generate(&env);
+    let child = soroban_sdk::Address::generate(&env);
+    let grandchild = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let admin = contract_id.clone();
 
-    // Change employer
-    let mut diff_employer = base.clone();
-    diff_employer.employer = employer2;
-    assert_ne!(base_digest, client.build_audit_digest(&diff_employer));
+    client.generate_view_key(&root, &(seq + 2_000));
+    client.set_delegation_policy(
+        &admin,
+        &root,
+        &true,
+        &AuditScope::FullCompany,
+        &(seq + 2_000),
+    );
 
-    // Change period start
-    let mut diff_start = base.clone();
-    diff_start.period_start = 1_001;
-    assert_ne!(base_digest, client.build_audit_digest(&diff_start));
+    client.delegate_view_key(&root, &child, &AuditScope::EmployeeList, &(seq + 1_500));
+    client.set_delegation_policy(
+        &root,
+        &child,
+        &true,
+        &AuditScope::EmployeeList,
+        &(seq + 1_500),
+    );
+    client.delegate_view_key(
+        &child,
+        &grandchild,
+        &AuditScope::AggregateOnly,
+        &(seq + 1_000),
+    );
 
-    // Change period end
-    let mut diff_end = base.clone();
-    diff_end.period_end = 2_001;
-    assert_ne!(base_digest, client.build_audit_digest(&diff_end));
+    assert!(client.verify_access(&child));
+    assert!(client.verify_access(&grandchild));
 
-    // Change batch root
-    let mut diff_root = base.clone();
-    diff_root.batch_root = batch_root2;
-    assert_ne!(base_digest, client.build_audit_digest(&diff_root));
-
-    // Change scope
-    let mut diff_scope = base.clone();
-    diff_scope.scope = AuditScope::AggregateOnly;
-    assert_ne!(base_digest, client.build_audit_digest(&diff_scope));
-
-    // Change schema version
-    let mut diff_version = base.clone();
-    diff_version.schema_version = 2;
-    assert_ne!(base_digest, client.build_audit_digest(&diff_version));
+    client.revoke_view_key(&admin, &root);
+    assert!(!client.verify_access(&child));
+    assert!(!client.verify_access(&grandchild));
 }

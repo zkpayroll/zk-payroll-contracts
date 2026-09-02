@@ -2,9 +2,9 @@
 
 use soroban_sdk::contracterror;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ?????????????????????????????????????????????????????????????????????????????
 // Centralized Error Taxonomy
-// ─────────────────────────────────────────────────────────────────────────────
+// ?????????????????????????????????????????????????????????????????????????????
 //
 // This module provides a deterministic error taxonomy across all ZK Payroll
 // contracts. All contract errors are grouped by category (Authorization,
@@ -25,7 +25,7 @@ use soroban_sdk::contracterror;
 // - Map error IDs to user-facing messages by category
 // - Use error categories to determine retry vs. non-retry behavior
 // - All errors are stable across contract versions
-// ─────────────────────────────────────────────────────────────────────────────
+// ?????????????????????????????????????????????????????????????????????????????
 
 /// Authorization and Access Control Errors (1-99)
 ///
@@ -54,7 +54,7 @@ pub enum AuthError {
 /// Proof Verification and Cryptographic Errors (100-199)
 ///
 /// These errors indicate that a ZK proof, commitment, or cryptographic
-/// verification failed. Non-retryable — requires regenerating proofs.
+/// verification failed. Non-retryable ? requires regenerating proofs.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -94,7 +94,7 @@ pub enum AuditError {
     UnauthorizedChallengeParticipant = 204,
     /// A challenge with this ID does not exist.
     ChallengeNotFound = 205,
-    /// The challenge deadline has passed — no further responses accepted.
+    /// The challenge deadline has passed ? no further responses accepted.
     ChallengeExpired = 206,
     /// The challenge has already been resolved.
     ChallengeAlreadyResolved = 207,
@@ -102,8 +102,6 @@ pub enum AuditError {
     InvalidChallenge = 208,
     /// The challenge response timestamp is outside the acceptance window.
     InvalidResponseTimestamp = 209,
-    /// The supplied proof reference is empty/all-zero or otherwise malformed (#389).
-    InvalidProofReference = 210,
 }
 
 /// Payment Execution Errors (300-399)
@@ -116,7 +114,7 @@ pub enum AuditError {
 pub enum PaymentError {
     /// The payroll period does not exist.
     PeriodNotFound = 300,
-    /// The payroll period is closed — no new payments allowed.
+    /// The payroll period is closed ? no new payments allowed.
     PeriodClosed = 301,
     /// Attempt to create a duplicate period for this company.
     PeriodAlreadyExists = 302,
@@ -158,6 +156,12 @@ pub enum TreasuryError {
     InsufficientUnreservedBalance = 405,
     /// The asset configuration is invalid or incomplete.
     InvalidAssetConfiguration = 406,
+    /// The requested treasury reservation was not found.
+    ReservationNotFound = 407,
+    /// The asset symbol cannot be normalized before allowlist or reservation checks.
+    InvalidAssetSymbol = 408,
+    /// The provided asset symbol does not match its normalized on-chain form.
+    AssetSymbolMismatch = 409,
 }
 
 /// Payroll State Machine and Lifecycle Errors (500-599)
@@ -186,24 +190,6 @@ pub enum StateError {
     EmployeeIneligible = 507,
     /// The compliance hold blocks this payroll operation.
     ComplianceHoldActive = 508,
-    /// Provided obligation snapshot digest or fields do not match the stored snapshot (#413).
-    ObligationSnapshotMismatch = 509,
-    /// Obligation snapshot is missing for a run requiring verification (#413).
-    ObligationSnapshotNotFound = 510,
-    /// Invalid parameters in obligation snapshot (#413).
-    InvalidObligationSnapshot = 511,
-    /// Attempt to use an approval granted for a previous version of protected fields (#414).
-    StaleApprovalReused = 512,
-    /// Editing a draft rolled back partial approvals (#414).
-    PartialApprovalRollback = 513,
-    /// Approval state is inconsistent or mixed (#414).
-    MixedApprovalState = 514,
-    /// Protected fields changed and full re-approval is required (#414).
-    ReapprovalRequired = 515,
-    /// Treasury reserved balance does not match batch obligations at checkpoint (#416).
-    ReservationDriftDetected = 516,
-    /// Reconciliation checkpoint was not found (#416).
-    CheckpointNotFound = 517,
 }
 
 /// Replay Protection and Idempotency Errors (600-699)
@@ -214,7 +200,7 @@ pub enum StateError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ReplayError {
-    /// This nonce has already been consumed — payroll run is a duplicate.
+    /// This nonce has already been consumed ? payroll run is a duplicate.
     NonceAlreadyUsed = 600,
     /// A payroll execution with this identity has already completed.
     PayrollAlreadyExecuted = 601,
@@ -246,7 +232,7 @@ pub enum StorageError {
     StorageVersionMismatch = 702,
     /// A required storage record is corrupted or invalid.
     StorageCorruption = 703,
-    /// Cannot migrate storage — dependency contract is missing or invalid.
+    /// Cannot migrate storage ? dependency contract is missing or invalid.
     MigrationFailed = 704,
 }
 

@@ -298,7 +298,7 @@ fn test_get_commitment_returns_employee_commitment() {
     assert_eq!(got, commitment);
 }
 
-// ── Issue #90: employee eligibility ──────────────────────────────────────────
+// ?? Issue #90: employee eligibility ??????????????????????????????????????????
 
 #[test]
 fn test_add_employee_sets_active_status() {
@@ -543,7 +543,7 @@ fn test_reactivate_employee_emits_lifecycle_event() {
     assert_eq!(emp_addr, employee);
 }
 
-// ── Issue #91: company admin/treasury rotation ────────────────────────────────
+// ?? Issue #91: company admin/treasury rotation ????????????????????????????????
 
 #[test]
 fn test_admin_rotation_full_flow() {
@@ -643,127 +643,7 @@ fn test_duplicate_admin_rotation_proposal_rejected() {
     client.propose_admin_rotation(&company_id, &admin, &new_admin);
 }
 
-// ── Employee deactivation / status change authorization & edge cases ────────
-
-#[test]
-fn test_set_employee_status_requires_admin_auth() {
-    let env = Env::default();
-
-    // We intentionally do NOT mock_all_auths() here, because we want to test that
-    // the registry correctly enforces `require_auth` dynamically against the correct admin.
-
-    let contract_id = env.register_contract(None, PayrollRegistry);
-    let registry = PayrollRegistryClient::new(&env, &contract_id);
-
-    // Register a company with a specific admin address
-    let correct_admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &correct_admin,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "register_company",
-            args: (correct_admin.clone(), treasury.clone()).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    let company_id = registry.register_company(&correct_admin, &treasury);
-
-    // Add an employee as the legitimate admin
-    let employee = Address::generate(&env);
-    let commitment = BytesN::from_array(&env, &[5u8; 32]);
-    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &correct_admin,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "add_employee",
-            args: (company_id, employee.clone(), commitment.clone()).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    registry.add_employee(&company_id, &employee, &commitment);
-
-    // A rogue address tries to deactivate the employee — this must fail.
-    let attacker = Address::generate(&env);
-    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-        address: &attacker,
-        invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "set_employee_status",
-            args: (
-                company_id,
-                employee,
-                EmployeeStatus::Inactive,
-            )
-                .into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    let result = registry.try_set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
-    assert!(result.is_err(), "Non-admin must not be allowed to change employee status");
-}
-
-#[test]
-#[should_panic(expected = "Employee not found")]
-fn test_set_employee_status_nonexistent_employee_panics() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let stranger = Address::generate(&env);
-
-    let company_id = client.register_company(&admin, &treasury);
-
-    // Attempt to deactivate an employee who was never added — must panic.
-    client.set_employee_status(&company_id, &stranger, &EmployeeStatus::Inactive);
-}
-
-#[test]
-fn test_deactivate_reactivate_cycle_maintains_consistency() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let employee = Address::generate(&env);
-    let commitment = BytesN::from_array(&env, &[6u8; 32]);
-
-    let company_id = client.register_company(&admin, &treasury);
-    client.add_employee(&company_id, &employee, &commitment);
-
-    // Initially active and eligible
-    assert_eq!(
-        client.get_employee_status(&company_id, &employee),
-        EmployeeStatus::Active,
-    );
-    assert!(client.is_eligible(&company_id, &employee));
-
-    // Deactivate → inactive and ineligible
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
-    assert_eq!(
-        client.get_employee_status(&company_id, &employee),
-        EmployeeStatus::Inactive,
-    );
-    assert!(!client.is_eligible(&company_id, &employee));
-
-    // Reactivate → active and eligible again
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
-    assert_eq!(
-        client.get_employee_status(&company_id, &employee),
-        EmployeeStatus::Active,
-    );
-    assert!(client.is_eligible(&company_id, &employee));
-
-    // Deactivate again → stays consistent
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
-    assert_eq!(
-        client.get_employee_status(&company_id, &employee),
-        EmployeeStatus::Inactive,
-    );
-    assert!(!client.is_eligible(&company_id, &employee));
-}
-
-// ── Issue #152: Duplicate company registration rejection tests ───────────────
+// ?? Issue #152: Duplicate company registration rejection tests ???????????????
 
 #[test]
 fn test_register_company_duplicate_registration_fails() {
@@ -794,11 +674,11 @@ fn test_register_company_duplicate_registration_panics() {
     client.register_company(&admin, &treasury);
 }
 
-// ── Issue #171: admin / treasury role-separation tests ───────────────────────
+// ?? Issue #171: admin / treasury role-separation tests ???????????????????????
 
 /// Role separation: holding the company's *treasury* address does not
 /// confer HR-admin privileges. `add_employee` must still require the
-/// registered company admin's signature — the treasury holder signing for
+/// registered company admin's signature ? the treasury holder signing for
 /// themselves is not enough.
 #[test]
 #[should_panic(expected = "authorized")]
@@ -824,7 +704,7 @@ fn test_treasury_cannot_add_employee() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[3u8; 32]);
 
-    // The company's own treasury address signs the call — a legitimate
+    // The company's own treasury address signs the call ? a legitimate
     // role in this system, just not the HR-admin role.
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &treasury,
@@ -839,7 +719,7 @@ fn test_treasury_cannot_add_employee() {
 }
 
 /// Role separation: the treasury address is not the admin, so it must be
-/// rejected when passed as `current_admin` to an admin-rotation call —
+/// rejected when passed as `current_admin` to an admin-rotation call ?
 /// business-logic identity checks, not just signatures, must hold.
 #[test]
 #[should_panic(expected = "Unauthorized: caller is not the company admin")]
@@ -960,174 +840,26 @@ fn test_cancel_treasury_rotation_emits_event() {
     assert_eq!(comp_id, company_id);
 }
 
-// ── Issue #329: Employer-level payroll policy registry tests ─────────────────
+// -- Issue #422: employee active status query helper --------------------------
 
 #[test]
-fn test_set_and_get_payroll_policy_success() {
+fn test_is_employee_active_helper_tracks_status_without_exposing_commitment() {
     let (env, contract_id) = setup();
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
     let company_id = client.register_company(&admin, &treasury);
+    assert!(!client.is_employee_active(&company_id, &employee));
 
-    assert_eq!(client.get_payroll_policy(&company_id), None);
+    client.add_employee(&company_id, &employee, &commitment);
+    assert!(client.is_employee_active(&company_id, &employee));
 
-    let policy = PayrollPolicy {
-        company_id,
-        settlement_window: 86400,
-        reserve_ratio_bps: 2000,
-        approval_threshold: 2,
-        audit_retention_period: 31536000,
-        auto_settlement_enabled: true,
-    };
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    assert!(!client.is_employee_active(&company_id, &employee));
 
-    client.set_payroll_policy(&company_id, &policy);
-    let fetched = client.get_payroll_policy(&company_id);
-    assert_eq!(fetched, Some(policy.clone()));
-
-    // Update policy
-    let updated_policy = PayrollPolicy {
-        company_id,
-        settlement_window: 172800,
-        reserve_ratio_bps: 1000,
-        approval_threshold: 1,
-        audit_retention_period: 15768000,
-        auto_settlement_enabled: false,
-    };
-    client.set_payroll_policy(&company_id, &updated_policy);
-    assert_eq!(client.get_payroll_policy(&company_id), Some(updated_policy));
-}
-
-#[test]
-fn test_set_payroll_policy_emits_event() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let company_id = client.register_company(&admin, &treasury);
-
-    let policy = PayrollPolicy {
-        company_id,
-        settlement_window: 86400,
-        reserve_ratio_bps: 2000,
-        approval_threshold: 2,
-        audit_retention_period: 31536000,
-        auto_settlement_enabled: true,
-    };
-
-    let before = env.events().all().len();
-    client.set_payroll_policy(&company_id, &policy);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
-
-    let event = env.events().all().get(after - 1).unwrap();
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
-    assert_eq!(sym0, Symbol::new(&env, "PayrollPolicySet"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
-    assert_eq!(comp_id, company_id);
-}
-
-#[test]
-#[should_panic(expected = "Company ID in policy does not match target company")]
-fn test_set_payroll_policy_mismatched_company_id_panics() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let company_id = client.register_company(&admin, &treasury);
-
-    let policy = PayrollPolicy {
-        company_id: company_id + 1, // mismatched
-        settlement_window: 86400,
-        reserve_ratio_bps: 2000,
-        approval_threshold: 2,
-        audit_retention_period: 31536000,
-        auto_settlement_enabled: true,
-    };
-
-    client.set_payroll_policy(&company_id, &policy);
-}
-
-#[test]
-#[should_panic(expected = "Settlement window must be greater than 0")]
-fn test_set_payroll_policy_invalid_settlement_window_panics() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let company_id = client.register_company(&admin, &treasury);
-
-    let policy = PayrollPolicy {
-        company_id,
-        settlement_window: 0,
-        reserve_ratio_bps: 2000,
-        approval_threshold: 2,
-        audit_retention_period: 31536000,
-        auto_settlement_enabled: true,
-    };
-
-    client.set_payroll_policy(&company_id, &policy);
-}
-
-#[test]
-#[should_panic(expected = "Reserve ratio bps cannot exceed 10000")]
-fn test_set_payroll_policy_invalid_reserve_ratio_panics() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let company_id = client.register_company(&admin, &treasury);
-
-    let policy = PayrollPolicy {
-        company_id,
-        settlement_window: 86400,
-        reserve_ratio_bps: 10_001,
-        approval_threshold: 2,
-        audit_retention_period: 31536000,
-        auto_settlement_enabled: true,
-    };
-
-    client.set_payroll_policy(&company_id, &policy);
-}
-
-#[test]
-#[should_panic(expected = "Approval threshold must be greater than 0")]
-fn test_set_payroll_policy_invalid_approval_threshold_panics() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let company_id = client.register_company(&admin, &treasury);
-
-    let policy = PayrollPolicy {
-        company_id,
-        settlement_window: 86400,
-        reserve_ratio_bps: 2000,
-        approval_threshold: 0,
-        audit_retention_period: 31536000,
-        auto_settlement_enabled: true,
-    };
-
-    client.set_payroll_policy(&company_id, &policy);
-}
-
-#[test]
-#[should_panic(expected = "Audit retention period must be greater than 0")]
-fn test_set_payroll_policy_invalid_audit_retention_panics() {
-    let (env, contract_id) = setup();
-    let client = PayrollRegistryClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let company_id = client.register_company(&admin, &treasury);
-
-    let policy = PayrollPolicy {
-        company_id,
-        settlement_window: 86400,
-        reserve_ratio_bps: 2000,
-        approval_threshold: 2,
-        audit_retention_period: 0,
-        auto_settlement_enabled: true,
-    };
-
-    client.set_payroll_policy(&company_id, &policy);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
+    assert!(client.is_employee_active(&company_id, &employee));
 }

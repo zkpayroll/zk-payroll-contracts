@@ -19,6 +19,10 @@ path = "withdrawal_guardrails.rs"
 name = "quorum_replay"
 path = "quorum_replay.rs"
 
+[[test]]
+name = "authorization_matrix"
+path = "authorization_matrix.rs"
+
 [dev-dependencies]
 audit_module = { path = "../../contracts/audit_module" }
 payment_executor = { path = "../../contracts/payment_executor" }

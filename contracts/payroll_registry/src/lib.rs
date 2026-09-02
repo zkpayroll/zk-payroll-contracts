@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 
 extern crate alloc;
 
@@ -21,15 +21,15 @@ pub struct CompanyInfo {
     pub treasury: Address,
 }
 
-// ── Issue #90: employee eligibility ──────────────────────────────────────────
+// ?? Issue #90: employee eligibility ??????????????????????????????????????????
 
 /// Registration state for an employee.
 ///
 /// Eligibility checks use this to decide whether an employee can be included
 /// in a payroll execution:
-///   - `Active`     → eligible; commitment is registered and record is complete.
-///   - `Inactive`   → temporarily ineligible (e.g. on leave, terminated).
-///   - `Incomplete` → missing required registration data; never eligible until
+///   - `Active`     ? eligible; commitment is registered and record is complete.
+///   - `Inactive`   ? temporarily ineligible (e.g. on leave, terminated).
+///   - `Incomplete` ? missing required registration data; never eligible until
 ///                    the record is corrected and marked `Active`.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub enum EmployeeStatus {
     Incomplete = 2,
 }
 
-// ── Issue #91: privileged-role rotation ──────────────────────────────────────
+// ?? Issue #91: privileged-role rotation ??????????????????????????????????????
 
 /// Pending two-step company admin or treasury rotation.
 ///
@@ -54,29 +54,44 @@ pub struct PendingCompanyRotation {
     pub proposed_at: u64,
 }
 
-// ── Issue #329: employer-level payroll policy ───────────────────────────────
+// ?? Issue #353: Approver Threshold Rotation Controls ???????????????????????????
 
-/// Employer-level payroll policy configuration (issue #329).
+/// Approval threshold configuration for payroll authorization (#353).
+///
+/// Thresholds determine how many approvals are required before a payroll run
+/// can be executed. Rotating thresholds allows changes without invalidating
+/// already locked payroll decisions.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PayrollPolicy {
+#[derive(Clone, Debug)]
+pub struct ApprovalThreshold {
     pub company_id: u64,
-    pub settlement_window: u64,
-    pub reserve_ratio_bps: u32,
-    pub approval_threshold: u32,
-    pub audit_retention_period: u64,
-    pub auto_settlement_enabled: bool,
+    pub required_approvals: u32,
+    pub configured_at: u64,
+    pub configured_by: Address,
+    pub is_active: bool,
+}
+
+/// Pending threshold rotation awaiting activation (#353).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingThresholdRotation {
+    pub company_id: u64,
+    pub new_threshold: u32,
+    pub proposed_at: u64,
+    pub proposed_by: Address,
+    pub effective_after: u64,
 }
 
 /// Storage key space for the payroll registry.
 ///
-/// - `Company(u64)`               → `CompanyInfo`              (Persistent)
-/// - `Employee(u64, Address)`     → `BytesN<32>`               (Persistent, commitment)
-/// - `EmpStatus(u64, Address)`    → `EmployeeStatus`           (Persistent, eligibility)
-/// - `CompanySequence`            → `u64`                      (Persistent, counter)
-/// - `PendingAdminRotation(u64)`  → `PendingCompanyRotation`   (Persistent, issue #91)
-/// - `PendingTreasuryRotation(u64)` → `PendingCompanyRotation` (Persistent, issue #91)
-/// - `PayrollPolicy(u64)`         → `PayrollPolicy`            (Persistent, issue #329)
+/// - `Company(u64)`               ? `CompanyInfo`              (Persistent)
+/// - `Employee(u64, Address)`     ? `BytesN<32>`               (Persistent, commitment)
+/// - `EmpStatus(u64, Address)`    ? `EmployeeStatus`           (Persistent, eligibility)
+/// - `CompanySequence`            ? `u64`                      (Persistent, counter)
+/// - `PendingAdminRotation(u64)`  ? `PendingCompanyRotation`   (Persistent, issue #91)
+/// - `PendingTreasuryRotation(u64)` ? `PendingCompanyRotation` (Persistent, issue #91)
+/// - `ApprovalThreshold(u64)`     ? `ApprovalThreshold`        (Persistent, issue #353)
+/// - `PendingThresholdRotation(u64)` ? `PendingThresholdRotation` (Persistent, issue #353)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
@@ -92,12 +107,14 @@ pub enum DataKey {
     CompanyAdmin(Address),
     /// Pause manager address (issue #167).
     PauseManager,
-    /// Employer-level payroll policy (issue #329).
-    PayrollPolicy(u64),
+    /// Active approval threshold for a company (issue #353).
+    ApprovalThreshold(u64),
+    /// Pending approval threshold rotation (issue #353).
+    PendingThresholdRotation(u64),
 }
 
 // ---------------------------------------------------------------------------
-// Trait — canonical interface specification for #12
+// Trait ? canonical interface specification for #12
 // ---------------------------------------------------------------------------
 
 pub trait PayrollRegistryTrait {
@@ -136,7 +153,7 @@ pub trait PayrollRegistryTrait {
     /// Read an employee's active commitment under a company.
     fn get_commitment(env: Env, company_id: u64, employee: Address) -> BytesN<32>;
 
-    // ── Issue #90: employee eligibility ──────────────────────────────────────
+    // ?? Issue #90: employee eligibility ??????????????????????????????????????
 
     /// Set the eligibility status for a registered employee.
     /// Requires authorisation from the company admin.
@@ -149,7 +166,10 @@ pub trait PayrollRegistryTrait {
     /// Return `true` iff the employee is registered AND has `Active` status.
     fn is_eligible(env: Env, company_id: u64, employee: Address) -> bool;
 
-    // ── Issue #91: company-level admin/treasury rotation ─────────────────────
+    /// Read-only helper for clients that only need active/inactive state.
+    fn is_employee_active(env: Env, company_id: u64, employee: Address) -> bool;
+
+    // ?? Issue #91: company-level admin/treasury rotation ?????????????????????
 
     /// Propose a new company admin (step 1 of 2).
     fn propose_admin_rotation(
@@ -179,15 +199,6 @@ pub trait PayrollRegistryTrait {
     /// Cancel a pending treasury rotation.
     fn cancel_treasury_rotation(env: Env, company_id: u64, current_admin: Address);
 
-    // ── Issue #329: Employer-level payroll policy registry ───────────────────
-
-    /// Configure or update employer-level payroll policy.
-    /// Requires authorisation from the company admin.
-    fn set_payroll_policy(env: Env, company_id: u64, policy: PayrollPolicy);
-
-    /// Retrieve employer-level payroll policy if configured.
-    fn get_payroll_policy(env: Env, company_id: u64) -> Option<PayrollPolicy>;
-
     /// Return the current company sequence counter (defaults to 0).
     fn get_company_sequence(env: Env) -> u64;
 
@@ -196,6 +207,33 @@ pub trait PayrollRegistryTrait {
 
     /// Return any pending treasury rotation proposal for a company.
     fn get_pending_treasury_rotation(env: Env, company_id: u64) -> Option<PendingCompanyRotation>;
+
+    // ?? Issue #353: Approver Threshold Rotation Controls ???????????????????????????
+
+    /// Propose a new approval threshold for a company (step 1 of 2).
+    /// The new threshold becomes effective after a grace period.
+    fn propose_threshold_rotation(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        new_threshold: u32,
+        grace_period_seconds: u64,
+    );
+
+    /// Activate a pending threshold rotation after the grace period expires (#353).
+    fn activate_threshold_rotation(env: Env, company_id: u64, admin: Address);
+
+    /// Cancel a pending threshold rotation before it takes effect.
+    fn cancel_threshold_rotation(env: Env, company_id: u64, admin: Address);
+
+    /// Get the current approval threshold for a company (#353).
+    fn get_approval_threshold(env: Env, company_id: u64) -> Option<ApprovalThreshold>;
+
+    /// Get any pending approval threshold rotation for a company (#353).
+    fn get_pending_threshold_rotation(env: Env, company_id: u64) -> Option<PendingThresholdRotation>;
+
+    /// Set the initial approval threshold when a company is registered (#353).
+    fn set_initial_approval_threshold(env: Env, company_id: u64, admin: Address, required_approvals: u32);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +257,23 @@ impl PayrollRegistry {
                 panic!("Payroll is paused");
             }
         }
+    }
+
+    /// Validates an employer display-name/reference-id style metadata value
+    /// (issue #378): non-empty and within a reasonable length bound.
+    /// `CompanyInfo` does not yet store employer metadata fields, so this is
+    /// a standalone helper ready to be wired into a future
+    /// `set_company_metadata`-style entrypoint rather than a change to the
+    /// existing company record.
+    fn validate_employer_metadata_value(env: &Env, value: &String, field_name: &str) {
+        const MAX_METADATA_LEN: u32 = 256;
+        if value.len() == 0 {
+            panic!("{} must not be empty", field_name);
+        }
+        if value.len() > MAX_METADATA_LEN {
+            panic!("{} exceeds maximum length", field_name);
+        }
+        let _ = env; // reserved for a future emitted validation event
     }
 
     pub fn set_pause_manager(env: Env, admin: Address, pause_manager: Address) {
@@ -250,12 +305,7 @@ impl PayrollRegistry {
             &EmployeeStatus::Active,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "EmployeeAdded"), company_id, employee),
-            (commitment,),
-        );
-        // topics : ("EmployeeAdded", company_id, employee)
-        // data   : (commitment,)
+        payroll_events::emit_employee_added(&env, company_id, employee, commitment);
     }
 
     fn require_valid_employee_wallet_format(employee_wallet: &String) {
@@ -460,7 +510,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .expect("Employee not found")
     }
 
-    // ── Issue #90: employee eligibility ──────────────────────────────────────
+    // ?? Issue #90: employee eligibility ??????????????????????????????????????
 
     fn set_employee_status(env: Env, company_id: u64, employee: Address, status: EmployeeStatus) {
         Self::require_not_paused(&env);
@@ -519,6 +569,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
     }
 
     fn is_eligible(env: Env, company_id: u64, employee: Address) -> bool {
+        Self::is_employee_active(env, company_id, employee)
+    }
+
+    fn is_employee_active(env: Env, company_id: u64, employee: Address) -> bool {
         if !env
             .storage()
             .persistent()
@@ -534,7 +588,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
         status == EmployeeStatus::Active
     }
 
-    // ── Issue #91: company-level admin/treasury rotation ─────────────────────
+    // ?? Issue #91: company-level admin/treasury rotation ?????????????????????
 
     fn propose_admin_rotation(
         env: Env,
@@ -738,54 +792,6 @@ impl PayrollRegistryTrait for PayrollRegistry {
         );
     }
 
-    // ── Issue #329: Employer-level payroll policy registry ───────────────────
-
-    fn set_payroll_policy(env: Env, company_id: u64, policy: PayrollPolicy) {
-        Self::require_not_paused(&env);
-        let info: CompanyInfo = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Company(company_id))
-            .expect("Company not found");
-        info.admin.require_auth();
-
-        if policy.company_id != company_id {
-            panic!("Company ID in policy does not match target company");
-        }
-        if policy.settlement_window == 0 {
-            panic!("Settlement window must be greater than 0");
-        }
-        if policy.reserve_ratio_bps > 10_000 {
-            panic!("Reserve ratio bps cannot exceed 10000");
-        }
-        if policy.approval_threshold == 0 {
-            panic!("Approval threshold must be greater than 0");
-        }
-        if policy.audit_retention_period == 0 {
-            panic!("Audit retention period must be greater than 0");
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::PayrollPolicy(company_id), &policy);
-
-        payroll_events::emit_payroll_policy_set(
-            &env,
-            company_id,
-            policy.settlement_window,
-            policy.reserve_ratio_bps,
-            policy.approval_threshold,
-            policy.audit_retention_period,
-            policy.auto_settlement_enabled,
-        );
-    }
-
-    fn get_payroll_policy(env: Env, company_id: u64) -> Option<PayrollPolicy> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::PayrollPolicy(company_id))
-    }
-
     fn get_company_sequence(env: Env) -> u64 {
         env.storage()
             .persistent()
@@ -803,6 +809,180 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .get(&DataKey::PendingTreasuryRotation(company_id))
+    }
+
+    // ?? Issue #353: Approver Threshold Rotation Controls ???????????????????????????
+
+    fn propose_threshold_rotation(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        new_threshold: u32,
+        grace_period_seconds: u64,
+    ) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let company = env
+            .storage()
+            .persistent()
+            .get::<DataKey, CompanyInfo>(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        if company.admin != admin {
+            panic!("Only company admin can propose threshold rotation");
+        }
+
+        if new_threshold == 0 {
+            panic!("Threshold must be at least 1");
+        }
+
+        let effective_after = env.ledger().timestamp() + grace_period_seconds;
+
+        let pending = PendingThresholdRotation {
+            company_id,
+            new_threshold,
+            proposed_at: env.ledger().timestamp(),
+            proposed_by: admin.clone(),
+            effective_after,
+        };
+
+        env.storage().persistent().set(
+            &DataKey::PendingThresholdRotation(company_id),
+            &pending,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "ThresholdRotationProposed"), company_id),
+            (new_threshold, effective_after),
+        );
+    }
+
+    fn activate_threshold_rotation(env: Env, company_id: u64, admin: Address) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let company = env
+            .storage()
+            .persistent()
+            .get::<DataKey, CompanyInfo>(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        if company.admin != admin {
+            panic!("Only company admin can activate threshold rotation");
+        }
+
+        let pending = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(company_id))
+            .expect("No pending threshold rotation");
+
+        if env.ledger().timestamp() < pending.effective_after {
+            panic!("Threshold rotation is still in grace period");
+        }
+
+        let threshold = ApprovalThreshold {
+            company_id,
+            required_approvals: pending.new_threshold,
+            configured_at: env.ledger().timestamp(),
+            configured_by: admin.clone(),
+            is_active: true,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovalThreshold(company_id), &threshold);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingThresholdRotation(company_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ThresholdRotationActivated"), company_id),
+            (pending.new_threshold, env.ledger().timestamp()),
+        );
+    }
+
+    fn cancel_threshold_rotation(env: Env, company_id: u64, admin: Address) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let company = env
+            .storage()
+            .persistent()
+            .get::<DataKey, CompanyInfo>(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        if company.admin != admin {
+            panic!("Only company admin can cancel threshold rotation");
+        }
+
+        let pending = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(company_id))
+            .expect("No pending threshold rotation");
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingThresholdRotation(company_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ThresholdRotationCancelled"), company_id),
+            (pending.new_threshold, env.ledger().timestamp()),
+        );
+    }
+
+    fn get_approval_threshold(env: Env, company_id: u64) -> Option<ApprovalThreshold> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ApprovalThreshold(company_id))
+    }
+
+    fn get_pending_threshold_rotation(env: Env, company_id: u64) -> Option<PendingThresholdRotation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingThresholdRotation(company_id))
+    }
+
+    fn set_initial_approval_threshold(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        required_approvals: u32,
+    ) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        if required_approvals == 0 {
+            panic!("Threshold must be at least 1");
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::ApprovalThreshold(company_id))
+        {
+            panic!("Approval threshold already configured for this company");
+        }
+
+        let threshold = ApprovalThreshold {
+            company_id,
+            required_approvals,
+            configured_at: env.ledger().timestamp(),
+            configured_by: admin.clone(),
+            is_active: true,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovalThreshold(company_id), &threshold);
+
+        env.events().publish(
+            (Symbol::new(&env, "InitialThresholdConfigured"), company_id),
+            (required_approvals, env.ledger().timestamp()),
+        );
     }
 }
 

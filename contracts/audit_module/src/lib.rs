@@ -31,8 +31,14 @@ pub enum AuditError {
     InvalidViewKey = 7,
     /// The requested new expiration is not later than the current one.
     ExpirationNotExtended = 8,
-    /// The auditor list supplied to `prune_expired_grants` exceeds the maximum batch size.
-    PruneBatchTooLarge = 9,
+    /// Delegation is forbidden unless employer policy explicitly enables it.
+    DelegationNotAllowed = 9,
+    /// A delegated grant attempted to exceed the parent grant scope.
+    DelegationExceedsParentScope = 10,
+    /// A delegated grant attempted to exceed the parent grant expiry.
+    DelegationExceedsParentExpiry = 11,
+    /// A delegated grant is no longer valid because its parent grant was revoked.
+    DelegationRevoked = 12,
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +52,11 @@ pub struct ViewKeyRecord {
     pub key_bytes: BytesN<32>,
     pub expiration_ledger: u32,
     pub granted_by: Address,
+    pub scope: AuditScope,
+    pub allow_delegation: bool,
+    pub max_scope: AuditScope,
+    pub max_expiration_ledger: u32,
+    pub parent_auditor: Option<Address>,
 }
 
 /// What the auditor is allowed to examine.
@@ -122,63 +133,24 @@ pub struct AuditMetadataSummary {
     pub exported_by: Address,
 }
 
-// ── Issue #356: stale audit grant pruning ────────────────────────────────────
-
-/// Tombstone written to Persistent storage when a stale grant is pruned.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct PrunedGrantRef {
-    pub key_digest: BytesN<32>,
-    pub expired_at_ledger: u32,
-    pub pruned_at_ledger: u32,
-    pub pruned_at_timestamp: u64,
-}
-
-// ── Issue #330: deterministic audit attestation digest builder ──────────────
-
-/// Attestation input structure for building deterministic audit digests (issue #330).
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AuditAttestationInput {
-    pub employer: Address,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub batch_root: BytesN<32>,
-    pub scope: AuditScope,
-    pub schema_version: u32,
-}
-
 /// Storage key namespace.
 #[contracttype]
 pub enum DataKey {
     /// Maps an auditor `Address` → `ViewKeyRecord` in Persistent storage.
     AuditorKey(Address),
+    /// Tracks delegated auditors under a parent grant.
+    DelegatedAuditors(Address),
     /// Per-company audit log counter (Symbol = company_id).
     AuditLogCounter(Symbol),
     /// Audit log entry keyed by (company_id, log_index).
     AuditLog(Symbol, u32),
     /// Pause manager address (issue #167).
     PauseManager,
-    // ── Issue #356: stale grant pruning ──────────────────────────────────────
-    /// Total number of auditor addresses ever registered (monotonic counter).
-    /// Used together with `AuditorIndex` to enumerate all known grants.
-    AuditorCount,
-    /// Maps a sequential index (u32) → auditor `Address`.
-    /// Populated by `generate_view_key`; never deleted so the list is stable
-    /// for pruning scans. Append-only to preserve XDR discriminants on upgrade.
-    AuditorIndex(u32),
-    /// Tombstone written after a stale grant is pruned (issue #356).
-    /// Keyed by auditor `Address`; value is `PrunedGrantRef`.
-    PrunedGrant(Address),
 }
 
 // ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
-
-/// Auditor challenge/response workflow (create_challenge, respond_to_challenge,
-/// proof-reference format validation) — see module docs in `challenge.rs`.
-pub mod challenge;
 
 #[contract]
 pub struct AuditModule;
@@ -226,6 +198,11 @@ impl AuditModule {
             key_bytes: key_bytes.clone(),
             expiration_ledger,
             granted_by: admin,
+            scope: AuditScope::FullCompany,
+            allow_delegation: false,
+            max_scope: AuditScope::FullCompany,
+            max_expiration_ledger: expiration_ledger,
+            parent_auditor: None,
         };
 
         env.storage()
@@ -241,9 +218,35 @@ impl AuditModule {
         match env
             .storage()
             .persistent()
-            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
+            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(auditor.clone()))
         {
-            Some(record) => env.ledger().sequence() <= record.expiration_ledger,
+            Some(record) => {
+                if env.ledger().sequence() > record.expiration_ledger {
+                    return false;
+                }
+                if let Some(parent) = record.parent_auditor.clone() {
+                    let parent_record: ViewKeyRecord = match env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::AuditorKey(parent.clone()))
+                    {
+                        Some(value) => value,
+                        None => return false,
+                    };
+                    if env.ledger().sequence() > parent_record.expiration_ledger {
+                        return false;
+                    }
+                    if !Self::scope_is_within(parent_record.max_scope, record.scope) {
+                        return false;
+                    }
+                    if record.expiration_ledger > parent_record.max_expiration_ledger
+                        || record.expiration_ledger > parent_record.expiration_ledger
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
             None => false,
         }
     }
@@ -262,6 +265,7 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
+        Self::revoke_descendants(&env, &auditor);
         env.storage()
             .persistent()
             .remove(&DataKey::AuditorKey(auditor.clone()));
@@ -335,6 +339,11 @@ impl AuditModule {
             key_bytes: new_key_bytes.clone(),
             expiration_ledger: new_expiration_ledger,
             granted_by: admin.clone(),
+            scope: record.scope,
+            allow_delegation: record.allow_delegation,
+            max_scope: record.max_scope,
+            max_expiration_ledger: record.max_expiration_ledger,
+            parent_auditor: record.parent_auditor,
         };
 
         env.storage()
@@ -349,6 +358,167 @@ impl AuditModule {
         // data   : (new_expiration_ledger,)
 
         Ok(new_key_bytes)
+    }
+
+    pub fn set_delegation_policy(
+        env: Env,
+        admin: Address,
+        auditor: Address,
+        allow_delegation: bool,
+        max_scope: AuditScope,
+        max_expiration_ledger: u32,
+    ) -> Result<(), AuditError> {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let mut record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor.clone()))
+            .ok_or(AuditError::KeyNotFound)?;
+
+        if record.granted_by != admin {
+            return Err(AuditError::NotKeyGranter);
+        }
+
+        record.allow_delegation = allow_delegation;
+        record.max_scope = max_scope;
+        record.max_expiration_ledger = max_expiration_ledger;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditorKey(auditor.clone()), &record);
+
+        Ok(())
+    }
+
+    pub fn approve_delegation(
+        env: Env,
+        admin: Address,
+        auditor: Address,
+        allow_delegation: bool,
+        max_scope: AuditScope,
+        max_expiration_ledger: u32,
+    ) -> Result<(), AuditError> {
+        Self::set_delegation_policy(
+            env,
+            admin,
+            auditor,
+            allow_delegation,
+            max_scope,
+            max_expiration_ledger,
+        )
+    }
+
+    pub fn delegate_view_key(
+        env: Env,
+        auditor: Address,
+        delegate: Address,
+        scope: AuditScope,
+        expiration_ledger: u32,
+    ) -> Result<BytesN<32>, AuditError> {
+        let parent: ViewKeyRecord = Self::authorize_auditor(&env, auditor.clone())?;
+        if !parent.allow_delegation {
+            return Err(AuditError::DelegationNotAllowed);
+        }
+        if !Self::scope_is_within(parent.max_scope, scope) {
+            return Err(AuditError::DelegationExceedsParentScope);
+        }
+        if expiration_ledger > parent.max_expiration_ledger
+            || expiration_ledger > parent.expiration_ledger
+        {
+            return Err(AuditError::DelegationExceedsParentExpiry);
+        }
+
+        let key_bytes = Self::derive_key_bytes(&env, &delegate, expiration_ledger);
+        let delegated_record = ViewKeyRecord {
+            key_bytes: key_bytes.clone(),
+            expiration_ledger,
+            granted_by: auditor.clone(),
+            scope,
+            allow_delegation: parent.allow_delegation,
+            max_scope: scope,
+            max_expiration_ledger: expiration_ledger,
+            parent_auditor: Some(auditor.clone()),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditorKey(delegate.clone()), &delegated_record);
+
+        let mut delegates: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatedAuditors(auditor.clone()))
+            .unwrap_or(Vec::new(&env));
+        delegates.push_back(delegate.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::DelegatedAuditors(auditor.clone()), &delegates);
+
+        Ok(key_bytes)
+    }
+
+    pub fn grant_delegated_access(
+        env: Env,
+        auditor: Address,
+        delegate: Address,
+        scope: AuditScope,
+        expiration_ledger: u32,
+    ) -> Result<BytesN<32>, AuditError> {
+        Self::delegate_view_key(env, auditor, delegate, scope, expiration_ledger)
+    }
+
+    pub fn extend_delegated_access(
+        env: Env,
+        auditor: Address,
+        delegate: Address,
+        new_expiration_ledger: u32,
+    ) -> Result<BytesN<32>, AuditError> {
+        let mut record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(delegate.clone()))
+            .ok_or(AuditError::KeyNotFound)?;
+
+        if record.parent_auditor != Some(auditor.clone()) {
+            return Err(AuditError::NotKeyGranter);
+        }
+
+        if env.ledger().sequence() > record.expiration_ledger {
+            return Err(AuditError::KeyExpired);
+        }
+
+        let parent: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor.clone()))
+            .ok_or(AuditError::DelegationRevoked)?;
+
+        if !parent.allow_delegation {
+            return Err(AuditError::DelegationNotAllowed);
+        }
+        if new_expiration_ledger <= record.expiration_ledger {
+            return Err(AuditError::ExpirationNotExtended);
+        }
+        if new_expiration_ledger > parent.max_expiration_ledger
+            || new_expiration_ledger > parent.expiration_ledger
+        {
+            return Err(AuditError::DelegationExceedsParentExpiry);
+        }
+        if !Self::scope_is_within(parent.max_scope, record.scope) {
+            return Err(AuditError::DelegationExceedsParentScope);
+        }
+
+        let new_key = Self::derive_key_bytes(&env, &delegate, new_expiration_ledger);
+        record.key_bytes = new_key.clone();
+        record.expiration_ledger = new_expiration_ledger;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditorKey(delegate.clone()), &record);
+
+        Ok(new_key)
     }
 
     // -----------------------------------------------------------------------
@@ -438,15 +608,31 @@ impl AuditModule {
             .ok_or(AuditError::KeyNotFound)?;
 
         if env.ledger().sequence() > record.expiration_ledger {
-            // Emit an observable event so off-chain monitors can detect the
-            // expiry boundary crossing and trigger re-issuance workflows.
             env.events().publish(
-                (Symbol::new(env, "AuditAccessExpired"), auditor),
+                (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
                 (record.expiration_ledger, env.ledger().sequence()),
             );
-            // topics : ("AuditAccessExpired", auditor)
-            // data   : (expiration_ledger, current_sequence)
             return Err(AuditError::KeyExpired);
+        }
+
+        if let Some(parent) = record.parent_auditor.clone() {
+            let parent_record: ViewKeyRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::AuditorKey(parent.clone()))
+                .ok_or(AuditError::DelegationRevoked)?;
+
+            if env.ledger().sequence() > parent_record.expiration_ledger {
+                return Err(AuditError::DelegationRevoked);
+            }
+            if !Self::scope_is_within(parent_record.max_scope, record.scope) {
+                return Err(AuditError::DelegationExceedsParentScope);
+            }
+            if record.expiration_ledger > parent_record.max_expiration_ledger
+                || record.expiration_ledger > parent_record.expiration_ledger
+            {
+                return Err(AuditError::DelegationExceedsParentExpiry);
+            }
         }
 
         Ok(record)
@@ -691,133 +877,40 @@ impl AuditModule {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #356: stale audit grant pruning
-    // -----------------------------------------------------------------------
-
-    /// Remove expired audit grants in a single idempotent batch.
-    ///
-    /// For each auditor in `auditors`:
-    /// - If their `ViewKeyRecord` exists **and** `ledger.sequence() >
-    ///   expiration_ledger`, the record is removed and a `PrunedGrantRef`
-    ///   tombstone is written so downstream tooling can tie the pruning event
-    ///   to historical audit log entries.
-    /// - If the key is absent (never granted, or already pruned) the address
-    ///   is skipped silently — the operation is idempotent.
-    /// - If the key is present but **not yet expired** (active grant) it is
-    ///   never touched.
-    ///
-    /// Historical `AuditLogEntry` records are **never** deleted; they remain
-    /// queryable via `query_by_company` / `query_by_period` for compliance
-    /// verification even after a grant has been pruned.
-    ///
-    /// Returns the number of grants actually pruned in this call.
-    ///
-    /// Errors:
-    /// - `PruneBatchTooLarge` if `auditors.len() > MAX_PRUNE_BATCH`.
-    pub fn prune_expired_grants(
-        env: Env,
-        auditors: Vec<Address>,
-    ) -> Result<u32, AuditError> {
-        Self::require_not_paused(&env);
-
-        const MAX_PRUNE_BATCH: u32 = 50;
-        if auditors.len() > MAX_PRUNE_BATCH {
-            return Err(AuditError::PruneBatchTooLarge);
-        }
-
-        let current_sequence = env.ledger().sequence();
-        let current_timestamp = env.ledger().timestamp();
-        let mut pruned_count: u32 = 0;
-
-        for auditor in auditors.iter() {
-            let key = DataKey::AuditorKey(auditor.clone());
-
-            // Load the record; skip silently if absent (already pruned or
-            // never granted — idempotent).
-            let record: ViewKeyRecord = match env.storage().persistent().get(&key) {
-                Some(r) => r,
-                None => continue,
-            };
-
-            // Skip active grants — never prune a key that is still valid.
-            if current_sequence <= record.expiration_ledger {
-                continue;
-            }
-
-            // Compute a digest of the original key material so the tombstone
-            // can tie back to the AuditSuccessful events without re-exposing
-            // the raw key bytes.
-            let key_digest: BytesN<32> = {
-                let mut preimage = Bytes::new(&env);
-                let key_slice: [u8; 32] = record.key_bytes.clone().into();
-                preimage.extend_from_array(&key_slice);
-                env.crypto().sha256(&preimage).into()
-            };
-
-            // Write the tombstone before removing the live record so a reader
-            // that observes the remove event can always find the tombstone.
-            let tombstone = PrunedGrantRef {
-                key_digest,
-                expired_at_ledger: record.expiration_ledger,
-                pruned_at_ledger: current_sequence,
-                pruned_at_timestamp: current_timestamp,
-            };
-            env.storage()
-                .persistent()
-                .set(&DataKey::PrunedGrant(auditor.clone()), &tombstone);
-
-            // Remove the live grant so it no longer authorises access.
-            env.storage().persistent().remove(&key);
-
-            // Emit a safe pruning event.  Only the key *digest* and expiry
-            // metadata are published — never the raw key bytes.
-            env.events().publish(
-                (Symbol::new(&env, "AuditGrantPruned"), auditor.clone()),
-                (record.expiration_ledger, current_sequence),
-            );
-            // topics : ("AuditGrantPruned", auditor: Address)
-            // data   : (expired_at_ledger: u32, pruned_at_ledger: u32)
-
-            pruned_count += 1;
-        }
-
-        Ok(pruned_count)
-    }
-
-    /// Return the number of auditor addresses ever registered via
-    /// `generate_view_key`.  Useful for callers building a pruning scan list
-    /// by iterating `get_auditor_at_index(0..get_registered_grant_count())`.
-    pub fn get_registered_grant_count(env: Env) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::AuditorCount)
-            .unwrap_or(0u32)
-    }
-
-    /// Return the auditor address registered at a given enumeration index.
-    ///
-    /// Indices are stable and monotonically assigned by `generate_view_key`.
-    /// Returns `None` when `index >= get_registered_grant_count()`.
-    pub fn get_auditor_at_index(env: Env, index: u32) -> Option<Address> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::AuditorIndex(index))
-    }
-
-    /// Return the `PrunedGrantRef` tombstone for an auditor whose grant was
-    /// pruned, or `None` if they have never been pruned.
-    pub fn get_pruned_grant_ref(env: Env, auditor: Address) -> Option<PrunedGrantRef> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::PrunedGrant(auditor))
-    }
-
-    // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
     /// Store a single audit log entry keyed by (company_id, counter) and
     /// increment the counter. Called after every verification / report.
+    fn revoke_descendants(env: &Env, auditor: &Address) {
+        let delegates: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatedAuditors(auditor.clone()))
+            .unwrap_or(Vec::new(env));
+
+        for delegate in delegates.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::AuditorKey(delegate.clone()));
+            Self::revoke_descendants(env, &delegate);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DelegatedAuditors(auditor.clone()));
+    }
+
+    fn scope_is_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
+        let rank = |scope: AuditScope| match scope {
+            AuditScope::FullCompany => 4,
+            AuditScope::TimeRange => 3,
+            AuditScope::EmployeeList => 2,
+            AuditScope::AggregateOnly => 1,
+        };
+        rank(child_scope) <= rank(parent_scope)
+    }
+
     fn record_audit_log(env: &Env, auditor: &Address, scope: AuditScope, matched: bool) {
         let company_id = Symbol::new(env, "default");
         let counter: u32 = env
@@ -871,38 +964,6 @@ impl AuditModule {
         preimage.extend_from_array(&key_slice);
         let commitment_slice: [u8; 32] = commitment.into();
         preimage.extend_from_array(&commitment_slice);
-        env.crypto().sha256(&preimage).into()
-    }
-
-    // ── Issue #330: deterministic audit attestation digest builder ───────────
-
-    /// Build a deterministic audit attestation digest (issue #330).
-    ///
-    /// Cryptographically binds domain separator `b"zkpayroll_audit_v1"` with
-    /// the attestation metadata and batch root without exposing raw payroll data.
-    pub fn build_audit_digest(env: Env, input: AuditAttestationInput) -> BytesN<32> {
-        let mut preimage = Bytes::new(&env);
-
-        // Domain separation tag
-        preimage.extend_from_slice(b"zkpayroll_audit_v1");
-
-        // Employer address XDR
-        let addr_xdr = input.employer.to_xdr(&env);
-        preimage.append(&addr_xdr);
-
-        // Time range
-        preimage.extend_from_array(&input.period_start.to_le_bytes());
-        preimage.extend_from_array(&input.period_end.to_le_bytes());
-
-        // Batch root
-        let root_slice: [u8; 32] = (&input.batch_root).into();
-        preimage.extend_from_array(&root_slice);
-
-        // Scope discriminant & schema version
-        let scope_val = input.scope as u32;
-        preimage.extend_from_array(&scope_val.to_le_bytes());
-        preimage.extend_from_array(&input.schema_version.to_le_bytes());
-
         env.crypto().sha256(&preimage).into()
     }
 }
