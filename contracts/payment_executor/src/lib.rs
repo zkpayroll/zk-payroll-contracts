@@ -67,6 +67,10 @@ pub enum PaymentError {
     ProofExpired = 7,
     /// Empty payroll batches are rejected to avoid silent no-op execution.
     EmptyBatch = 8,
+    /// Asset decimal configuration is missing or unsupported (issue #354).
+    AssetDecimalsMissing = 9,
+    /// Asset decimal mismatch between payment and contract assumptions (issue #354).
+    AssetDecimalsMismatch = 10,
 }
 
 /// Contract addresses for dependencies
@@ -94,6 +98,8 @@ pub enum DataKey {
     AllowedAsset(Address),
     /// Storage key schema version (issue #174)
     StorageVersion,
+    /// Asset decimal configuration for proper amount normalization (issue #354)
+    AssetDecimals(Address),
 }
 
 #[contract]
@@ -209,6 +215,40 @@ impl PaymentExecutor {
             .persistent()
             .get(&DataKey::StorageVersion)
             .unwrap_or(1u32)
+    }
+
+    /// Configure the decimal places for an asset token (issue #354).
+    /// Required to ensure proper amount normalization and prevent decimal mismatches.
+    /// Only executor admin can set this configuration.
+    pub fn set_asset_decimals(env: Env, asset: Address, decimals: u32) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+
+        if decimals > 18 {
+            panic!("Asset decimals must not exceed 18");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetDecimals(asset.clone()), &decimals);
+
+        env.events().publish(
+            (Symbol::new(&env, "AssetDecimalsConfigured"), asset),
+            (decimals, env.ledger().timestamp()),
+        );
+    }
+
+    /// Get the configured decimal places for an asset token (issue #354).
+    /// Returns 0 if not configured, indicating configuration is missing.
+    pub fn get_asset_decimals(env: Env, asset: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetDecimals(asset))
+            .unwrap_or(0u32)
     }
 
     // -----------------------------------------------------------------------
@@ -425,6 +465,21 @@ impl PaymentExecutor {
         let treasury_str = format!("{:?}", company.treasury);
         if treasury_str.is_empty() {
             panic!("Invalid treasury mapping: empty treasury address");
+        }
+
+        // Issue #354: Validate asset decimal normalization guardrails
+        let asset_decimals = Self::get_asset_decimals(env.clone(), addresses.token.clone());
+        if asset_decimals == 0 {
+            return Err(PaymentError::AssetDecimalsMissing);
+        }
+
+        // Verify amount is properly normalized according to asset decimal configuration
+        if amount < 0 {
+            return Err(PaymentError::AssetDecimalsMismatch);
+        }
+        let max_amount_for_decimals = 10i128.pow(asset_decimals);
+        if amount > 0 && amount < max_amount_for_decimals / 1_000_000_000 {
+            return Err(PaymentError::AssetDecimalsMismatch);
         }
 
         // Execute token transfer from company treasury to employee.

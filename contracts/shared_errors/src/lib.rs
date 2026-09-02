@@ -2,9 +2,9 @@
 
 use soroban_sdk::contracterror;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ?????????????????????????????????????????????????????????????????????????????
 // Centralized Error Taxonomy
-// ─────────────────────────────────────────────────────────────────────────────
+// ?????????????????????????????????????????????????????????????????????????????
 //
 // This module provides a deterministic error taxonomy across all ZK Payroll
 // contracts. All contract errors are grouped by category (Authorization,
@@ -25,7 +25,7 @@ use soroban_sdk::contracterror;
 // - Map error IDs to user-facing messages by category
 // - Use error categories to determine retry vs. non-retry behavior
 // - All errors are stable across contract versions
-// ─────────────────────────────────────────────────────────────────────────────
+// ?????????????????????????????????????????????????????????????????????????????
 
 /// Authorization and Access Control Errors (1-99)
 ///
@@ -54,7 +54,7 @@ pub enum AuthError {
 /// Proof Verification and Cryptographic Errors (100-199)
 ///
 /// These errors indicate that a ZK proof, commitment, or cryptographic
-/// verification failed. Non-retryable — requires regenerating proofs.
+/// verification failed. Non-retryable ? requires regenerating proofs.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -94,7 +94,7 @@ pub enum AuditError {
     UnauthorizedChallengeParticipant = 204,
     /// A challenge with this ID does not exist.
     ChallengeNotFound = 205,
-    /// The challenge deadline has passed — no further responses accepted.
+    /// The challenge deadline has passed ? no further responses accepted.
     ChallengeExpired = 206,
     /// The challenge has already been resolved.
     ChallengeAlreadyResolved = 207,
@@ -114,7 +114,7 @@ pub enum AuditError {
 pub enum PaymentError {
     /// The payroll period does not exist.
     PeriodNotFound = 300,
-    /// The payroll period is closed — no new payments allowed.
+    /// The payroll period is closed ? no new payments allowed.
     PeriodClosed = 301,
     /// Attempt to create a duplicate period for this company.
     PeriodAlreadyExists = 302,
@@ -156,6 +156,8 @@ pub enum TreasuryError {
     InsufficientUnreservedBalance = 405,
     /// The asset configuration is invalid or incomplete.
     InvalidAssetConfiguration = 406,
+    /// The requested treasury reservation was not found.
+    ReservationNotFound = 407,
 }
 
 /// Payroll State Machine and Lifecycle Errors (500-599)
@@ -194,7 +196,7 @@ pub enum StateError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ReplayError {
-    /// This nonce has already been consumed — payroll run is a duplicate.
+    /// This nonce has already been consumed ? payroll run is a duplicate.
     NonceAlreadyUsed = 600,
     /// A payroll execution with this identity has already completed.
     PayrollAlreadyExecuted = 601,
@@ -226,7 +228,7 @@ pub enum StorageError {
     StorageVersionMismatch = 702,
     /// A required storage record is corrupted or invalid.
     StorageCorruption = 703,
-    /// Cannot migrate storage — dependency contract is missing or invalid.
+    /// Cannot migrate storage ? dependency contract is missing or invalid.
     MigrationFailed = 704,
 }
 

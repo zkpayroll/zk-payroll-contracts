@@ -715,6 +715,16 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 
 ---
 
+#### `get_supported_assets`
+
+| Field       | Type           | Description                                      |
+|-------------|----------------|--------------------------------------------------|
+| **Returns** | `Vec<Address>` | Assets currently enabled for this payroll contract |
+
+**Errors**: None. The initialized token is included by default; repeated allowlist updates do not create duplicates.
+
+---
+
 #### `deposit`
 
 | Field    | Type      | Description   |
@@ -738,7 +748,7 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 | **Returns**           | `()`               | void                                      |
 
 **Behavior** (in order):
-1. **Length check**: `proofs.len() == amounts.len() == employees.len()`. Panics `"Array length mismatch"` on failure.
+1. **Length check**: `proofs.len() == amounts.len() == employees.len()`. A missing proof panics `"Missing payroll proof: one proof is required per payment"`; other mismatches panic `"Array length mismatch"`.
 2. **Batch size limit**: `proofs.len() <= 50` (constant `MAX_BATCH`). Panics `"Batch too large"`.
 3. **Spend authorization**: Sums all amounts, compares to `expected_total_spend`. Panics on mismatch.
 4. **Pause check**: If PauseManager configured, checks `is_paused()`; panics `"Payroll is paused"` if paused.
@@ -755,6 +765,7 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 
 **Errors** (all `panic!`, not `Result`):
 - `panic!("Array length mismatch")`
+- `panic!("Missing payroll proof: one proof is required per payment")`
 - `panic!("Batch too large")`
 - `panic!("Expected spend mismatch: authorised X but batch totals Y")`
 - `panic!("Payroll is paused")`
