@@ -241,6 +241,7 @@ fn test_unauthorized_cancel_payroll_run_fails() {
         &None::<BytesN<32>>,
     );
 
+    // Attempt to cancel as unauthorized user
     let reason = Symbol::new(&env, "cancel");
     payroll_client.cancel_payroll_run(&unauthorized_user, &run_id, &reason);
 }

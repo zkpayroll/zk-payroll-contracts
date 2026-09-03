@@ -31,6 +31,14 @@ pub enum AuditError {
     InvalidViewKey = 7,
     /// The requested new expiration is not later than the current one.
     ExpirationNotExtended = 8,
+    /// Delegation is forbidden unless employer policy explicitly enables it.
+    DelegationNotAllowed = 9,
+    /// A delegated grant attempted to exceed the parent grant scope.
+    DelegationExceedsParentScope = 10,
+    /// A delegated grant attempted to exceed the parent grant expiry.
+    DelegationExceedsParentExpiry = 11,
+    /// A delegated grant is no longer valid because its parent grant was revoked.
+    DelegationRevoked = 12,
 }
 
 // ---------------------------------------------------------------------------
@@ -44,6 +52,11 @@ pub struct ViewKeyRecord {
     pub key_bytes: BytesN<32>,
     pub expiration_ledger: u32,
     pub granted_by: Address,
+    pub scope: AuditScope,
+    pub allow_delegation: bool,
+    pub max_scope: AuditScope,
+    pub max_expiration_ledger: u32,
+    pub parent_auditor: Option<Address>,
 }
 
 /// What the auditor is allowed to examine.
@@ -125,6 +138,8 @@ pub struct AuditMetadataSummary {
 pub enum DataKey {
     /// Maps an auditor `Address` → `ViewKeyRecord` in Persistent storage.
     AuditorKey(Address),
+    /// Tracks delegated auditors under a parent grant.
+    DelegatedAuditors(Address),
     /// Per-company audit log counter (Symbol = company_id).
     AuditLogCounter(Symbol),
     /// Audit log entry keyed by (company_id, log_index).
@@ -183,6 +198,11 @@ impl AuditModule {
             key_bytes: key_bytes.clone(),
             expiration_ledger,
             granted_by: admin,
+            scope: AuditScope::FullCompany,
+            allow_delegation: false,
+            max_scope: AuditScope::FullCompany,
+            max_expiration_ledger: expiration_ledger,
+            parent_auditor: None,
         };
 
         env.storage()
@@ -198,9 +218,35 @@ impl AuditModule {
         match env
             .storage()
             .persistent()
-            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
+            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(auditor.clone()))
         {
-            Some(record) => env.ledger().sequence() <= record.expiration_ledger,
+            Some(record) => {
+                if env.ledger().sequence() > record.expiration_ledger {
+                    return false;
+                }
+                if let Some(parent) = record.parent_auditor.clone() {
+                    let parent_record: ViewKeyRecord = match env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::AuditorKey(parent.clone()))
+                    {
+                        Some(value) => value,
+                        None => return false,
+                    };
+                    if env.ledger().sequence() > parent_record.expiration_ledger {
+                        return false;
+                    }
+                    if !Self::scope_is_within(parent_record.max_scope, record.scope) {
+                        return false;
+                    }
+                    if record.expiration_ledger > parent_record.max_expiration_ledger
+                        || record.expiration_ledger > parent_record.expiration_ledger
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
             None => false,
         }
     }
@@ -219,6 +265,7 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
+        Self::revoke_descendants(&env, &auditor);
         env.storage()
             .persistent()
             .remove(&DataKey::AuditorKey(auditor.clone()));
@@ -292,6 +339,11 @@ impl AuditModule {
             key_bytes: new_key_bytes.clone(),
             expiration_ledger: new_expiration_ledger,
             granted_by: admin.clone(),
+            scope: record.scope,
+            allow_delegation: record.allow_delegation,
+            max_scope: record.max_scope,
+            max_expiration_ledger: record.max_expiration_ledger,
+            parent_auditor: record.parent_auditor,
         };
 
         env.storage()
@@ -306,6 +358,167 @@ impl AuditModule {
         // data   : (new_expiration_ledger,)
 
         Ok(new_key_bytes)
+    }
+
+    pub fn set_delegation_policy(
+        env: Env,
+        admin: Address,
+        auditor: Address,
+        allow_delegation: bool,
+        max_scope: AuditScope,
+        max_expiration_ledger: u32,
+    ) -> Result<(), AuditError> {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let mut record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor.clone()))
+            .ok_or(AuditError::KeyNotFound)?;
+
+        if record.granted_by != admin {
+            return Err(AuditError::NotKeyGranter);
+        }
+
+        record.allow_delegation = allow_delegation;
+        record.max_scope = max_scope;
+        record.max_expiration_ledger = max_expiration_ledger;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditorKey(auditor.clone()), &record);
+
+        Ok(())
+    }
+
+    pub fn approve_delegation(
+        env: Env,
+        admin: Address,
+        auditor: Address,
+        allow_delegation: bool,
+        max_scope: AuditScope,
+        max_expiration_ledger: u32,
+    ) -> Result<(), AuditError> {
+        Self::set_delegation_policy(
+            env,
+            admin,
+            auditor,
+            allow_delegation,
+            max_scope,
+            max_expiration_ledger,
+        )
+    }
+
+    pub fn delegate_view_key(
+        env: Env,
+        auditor: Address,
+        delegate: Address,
+        scope: AuditScope,
+        expiration_ledger: u32,
+    ) -> Result<BytesN<32>, AuditError> {
+        let parent: ViewKeyRecord = Self::authorize_auditor(&env, auditor.clone())?;
+        if !parent.allow_delegation {
+            return Err(AuditError::DelegationNotAllowed);
+        }
+        if !Self::scope_is_within(parent.max_scope, scope) {
+            return Err(AuditError::DelegationExceedsParentScope);
+        }
+        if expiration_ledger > parent.max_expiration_ledger
+            || expiration_ledger > parent.expiration_ledger
+        {
+            return Err(AuditError::DelegationExceedsParentExpiry);
+        }
+
+        let key_bytes = Self::derive_key_bytes(&env, &delegate, expiration_ledger);
+        let delegated_record = ViewKeyRecord {
+            key_bytes: key_bytes.clone(),
+            expiration_ledger,
+            granted_by: auditor.clone(),
+            scope,
+            allow_delegation: parent.allow_delegation,
+            max_scope: scope,
+            max_expiration_ledger: expiration_ledger,
+            parent_auditor: Some(auditor.clone()),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditorKey(delegate.clone()), &delegated_record);
+
+        let mut delegates: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatedAuditors(auditor.clone()))
+            .unwrap_or(Vec::new(&env));
+        delegates.push_back(delegate.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::DelegatedAuditors(auditor.clone()), &delegates);
+
+        Ok(key_bytes)
+    }
+
+    pub fn grant_delegated_access(
+        env: Env,
+        auditor: Address,
+        delegate: Address,
+        scope: AuditScope,
+        expiration_ledger: u32,
+    ) -> Result<BytesN<32>, AuditError> {
+        Self::delegate_view_key(env, auditor, delegate, scope, expiration_ledger)
+    }
+
+    pub fn extend_delegated_access(
+        env: Env,
+        auditor: Address,
+        delegate: Address,
+        new_expiration_ledger: u32,
+    ) -> Result<BytesN<32>, AuditError> {
+        let mut record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(delegate.clone()))
+            .ok_or(AuditError::KeyNotFound)?;
+
+        if record.parent_auditor != Some(auditor.clone()) {
+            return Err(AuditError::NotKeyGranter);
+        }
+
+        if env.ledger().sequence() > record.expiration_ledger {
+            return Err(AuditError::KeyExpired);
+        }
+
+        let parent: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor.clone()))
+            .ok_or(AuditError::DelegationRevoked)?;
+
+        if !parent.allow_delegation {
+            return Err(AuditError::DelegationNotAllowed);
+        }
+        if new_expiration_ledger <= record.expiration_ledger {
+            return Err(AuditError::ExpirationNotExtended);
+        }
+        if new_expiration_ledger > parent.max_expiration_ledger
+            || new_expiration_ledger > parent.expiration_ledger
+        {
+            return Err(AuditError::DelegationExceedsParentExpiry);
+        }
+        if !Self::scope_is_within(parent.max_scope, record.scope) {
+            return Err(AuditError::DelegationExceedsParentScope);
+        }
+
+        let new_key = Self::derive_key_bytes(&env, &delegate, new_expiration_ledger);
+        record.key_bytes = new_key.clone();
+        record.expiration_ledger = new_expiration_ledger;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditorKey(delegate.clone()), &record);
+
+        Ok(new_key)
     }
 
     // -----------------------------------------------------------------------
@@ -395,15 +608,31 @@ impl AuditModule {
             .ok_or(AuditError::KeyNotFound)?;
 
         if env.ledger().sequence() > record.expiration_ledger {
-            // Emit an observable event so off-chain monitors can detect the
-            // expiry boundary crossing and trigger re-issuance workflows.
             env.events().publish(
-                (Symbol::new(env, "AuditAccessExpired"), auditor),
+                (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
                 (record.expiration_ledger, env.ledger().sequence()),
             );
-            // topics : ("AuditAccessExpired", auditor)
-            // data   : (expiration_ledger, current_sequence)
             return Err(AuditError::KeyExpired);
+        }
+
+        if let Some(parent) = record.parent_auditor.clone() {
+            let parent_record: ViewKeyRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::AuditorKey(parent.clone()))
+                .ok_or(AuditError::DelegationRevoked)?;
+
+            if env.ledger().sequence() > parent_record.expiration_ledger {
+                return Err(AuditError::DelegationRevoked);
+            }
+            if !Self::scope_is_within(parent_record.max_scope, record.scope) {
+                return Err(AuditError::DelegationExceedsParentScope);
+            }
+            if record.expiration_ledger > parent_record.max_expiration_ledger
+                || record.expiration_ledger > parent_record.expiration_ledger
+            {
+                return Err(AuditError::DelegationExceedsParentExpiry);
+            }
         }
 
         Ok(record)
@@ -653,6 +882,35 @@ impl AuditModule {
 
     /// Store a single audit log entry keyed by (company_id, counter) and
     /// increment the counter. Called after every verification / report.
+    fn revoke_descendants(env: &Env, auditor: &Address) {
+        let delegates: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatedAuditors(auditor.clone()))
+            .unwrap_or(Vec::new(env));
+
+        for delegate in delegates.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::AuditorKey(delegate.clone()));
+            Self::revoke_descendants(env, &delegate);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DelegatedAuditors(auditor.clone()));
+    }
+
+    fn scope_is_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
+        let rank = |scope: AuditScope| match scope {
+            AuditScope::FullCompany => 4,
+            AuditScope::TimeRange => 3,
+            AuditScope::EmployeeList => 2,
+            AuditScope::AggregateOnly => 1,
+        };
+        rank(child_scope) <= rank(parent_scope)
+    }
+
     fn record_audit_log(env: &Env, auditor: &Address, scope: AuditScope, matched: bool) {
         let company_id = Symbol::new(env, "default");
         let counter: u32 = env

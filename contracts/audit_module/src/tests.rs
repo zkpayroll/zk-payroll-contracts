@@ -985,3 +985,98 @@ fn test_verify_payroll_metadata_revoked_auditor_rejected() {
         client.try_verify_payroll_metadata(&auditor, &hash, &hash, &AuditScope::FullCompany);
     assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyNotFound);
 }
+
+#[test]
+fn test_delegation_is_rejected_by_default() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let delegate = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let result =
+        client.try_delegate_view_key(&auditor, &delegate, &AuditScope::EmployeeList, &(seq + 500));
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        AuditError::DelegationNotAllowed
+    );
+}
+
+#[test]
+fn test_allowed_delegation_respects_parent_constraints() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let delegate = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let admin = contract_id.clone();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+    client.set_delegation_policy(
+        &admin,
+        &auditor,
+        &true,
+        &AuditScope::FullCompany,
+        &(seq + 1_000),
+    );
+
+    let key =
+        client.delegate_view_key(&auditor, &delegate, &AuditScope::EmployeeList, &(seq + 500));
+    assert_eq!(key.len(), 32);
+
+    let bad = client.try_delegate_view_key(
+        &auditor,
+        &soroban_sdk::Address::generate(&env),
+        &AuditScope::FullCompany,
+        &(seq + 1_500),
+    );
+    assert_eq!(
+        bad.unwrap_err().unwrap(),
+        AuditError::DelegationExceedsParentExpiry
+    );
+}
+
+#[test]
+fn test_nested_delegation_and_parent_revocation_invalidate_descendants() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let root = soroban_sdk::Address::generate(&env);
+    let child = soroban_sdk::Address::generate(&env);
+    let grandchild = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    let admin = contract_id.clone();
+
+    client.generate_view_key(&root, &(seq + 2_000));
+    client.set_delegation_policy(
+        &admin,
+        &root,
+        &true,
+        &AuditScope::FullCompany,
+        &(seq + 2_000),
+    );
+
+    client.delegate_view_key(&root, &child, &AuditScope::EmployeeList, &(seq + 1_500));
+    client.set_delegation_policy(
+        &root,
+        &child,
+        &true,
+        &AuditScope::EmployeeList,
+        &(seq + 1_500),
+    );
+    client.delegate_view_key(
+        &child,
+        &grandchild,
+        &AuditScope::AggregateOnly,
+        &(seq + 1_000),
+    );
+
+    assert!(client.verify_access(&child));
+    assert!(client.verify_access(&grandchild));
+
+    client.revoke_view_key(&admin, &root);
+    assert!(!client.verify_access(&child));
+    assert!(!client.verify_access(&grandchild));
+}

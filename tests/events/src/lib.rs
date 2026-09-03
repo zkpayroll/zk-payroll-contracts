@@ -93,6 +93,9 @@ fn event_name(env: &Env, event: &(Address, Vec<Val>, Val)) -> Option<Symbol> {
         return None;
     }
     let name: Symbol = topics.get(1).unwrap().try_into_val(env).ok()?;
+    // `run_state` is an internal bookkeeping event emitted alongside the
+    // named lifecycle events on every state transition; it is not itself
+    // one of the lifecycle events this test asserts the order of.
     if name == Symbol::new(env, "run_state") {
         return None;
     }

@@ -5,7 +5,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Symbol};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, BytesN, Env, Symbol};
 use payroll::{Payroll, PayrollClient, ComplianceEvidencePointer, EvidencePointerScope};
 use ::token::{Token, TokenClient};
 use proof_verifier::{ProofVerifier, VerificationKey};
@@ -521,4 +521,134 @@ fn test_storage_version_backward_compatibility() {
         &None,
     );
     assert!(run_id > 0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// #401: Batch Lock Timestamp Query Helper Integration Tests
+// ═════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_feature_batch_lock_timestamp() {
+    let env = Env::default();
+    let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+        setup_simple_payroll(&env);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 2000);
+    let nonce = test_nonce(&env, 202);
+
+    let run_id = payroll_client.prepare_payroll_run(
+        &proofs,
+        &amounts,
+        &employees,
+        &2000,
+        &nonce,
+        &None,
+    );
+
+    let lock_ts = payroll_client.get_batch_lock_timestamp(&run_id);
+    assert!(lock_ts.is_some());
+    assert_eq!(lock_ts.unwrap(), env.ledger().timestamp());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// #402: Safe Treasury Summary View Integration Tests
+// ═════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_feature_safe_treasury_summary() {
+    let env = Env::default();
+    let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+        setup_simple_payroll(&env);
+
+    let addrs = payroll_client.get_addresses();
+    let summary = payroll_client.get_safe_treasury_summary(&addrs.token);
+    assert_eq!(summary.total_balance, 1_000_000);
+    assert_eq!(summary.available_balance, 1_000_000);
+    assert_eq!(summary.reserved_balance, 0);
+    assert_eq!(summary.blocked_balance, 0);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 30_000);
+    let nonce = test_nonce(&env, 203);
+    let _run_id = payroll_client.prepare_payroll_run(
+        &proofs,
+        &amounts,
+        &employees,
+        &30_000,
+        &nonce,
+        &None,
+    );
+
+    let summary_after_lock = payroll_client.get_safe_treasury_summary(&addrs.token);
+    assert_eq!(summary_after_lock.reserved_balance, 30_000);
+    assert_eq!(summary_after_lock.available_balance, 970_000);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// #403: Payroll Approval Expiry Validation Integration Tests
+// ═════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_feature_approval_expiry_validation() {
+    let env = Env::default();
+    let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+        setup_simple_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll_client.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 15_000);
+    let nonce = test_nonce(&env, 204);
+    let run_id = payroll_client.prepare_payroll_run(
+        &proofs,
+        &amounts,
+        &employees,
+        &15_000,
+        &nonce,
+        &None,
+    );
+
+    payroll_client.approve_payroll_run(&reviewer, &run_id);
+    assert!(!payroll_client.is_payroll_approval_expired(&run_id, &(7 * 24 * 60 * 60)));
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += (7 * 24 * 60 * 60) + 50;
+    });
+    assert!(payroll_client.is_payroll_approval_expired(&run_id, &(7 * 24 * 60 * 60)));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// #404: Cancelled Batch Read Status Integration Tests
+// ═════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_feature_cancelled_batch_status() {
+    let env = Env::default();
+    let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+        setup_simple_payroll(&env);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 40_000);
+    let nonce = test_nonce(&env, 205);
+    let run_id = payroll_client.prepare_payroll_run(
+        &proofs,
+        &amounts,
+        &employees,
+        &40_000,
+        &nonce,
+        &None,
+    );
+
+    assert_eq!(payroll_client.get_cancelled_batch_status(&run_id), None);
+
+    payroll_client.cancel_payroll_run(
+        &admin,
+        &run_id,
+        &Symbol::new(&env, "duplicate"),
+    );
+
+    let status = payroll_client.get_cancelled_batch_status(&run_id).unwrap();
+    assert_eq!(status.run_id, run_id);
+    assert_eq!(status.cancelled_by, admin);
+    assert_eq!(status.reason, Symbol::new(&env, "duplicate"));
+    assert_eq!(status.total_amount, 40_000);
+    assert!(status.is_cancelled);
 }

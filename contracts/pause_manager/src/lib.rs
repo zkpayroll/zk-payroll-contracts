@@ -49,8 +49,15 @@ impl PauseManager {
             panic!("Already initialized");
         }
         e.storage().persistent().set(&DataKey::Operator, &operator);
-        for category in [PauseCategory::Payroll, PauseCategory::Treasury, PauseCategory::Audit, PauseCategory::Admin] {
-            e.storage().persistent().set(&DataKey::Paused(category), &false);
+        for category in [
+            PauseCategory::Payroll,
+            PauseCategory::Treasury,
+            PauseCategory::Audit,
+            PauseCategory::Admin,
+        ] {
+            e.storage()
+                .persistent()
+                .set(&DataKey::Paused(category), &false);
         }
         payroll_events::emit_pause_manager_initialized(&e, operator);
     }
@@ -62,8 +69,15 @@ impl PauseManager {
             .get(&DataKey::Operator)
             .expect("Not initialized");
         operator.require_auth();
-        for category in [PauseCategory::Payroll, PauseCategory::Treasury, PauseCategory::Audit, PauseCategory::Admin] {
-            e.storage().persistent().set(&DataKey::Paused(category), &true);
+        for category in [
+            PauseCategory::Payroll,
+            PauseCategory::Treasury,
+            PauseCategory::Audit,
+            PauseCategory::Admin,
+        ] {
+            e.storage()
+                .persistent()
+                .set(&DataKey::Paused(category), &true);
         }
         payroll_events::emit_paused(&e);
     }
@@ -75,8 +89,15 @@ impl PauseManager {
             .get(&DataKey::Operator)
             .expect("Not initialized");
         operator.require_auth();
-        for category in [PauseCategory::Payroll, PauseCategory::Treasury, PauseCategory::Audit, PauseCategory::Admin] {
-            e.storage().persistent().set(&DataKey::Paused(category), &false);
+        for category in [
+            PauseCategory::Payroll,
+            PauseCategory::Treasury,
+            PauseCategory::Audit,
+            PauseCategory::Admin,
+        ] {
+            e.storage()
+                .persistent()
+                .set(&DataKey::Paused(category), &false);
         }
         payroll_events::emit_unpaused(&e);
     }
@@ -88,7 +109,9 @@ impl PauseManager {
             .get(&DataKey::Operator)
             .expect("Not initialized");
         operator.require_auth();
-        e.storage().persistent().set(&DataKey::Paused(category), &true);
+        e.storage()
+            .persistent()
+            .set(&DataKey::Paused(category), &true);
         let category_symbol = match category {
             PauseCategory::Payroll => Symbol::new(&e, "payroll"),
             PauseCategory::Treasury => Symbol::new(&e, "treasury"),
@@ -105,7 +128,9 @@ impl PauseManager {
             .get(&DataKey::Operator)
             .expect("Not initialized");
         operator.require_auth();
-        e.storage().persistent().set(&DataKey::Paused(category), &false);
+        e.storage()
+            .persistent()
+            .set(&DataKey::Paused(category), &false);
         let category_symbol = match category {
             PauseCategory::Payroll => Symbol::new(&e, "payroll"),
             PauseCategory::Treasury => Symbol::new(&e, "treasury"),
@@ -116,7 +141,12 @@ impl PauseManager {
     }
 
     pub fn is_paused(e: Env) -> bool {
-        for category in [PauseCategory::Payroll, PauseCategory::Treasury, PauseCategory::Audit, PauseCategory::Admin] {
+        for category in [
+            PauseCategory::Payroll,
+            PauseCategory::Treasury,
+            PauseCategory::Audit,
+            PauseCategory::Admin,
+        ] {
             if e.storage()
                 .persistent()
                 .get(&DataKey::Paused(category))
@@ -137,19 +167,23 @@ impl PauseManager {
 
     pub fn get_pause_status(e: Env) -> PauseStatus {
         PauseStatus {
-            payroll_paused: e.storage()
+            payroll_paused: e
+                .storage()
                 .persistent()
                 .get(&DataKey::Paused(PauseCategory::Payroll))
                 .unwrap_or(false),
-            treasury_paused: e.storage()
+            treasury_paused: e
+                .storage()
                 .persistent()
                 .get(&DataKey::Paused(PauseCategory::Treasury))
                 .unwrap_or(false),
-            audit_paused: e.storage()
+            audit_paused: e
+                .storage()
                 .persistent()
                 .get(&DataKey::Paused(PauseCategory::Audit))
                 .unwrap_or(false),
-            admin_paused: e.storage()
+            admin_paused: e
+                .storage()
                 .persistent()
                 .get(&DataKey::Paused(PauseCategory::Admin))
                 .unwrap_or(false),
@@ -570,6 +604,172 @@ mod tests {
 
         let new_operator = Address::generate(&env);
         client.accept_operator_rotation(&new_operator);
+    }
+
+    // ── Issue #275: operator rotation revokes old operator access ────────────
+    //
+    // The two-step rotation tests above (issue #192) confirm the *new*
+    // operator gains access and that a *cancelled* rotation leaves the old
+    // operator in place. They don't confirm the flip side required for real
+    // team rotation: once a rotation is *accepted*, the *old* operator's
+    // privileges must be gone, not merely superseded. These tests exercise
+    // that revocation directly, and confirm the new operator inherits full
+    // admin control (able to start the next rotation in turn).
+
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_old_operator_cannot_pause_after_rotation_completed() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+
+        let old_operator = Address::generate(&env);
+        let new_operator = Address::generate(&env);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &old_operator,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "initialize",
+                args: (old_operator.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.initialize(&old_operator);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &old_operator,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_operator_rotation",
+                args: (old_operator.clone(), new_operator.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.propose_operator_rotation(&old_operator, &new_operator);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_operator,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_operator_rotation",
+                args: (new_operator.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.accept_operator_rotation(&new_operator);
+
+        // The rotation is complete. The old operator's signature is no
+        // longer sufficient authorization for `pause` — the contract now
+        // requires the new operator's signature.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &old_operator,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+    }
+
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_old_operator_cannot_unpause_after_rotation_completed() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+
+        let old_operator = Address::generate(&env);
+        let new_operator = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.initialize(&old_operator);
+        client.propose_operator_rotation(&old_operator, &new_operator);
+        client.accept_operator_rotation(&new_operator);
+        // New operator pauses first, so unpause is the meaningful action to
+        // deny the old operator.
+        client.pause();
+
+        // Revert to explicit, single-signer auth for the negative check.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &old_operator,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unpause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.unpause();
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not the current operator")]
+    fn test_old_operator_cannot_propose_new_rotation_after_being_replaced() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+
+        let old_operator = Address::generate(&env);
+        let new_operator = Address::generate(&env);
+        client.initialize(&old_operator);
+        client.propose_operator_rotation(&old_operator, &new_operator);
+        client.accept_operator_rotation(&new_operator);
+
+        // The old operator attempts to act as if it were still current —
+        // must be rejected even though it was the operator moments ago.
+        let another_operator = Address::generate(&env);
+        client.propose_operator_rotation(&old_operator, &another_operator);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_old_operator_cannot_cancel_after_rotation_completed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+
+        let old_operator = Address::generate(&env);
+        let new_operator = Address::generate(&env);
+        client.initialize(&old_operator);
+        client.propose_operator_rotation(&old_operator, &new_operator);
+        client.accept_operator_rotation(&new_operator);
+
+        client.cancel_operator_rotation(&old_operator);
+    }
+
+    #[test]
+    fn test_new_operator_retains_full_control_and_can_start_next_rotation() {
+        // Admin control must be preserved across rotation: the incoming
+        // operator gets the exact same capabilities the outgoing one had,
+        // including the ability to pause/unpause and to propose the next
+        // rotation in turn.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PauseManager);
+        let client = PauseManagerClient::new(&env, &contract_id);
+
+        let op_1 = Address::generate(&env);
+        let op_2 = Address::generate(&env);
+        let op_3 = Address::generate(&env);
+
+        client.initialize(&op_1);
+        client.propose_operator_rotation(&op_1, &op_2);
+        client.accept_operator_rotation(&op_2);
+
+        client.pause();
+        assert!(client.is_paused());
+        client.unpause();
+        assert!(!client.is_paused());
+
+        client.propose_operator_rotation(&op_2, &op_3);
+        let proposal = client.get_pending_operator_rotation().unwrap();
+        assert_eq!(proposal.new_operator, op_3);
+        assert_eq!(proposal.proposed_by, op_2);
     }
 
     #[test]

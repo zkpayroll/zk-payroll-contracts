@@ -19,3 +19,4 @@ build/circuits/
 # Environment / secrets
 .env
 .env.*
+.opencode

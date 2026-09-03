@@ -35,7 +35,16 @@ fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &arr)
 }
 
-fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Address, Address) {
+fn setup_payroll(
+    env: &Env,
+) -> (
+    PayrollClient<'_>,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
     env.mock_all_auths();
 
     let verifier_id = env.register_contract(None, ProofVerifier);
@@ -74,7 +83,14 @@ fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Ad
     let employee = Address::generate(env);
     commitment_client.store_commitment(&employee, &BytesN::from_array(env, &[0u8; 32]));
 
-    (payroll_client, admin, treasury, treasury_owner, employee, token_id)
+    (
+        payroll_client,
+        admin,
+        treasury,
+        treasury_owner,
+        employee,
+        token_id,
+    )
 }
 
 #[test]
@@ -87,7 +103,10 @@ fn test_withdrawal_before_lock_and_after_cancellation() {
 
     // Initial state: locked funds = 0, available = total_balance
     assert_eq!(client.get_locked_funds(&token_id), 0);
-    assert_eq!(client.get_available_treasury_balance(&token_id), total_balance);
+    assert_eq!(
+        client.get_available_treasury_balance(&token_id),
+        total_balance
+    );
 
     // Prepare payroll run locking 50,000
     let mut proofs = Vec::new(&env);
@@ -127,7 +146,9 @@ fn test_withdrawal_before_lock_and_after_cancellation() {
 }
 
 #[test]
-#[should_panic(expected = "Insufficient available treasury balance: funds locked for pending payroll")]
+#[should_panic(
+    expected = "Insufficient available treasury balance: funds locked for pending payroll"
+)]
 fn test_withdrawal_attempt_exceeding_surplus_rejected() {
     let env = Env::default();
     let (client, _admin, treasury, treasury_owner, employee, token_id) = setup_payroll(&env);
