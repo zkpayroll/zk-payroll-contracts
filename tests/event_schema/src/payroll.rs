@@ -90,6 +90,34 @@ fn case_pause_manager_set(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_asset_allowlist_updated(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let asset = Address::generate(env);
+    let allowed = false;
+    env.as_contract(cid, || {
+        payroll_events::emit_asset_allowlist_updated(env, asset.clone(), allowed);
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "asset_allowlist_updated"),
+        "payroll.asset_allowlist_updated topics changed"
+    );
+    let decoded: (Address, bool) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (asset, allowed),
+        "payroll.asset_allowlist_updated payload changed"
+    );
+    out.insert(
+        "payroll.asset_allowlist_updated".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("asset_allowlist_updated")],
+            data: vec![field("asset", "Address"), field("allowed", "bool")],
+        },
+    );
+}
+
 fn case_deposit(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let from = Address::generate(env);
     let amount: i128 = 5_000;
@@ -919,6 +947,7 @@ fn payroll_events_match_fixture() {
 
     case_initialized(&env, &cid, &mut observed);
     case_pause_manager_set(&env, &cid, &mut observed);
+    case_asset_allowlist_updated(&env, &cid, &mut observed);
     case_deposit(&env, &cid, &mut observed);
     case_metadata_committed(&env, &cid, &mut observed);
     case_metadata_bound(&env, &cid, &mut observed);

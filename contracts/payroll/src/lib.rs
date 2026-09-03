@@ -1422,6 +1422,7 @@ impl Payroll {
             .persistent()
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
 
+        payroll_events::emit_asset_allowlist_updated(&e, asset, allowed);
         let mut assets: Vec<Address> =
             if let Some(stored) = e.storage().persistent().get(&DataKey::SupportedAssets) {
                 stored
