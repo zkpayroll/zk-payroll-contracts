@@ -24,7 +24,7 @@ ark-ff       = "0.4"
 ark-serialize = "0.4"
 
 # Poseidon hash with circomlib-compatible parameters over BN254
-light-poseidon = "0.2"
+light-poseidon = "0.4"
 
 # Hex encoding for database storage and user-facing output
 hex = "0.4"
