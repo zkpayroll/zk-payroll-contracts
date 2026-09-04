@@ -13,7 +13,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 
 # SQLite — bundled so no system libsqlite3 is required
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Cryptographically secure random bytes (OsRng)
 rand = "0.8"
