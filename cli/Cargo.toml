@@ -54,4 +54,4 @@ base64 = "0.22"
 stellar-strkey = "0.0.8"
 
 # Terminal table rendering for the reconcile output
-comfy-table = "7"
+comfy-table = "8"
