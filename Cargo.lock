@@ -395,6 +395,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "audit_revocation_event_tests"
+version = "0.1.0"
+dependencies = [
+ "audit_module",
+ "payroll",
+ "proof_verifier",
+ "salary_commitment",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
+name = "audit_revocation_tests"
+version = "0.1.0"
+dependencies = [
+ "audit_module",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

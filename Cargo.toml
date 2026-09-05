@@ -4,6 +4,8 @@ members = [
     "contracts/*",
     "cli",
     "tests/migrations",
+    "tests/audit",
+    "tests/event-ordering",
     "tests/admin",
     "tests/company-state",
     "tests/metadata",

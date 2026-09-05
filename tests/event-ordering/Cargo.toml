@@ -1,19 +1,16 @@
 [package]
-name = "audit_revocation_event_tests"
+name = "event_ordering_tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-crate-type = ["lib"]
+crate-type = ["rlib"]
 doctest = false
-
-[dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
-audit_module = { path = "../../contracts/audit_module" }
 
 [dev-dependencies]
 payroll = { path = "../../contracts/payroll" }
 proof_verifier = { path = "../../contracts/proof_verifier" }
 salary_commitment = { path = "../../contracts/salary_commitment" }
 token = { path = "../../contracts/token" }
+soroban-sdk = { workspace = true, features = ["testutils"] }
