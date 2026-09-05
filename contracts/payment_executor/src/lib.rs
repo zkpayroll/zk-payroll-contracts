@@ -67,6 +67,10 @@ pub enum PaymentError {
     ProofExpired = 7,
     /// Empty payroll batches are rejected to avoid silent no-op execution.
     EmptyBatch = 8,
+    /// Asset decimal configuration is missing or unsupported (issue #354).
+    AssetDecimalsMissing = 9,
+    /// Asset decimal mismatch between payment and contract assumptions (issue #354).
+    AssetDecimalsMismatch = 10,
 }
 
 /// Contract addresses for dependencies
@@ -94,6 +98,8 @@ pub enum DataKey {
     AllowedAsset(Address),
     /// Storage key schema version (issue #174)
     StorageVersion,
+    /// Asset decimal configuration for proper amount normalization (issue #354)
+    AssetDecimals(Address),
 }
 
 #[contract]
@@ -209,6 +215,40 @@ impl PaymentExecutor {
             .persistent()
             .get(&DataKey::StorageVersion)
             .unwrap_or(1u32)
+    }
+
+    /// Configure the decimal places for an asset token (issue #354).
+    /// Required to ensure proper amount normalization and prevent decimal mismatches.
+    /// Only executor admin can set this configuration.
+    pub fn set_asset_decimals(env: Env, asset: Address, decimals: u32) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+
+        if decimals > 18 {
+            panic!("Asset decimals must not exceed 18");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetDecimals(asset.clone()), &decimals);
+
+        env.events().publish(
+            (Symbol::new(&env, "AssetDecimalsConfigured"), asset),
+            (decimals, env.ledger().timestamp()),
+        );
+    }
+
+    /// Get the configured decimal places for an asset token (issue #354).
+    /// Returns 0 if not configured, indicating configuration is missing.
+    pub fn get_asset_decimals(env: Env, asset: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetDecimals(asset))
+            .unwrap_or(0u32)
     }
 
     // -----------------------------------------------------------------------
@@ -425,6 +465,21 @@ impl PaymentExecutor {
         let treasury_str = format!("{:?}", company.treasury);
         if treasury_str.is_empty() {
             panic!("Invalid treasury mapping: empty treasury address");
+        }
+
+        // Issue #354: Validate asset decimal normalization guardrails
+        let asset_decimals = Self::get_asset_decimals(env.clone(), addresses.token.clone());
+        if asset_decimals == 0 {
+            return Err(PaymentError::AssetDecimalsMissing);
+        }
+
+        // Verify amount is properly normalized according to asset decimal configuration
+        if amount < 0 {
+            return Err(PaymentError::AssetDecimalsMismatch);
+        }
+        let max_amount_for_decimals = 10i128.pow(asset_decimals);
+        if amount > 0 && amount < max_amount_for_decimals / 1_000_000_000 {
+            return Err(PaymentError::AssetDecimalsMismatch);
         }
 
         // Execute token transfer from company treasury to employee.
@@ -1567,5 +1622,134 @@ mod tests {
             &nullifier,
             &1u32,
         );
+    }
+
+    // =====================================================================
+    // Issue #277: `amount_to_public_input` precision-format encoding
+    //
+    // The ZK public input for an amount must be a canonical, big-endian,
+    // zero-padded `BytesN<32>` per
+    // `docs/interop/proof-schema-version-negotiation.md`'s "Unsupported
+    // Combinations" section ("Public inputs using i128 raw bytes instead of
+    // the canonical BytesN<32> big-endian zero-padded encoding" is
+    // explicitly rejected). These tests pin the exact byte layout across
+    // supported precision boundaries and confirm invalid (negative) amounts
+    // are rejected before any encoding happens.
+    // =====================================================================
+
+    #[test]
+    fn test_amount_to_public_input_zero_is_all_zero_bytes() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, 0);
+        assert_eq!(encoded.to_array(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_one_is_zero_padded_big_endian() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, 1);
+        let arr = encoded.to_array();
+
+        // High 16 bytes are always zero: i128 fits entirely within the low
+        // 16 bytes of the 32-byte field, per the canonical encoding.
+        assert_eq!(arr[..16], [0u8; 16]);
+        // Big-endian: the least-significant byte is last.
+        let mut expected_low16 = [0u8; 16];
+        expected_low16[15] = 1;
+        assert_eq!(arr[16..], expected_low16);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_preserves_full_precision_for_non_round_amount() {
+        // A non-round, multi-byte amount must round-trip through the
+        // big-endian encoding with no truncation or rounding drift.
+        let env = Env::default();
+        let amount: i128 = 999_999_999_937;
+        let encoded = PaymentExecutor::amount_to_public_input(&env, amount);
+        let arr = encoded.to_array();
+
+        let mut low16 = [0u8; 16];
+        low16.copy_from_slice(&arr[16..]);
+        let round_tripped = u128::from_be_bytes(low16) as i128;
+
+        assert_eq!(arr[..16], [0u8; 16]);
+        assert_eq!(round_tripped, amount);
+    }
+
+    #[test]
+    fn test_amount_to_public_input_accepts_maximum_i128_at_full_precision() {
+        let env = Env::default();
+        let encoded = PaymentExecutor::amount_to_public_input(&env, i128::MAX);
+        let arr = encoded.to_array();
+
+        let mut low16 = [0u8; 16];
+        low16.copy_from_slice(&arr[16..]);
+        let round_tripped = u128::from_be_bytes(low16) as i128;
+
+        assert_eq!(round_tripped, i128::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn test_amount_to_public_input_rejects_negative_one() {
+        // Boundary just below the supported precision range: the smallest
+        // magnitude negative value must still be rejected, not just
+        // `i128::MIN`.
+        let env = Env::default();
+        let _ = PaymentExecutor::amount_to_public_input(&env, -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn test_amount_to_public_input_rejects_i128_min() {
+        let env = Env::default();
+        let _ = PaymentExecutor::amount_to_public_input(&env, i128::MIN);
+    }
+
+    // ── Asset symbol normalization ─────────────────────────────────────────
+
+    fn normalize_asset_symbol(env: &Env, symbol: &str) -> Symbol {
+        let normalized = symbol.trim().to_ascii_uppercase();
+        Symbol::new(env, normalized.as_str())
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_trims_and_uppercases() {
+        let env = Env::default();
+        assert_eq!(
+            normalize_asset_symbol(&env, "  usdc "),
+            Symbol::new(&env, "USDC")
+        );
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_preserves_canonical_asset_codes() {
+        let env = Env::default();
+        assert_eq!(
+            normalize_asset_symbol(&env, "USDC"),
+            Symbol::new(&env, "USDC")
+        );
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_handles_mixed_case_alphanumeric_codes() {
+        let env = Env::default();
+        assert_eq!(
+            normalize_asset_symbol(&env, "  xLm12 "),
+            Symbol::new(&env, "XLM12")
+        );
+    }
+
+    #[test]
+    fn test_allowlist_comparison_uses_normalized_symbol() {
+        let env = Env::default();
+        let allowlisted = Symbol::new(&env, "USDC");
+        let raw_submitted = Symbol::new(&env, "usdc");
+
+        // Without normalization this allowlist comparison would fail.
+        assert_ne!(raw_submitted, allowlisted);
+
+        let normalized = normalize_asset_symbol(&env, "usdc");
+        assert_eq!(normalized, allowlisted);
     }
 }

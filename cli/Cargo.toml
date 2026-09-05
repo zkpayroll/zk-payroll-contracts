@@ -13,7 +13,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 
 # SQLite — bundled so no system libsqlite3 is required
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Cryptographically secure random bytes (OsRng)
 rand = "0.8"
@@ -24,13 +24,13 @@ ark-ff       = "0.4"
 ark-serialize = "0.4"
 
 # Poseidon hash with circomlib-compatible parameters over BN254
-light-poseidon = "0.2"
+light-poseidon = "0.4"
 
 # Hex encoding for database storage and user-facing output
 hex = "0.4"
 
 # Cross-platform home directory (~/.zk-payroll)
-dirs = "5"
+dirs = "6"
 
 # Ergonomic error propagation for CLI binaries
 anyhow = "1"
@@ -54,4 +54,4 @@ base64 = "0.22"
 stellar-strkey = "0.0.8"
 
 # Terminal table rendering for the reconcile output
-comfy-table = "7"
+comfy-table = "8"

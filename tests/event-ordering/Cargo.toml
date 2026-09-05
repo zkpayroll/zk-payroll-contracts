@@ -1,0 +1,16 @@
+[package]
+name = "event_ordering_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dev-dependencies]
+payroll = { path = "../../contracts/payroll" }
+proof_verifier = { path = "../../contracts/proof_verifier" }
+salary_commitment = { path = "../../contracts/salary_commitment" }
+token = { path = "../../contracts/token" }
+soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -1,0 +1,176 @@
+name: Auto Merge Clean Pull Requests
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - edited
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: auto-merge-clean-prs-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    name: Merge pull requests without conflicts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Merge clean pull requests
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            function unique(values) {
+              return [...new Set(values.filter(Boolean))];
+            }
+
+            function mentionTargets(pr) {
+              const assignees = (pr.assignees || []).map((assignee) => assignee.login);
+              const targets = assignees.length ? assignees : [pr.user?.login];
+              return unique(targets).map((login) => `@${login}`).join(" ");
+            }
+
+            async function commentOnce(issue_number, marker, body) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100
+              });
+
+              if (comments.some((comment) => comment.body?.includes(marker))) {
+                return;
+              }
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
+
+            async function getPullWithMergeability(pull_number) {
+              let pull;
+
+              for (let attempt = 0; attempt < 6; attempt += 1) {
+                const response = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number
+                });
+
+                pull = response.data;
+
+                if (pull.mergeable !== null) {
+                  return pull;
+                }
+
+                await wait(3000);
+              }
+
+              return pull;
+            }
+
+            async function mergePullRequest(pr) {
+              const mergeMethods = ["squash", "merge", "rebase"];
+              let lastError;
+
+              for (const merge_method of mergeMethods) {
+                try {
+                  await github.rest.pulls.merge({
+                    owner,
+                    repo,
+                    pull_number: pr.number,
+                    merge_method,
+                    sha: pr.head.sha
+                  });
+
+                  core.info(`Merged PR #${pr.number} using ${merge_method}.`);
+                  return true;
+                } catch (error) {
+                  lastError = error;
+
+                  if (![403, 405, 409, 422].includes(error.status)) {
+                    throw error;
+                  }
+                }
+              }
+
+              const marker = `<!-- zkpayroll-auto-merge:merge-blocked:${pr.head.sha} -->`;
+              const mentions = mentionTargets(pr);
+              const reason = lastError?.message || "GitHub did not allow this pull request to merge.";
+
+              await commentOnce(
+                pr.number,
+                marker,
+                [
+                  marker,
+                  `${mentions} this PR has no merge conflicts, but GitHub did not allow the bot to merge it.`,
+                  "",
+                  `Reason: ${reason}`
+                ].join("\n")
+              );
+
+              return false;
+            }
+
+            async function handlePullRequest(candidate) {
+              const pr = await getPullWithMergeability(candidate.number);
+
+              if (!pr || pr.state !== "open" || pr.draft) {
+                return;
+              }
+
+              const mentions = mentionTargets(pr);
+
+              if (pr.mergeable === null) {
+                core.info(`Mergeability is still being calculated for PR #${pr.number}.`);
+                return;
+              }
+
+              if (pr.mergeable === false || pr.mergeable_state === "dirty") {
+                const marker = `<!-- zkpayroll-auto-merge:conflicts:${pr.head.sha} -->`;
+
+                await commentOnce(
+                  pr.number,
+                  marker,
+                  [
+                    marker,
+                    `${mentions} this PR currently has merge conflicts.`,
+                    "",
+                    "Please resolve the conflicts before it can be merged automatically."
+                  ].join("\n")
+                );
+                return;
+              }
+
+              await mergePullRequest(pr);
+            }
+
+            const pullRequests = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: "open",
+              sort: "updated",
+              direction: "asc",
+              per_page: 100
+            });
+
+            for (const pr of pullRequests) {
+              await handlePullRequest(pr);
+            }

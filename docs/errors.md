@@ -23,6 +23,8 @@ where the contract exposes `Result<_, Error>`.
 | `payroll_registry.*` | `"Company not found"` | Unknown `company_id` or stale dashboard cache. | Retryable after state refresh | Refresh registry state and validate the company ID before resubmitting. |
 | Rotation entrypoints | `"Unauthorized: caller is not the company admin"` or host `authorized` failure | Wrong signer or wrong `current_admin` argument. | Non-retryable until signer changes | Prompt the registered admin to sign or fetch current company metadata. |
 | Rotation entrypoints | Pending rotation already exists / no pending rotation | The UI attempted a duplicate, stale, or out-of-order rotation step. | Retryable after refresh | Refresh pending rotation state and render the correct next action. |
+| `payroll.accept_admin_rotation`, `accept_treasury_rotation`, `set_asset_allowed`, `set_company_state` | `"Configuration is locked: a payroll run is currently in progress..."` | A payroll run is prepared (`prepare_payroll_run`) but not yet resolved. | Retryable after the run resolves | Cancel the pending run(s) via `cancel_payroll_run`, or wait for resolution, then retry. See [Admin Configuration Locks](./admin-config-locks.md). |
+| `payroll.prepare_payroll_run`, `batch_process_payroll` | `"Company is paused/archived/setup is incomplete; payroll execution is not permitted"` | The company's `CompanyState` is not `Active`. | Retryable once state returns to `Active` | Ask the admin to call `set_company_state(Active)`, then retry. See [Admin Configuration Locks](./admin-config-locks.md). |
 
 ## Employee Onboarding and Lifecycle
 

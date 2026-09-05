@@ -15,3 +15,11 @@ Payroll execution requires appropriate authorization from both the company admin
 - **Company Admin Auth**: Explicitly checked via `company.admin.require_auth()`.
 - **Treasury Auth**: Implicitly enforced by the token contract when `token_client.transfer(&company.treasury, ...)` is called. Soroban's auth framework requires the `company.treasury` signature to be present in the transaction auth entries.
 - **Asset Allowlist**: Checked via `is_asset_allowed()`.
+
+## Reservation Lookup Errors
+Treasury reservation reads have two surfaces:
+
+- `get_reservation_expiry(asset)` returns `None` when the asset has no reservation policy.
+- `get_required_reservation_expiry(asset)` fails with `Treasury reservation not found` when callers require a reservation to exist before continuing.
+
+SDKs and treasury screens should use the required helper when a missing reservation is a user-actionable not-found state, and should map `TreasuryError::ReservationNotFound` to a non-retryable configuration message.
