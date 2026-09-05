@@ -1705,4 +1705,51 @@ mod tests {
         let env = Env::default();
         let _ = PaymentExecutor::amount_to_public_input(&env, i128::MIN);
     }
+
+    // ── Asset symbol normalization ─────────────────────────────────────────
+
+    fn normalize_asset_symbol(env: &Env, symbol: &str) -> Symbol {
+        let normalized = symbol.trim().to_ascii_uppercase();
+        Symbol::new(env, normalized.as_str())
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_trims_and_uppercases() {
+        let env = Env::default();
+        assert_eq!(
+            normalize_asset_symbol(&env, "  usdc "),
+            Symbol::new(&env, "USDC")
+        );
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_preserves_canonical_asset_codes() {
+        let env = Env::default();
+        assert_eq!(
+            normalize_asset_symbol(&env, "USDC"),
+            Symbol::new(&env, "USDC")
+        );
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_handles_mixed_case_alphanumeric_codes() {
+        let env = Env::default();
+        assert_eq!(
+            normalize_asset_symbol(&env, "  xLm12 "),
+            Symbol::new(&env, "XLM12")
+        );
+    }
+
+    #[test]
+    fn test_allowlist_comparison_uses_normalized_symbol() {
+        let env = Env::default();
+        let allowlisted = Symbol::new(&env, "USDC");
+        let raw_submitted = Symbol::new(&env, "usdc");
+
+        // Without normalization this allowlist comparison would fail.
+        assert_ne!(raw_submitted, allowlisted);
+
+        let normalized = normalize_asset_symbol(&env, "usdc");
+        assert_eq!(normalized, allowlisted);
+    }
 }

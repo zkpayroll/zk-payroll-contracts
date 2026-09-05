@@ -72,3 +72,60 @@ pub fn one_payment(env: &Env, employee: &Address) -> (Vec<BytesN<256>>, Vec<i128
         Vec::from_array(env, [employee.clone()]),
     )
 }
+
+/// Normalize an asset symbol for allowlist/reservation checks.
+/// The canonical form is trimmed, uppercase, alphanumeric-only, and at most 12 characters.
+pub fn normalize_asset_symbol(symbol: &str) -> Result<String, &'static str> {
+    let trimmed = symbol.trim();
+    if trimmed.is_empty() {
+        return Err("asset symbol cannot be empty");
+    }
+    if trimmed.len() > 12 {
+        return Err("asset symbol must be at most 12 characters");
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("asset symbol must contain only alphanumeric characters");
+    }
+    Ok(trimmed.to_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_asset_symbol;
+
+    #[test]
+    fn test_normalize_asset_symbol_uppercases() {
+        assert_eq!(normalize_asset_symbol("usdc"), Ok("USDC".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_trims_whitespace() {
+        assert_eq!(normalize_asset_symbol("  usdc  "), Ok("USDC".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_accepts_uppercase() {
+        assert_eq!(normalize_asset_symbol("USDC"), Ok("USDC".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_rejects_empty() {
+        assert_eq!(normalize_asset_symbol("   "), Err("asset symbol cannot be empty"));
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_rejects_too_long() {
+        assert_eq!(
+            normalize_asset_symbol("TOOLONGSYMBOL"),
+            Err("asset symbol must be at most 12 characters")
+        );
+    }
+
+    #[test]
+    fn test_normalize_asset_symbol_rejects_special_characters() {
+        assert_eq!(
+            normalize_asset_symbol("usdc-"),
+            Err("asset symbol must contain only alphanumeric characters")
+        );
+    }
+}

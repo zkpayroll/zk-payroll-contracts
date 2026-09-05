@@ -158,6 +158,10 @@ pub enum TreasuryError {
     InvalidAssetConfiguration = 406,
     /// The requested treasury reservation was not found.
     ReservationNotFound = 407,
+    /// The asset symbol cannot be normalized before allowlist or reservation checks.
+    InvalidAssetSymbol = 408,
+    /// The provided asset symbol does not match its normalized on-chain form.
+    AssetSymbolMismatch = 409,
 }
 
 /// Payroll State Machine and Lifecycle Errors (500-599)

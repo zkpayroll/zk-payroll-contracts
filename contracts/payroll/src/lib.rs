@@ -530,6 +530,12 @@ pub enum DataKey {
     PayrollState(u64),
     /// Allowed asset token map for payroll payouts.
     AllowedAsset(Address),
+    /// Enumerable list backing the supported-assets read helper (#427).
+    SupportedAssets,
+    /// Count of payroll runs currently prepared but not yet resolved
+    /// (cancelled). Used to lock unsafe admin configuration changes while a
+    /// run is in progress — see `require_no_active_payroll_run`.
+    PendingRunCount,
     /// Checkpointed payroll batch execution keyed by a privacy-safe tuple.
     BatchCheckpoint(Address, BytesN<32>, Address, BytesN<32>),
     /// Authorized reviewer registration for payroll run reviews.
@@ -763,6 +769,44 @@ impl Payroll {
         }
     }
 
+    fn pending_payroll_run_count(e: &Env) -> u32 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PendingRunCount)
+            .unwrap_or(0)
+    }
+
+    // Issue #253: configuration locks during active payroll execution.
+    //
+    // A run is "in progress" from the moment `prepare_payroll_run` reserves
+    // its nonce and stores a `PendingPayrollRun` until it is explicitly
+    // resolved via `cancel_payroll_run`. While any run is pending, changing
+    // the acting admin, the treasury owner, the payout asset allowlist, or
+    // the company lifecycle state could silently invalidate assumptions the
+    // run was prepared under (which treasury funds are debited, which asset
+    // pays out, who is authorised to act on it). This gate rejects those
+    // specific changes until every pending run has been cancelled, keeping a
+    // run's preconditions stable for its whole lifetime. It does not block
+    // proposing a rotation (inert until accepted), pausing the system, or
+    // resolving existing runs (`cancel_payroll_run`,
+    // `update_reconciliation_status`), so operators always retain an escape
+    // hatch.
+    fn require_no_active_payroll_run(e: &Env) {
+        if Self::pending_payroll_run_count(e) > 0 {
+            panic!(
+                "Configuration is locked: a payroll run is currently in progress. Cancel all pending runs before changing this setting"
+            );
+        }
+    }
+
+    /// Return `true` if one or more payroll runs are prepared but not yet
+    /// resolved. While `true`, admin configuration changes that could
+    /// undermine those runs (admin rotation, treasury rotation, asset
+    /// allowlist, company state) are rejected (issue #253).
+    pub fn has_active_payroll_run(e: Env) -> bool {
+        Self::pending_payroll_run_count(&e) > 0
+    }
+
     fn validate_run_id(run_id: u64) {
         if run_id == u64::MAX {
             panic!("Invalid payroll run ID");
@@ -787,6 +831,41 @@ impl Payroll {
         if symbol == &empty {
             panic!("Symbol cannot be empty");
         }
+    }
+
+    /// Normalize an asset symbol for consistent allowlist and reservation checks.
+    ///
+    /// Asset symbols are trimmed and uppercased so that small formatting
+    /// differences such as "usdc", "USDC", or " USDC " all resolve to the
+    /// same canonical symbol before a payroll asset allowlist or reservation
+    /// check is performed.
+    ///
+    /// # Panics
+    /// - If the symbol is empty after trimming.
+    /// - If the symbol is longer than 32 bytes after trimming.
+    /// - If the symbol contains non-ASCII bytes.
+    fn normalize_asset_symbol(e: &Env, symbol: &str) -> Symbol {
+        let trimmed = symbol.trim();
+        if trimmed.is_empty() {
+            panic!("Asset symbol cannot be empty");
+        }
+
+        let bytes = trimmed.as_bytes();
+        if bytes.len() > 32 {
+            panic!("Asset symbol too long");
+        }
+
+        let mut normalized = [0u8; 32];
+        for (i, &b) in bytes.iter().enumerate() {
+            if !b.is_ascii() {
+                panic!("Asset symbol must be ASCII");
+            }
+            normalized[i] = if b.is_ascii_lowercase() { b - 32 } else { b };
+        }
+
+        let normalized_str = core::str::from_utf8(&normalized[..bytes.len()])
+            .expect("normalized asset symbol is valid UTF-8");
+        Symbol::new(e, normalized_str)
     }
 
     /// Reject a payroll batch that lists the same employee wallet more than
@@ -1327,6 +1406,10 @@ impl Payroll {
     }
 
     /// Allow or disallow an asset token for payroll payouts.
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// changing the payout asset mid-run could redirect or invalidate a run
+    /// that was already validated against the previous allowlist.
     pub fn set_asset_allowed(e: Env, asset: Address, allowed: bool) {
         let addrs: ContractAddresses = e
             .storage()
@@ -1334,9 +1417,33 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
         addrs.admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
         e.storage()
             .persistent()
-            .set(&DataKey::AllowedAsset(asset), &allowed);
+            .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
+
+        payroll_events::emit_asset_allowlist_updated(&e, asset, allowed);
+        let mut assets: Vec<Address> =
+            if let Some(stored) = e.storage().persistent().get(&DataKey::SupportedAssets) {
+                stored
+            } else {
+                let mut existing = Vec::new(&e);
+                if Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+                    existing.push_back(addrs.token);
+                }
+                existing
+            };
+        let position = assets.first_index_of(asset.clone());
+        if allowed && position.is_none() {
+            assets.push_back(asset);
+        } else if !allowed {
+            if let Some(index) = position {
+                assets.remove(index);
+            }
+        }
+        e.storage()
+            .persistent()
+            .set(&DataKey::SupportedAssets, &assets);
     }
 
     /// Check if an asset token is allowlisted for payroll payouts.
@@ -1345,6 +1452,22 @@ impl Payroll {
             .persistent()
             .get(&DataKey::AllowedAsset(asset))
             .unwrap_or(false)
+    }
+
+    /// Return the payroll assets currently enabled for this employer contract.
+    pub fn get_supported_assets(e: Env) -> Vec<Address> {
+        if let Some(assets) = e.storage().persistent().get(&DataKey::SupportedAssets) {
+            return assets;
+        }
+
+        let addrs: Option<ContractAddresses> = e.storage().persistent().get(&DataKey::Addresses);
+        let mut assets = Vec::new(&e);
+        if let Some(addrs) = addrs {
+            if Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+                assets.push_back(addrs.token);
+            }
+        }
+        assets
     }
 
     pub fn deposit(e: Env, from: Address, amount: i128, deposit_id: BytesN<32>) {
@@ -2050,7 +2173,8 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
-        // #360 ? validate storage version for sensitive operation
+        Self::require_company_active(&e);
+        // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "prepare_payroll_run");
 
         let count = proofs.len();
@@ -2139,6 +2263,13 @@ impl Payroll {
             .set(&DataKey::PendingRun(run_id), &pending_run);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Submitted);
 
+        // Issue #253: track this run as "in progress" so unsafe admin
+        // configuration changes are locked out until it is resolved.
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &(Self::pending_payroll_run_count(&e) + 1),
+        );
+
         // Reserve locked funds for the prepared payroll run (#343)
         Self::add_locked_funds(&e, addrs.token.clone(), expected_total_spend);
 
@@ -2201,6 +2332,13 @@ impl Payroll {
         // Remove the pending run from storage
         e.storage().persistent().remove(&pending_key);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::ReconciliationRequired);
+
+        // Issue #253: this run is resolved — release the configuration lock
+        // once no other pending runs remain.
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &Self::pending_payroll_run_count(&e).saturating_sub(1),
+        );
 
         let run = PayrollRun {
             run_id,
@@ -2284,6 +2422,13 @@ impl Payroll {
         e.storage().persistent().remove(&pending_key);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
 
+        // Issue #253: this run is resolved — release the configuration lock
+        // once no other pending runs remain.
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &Self::pending_payroll_run_count(&e).saturating_sub(1),
+        );
+
         // Emit cancellation event with reason for audit trail
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_cancelled")),
@@ -2305,7 +2450,9 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
-        // #360 ? validate storage version for sensitive operation
+        Self::require_company_active(&e);
+
+        // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll");
 
         Self::validate_non_zero_digest(&e, &nonce, "nonce");
@@ -2849,6 +2996,10 @@ impl Payroll {
     ///
     /// Only the proposed new admin can accept. On acceptance the admin in
     /// `ContractAddresses` is updated and the proposal is cleared.
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// handing off administration mid-run could let a party the run was not
+    /// authorised under later act on it.
     pub fn accept_admin_rotation(e: Env, new_admin: Address) {
         Self::require_not_paused(&e);
         let proposal: PendingRotation = e
@@ -2861,6 +3012,7 @@ impl Payroll {
             panic!("Unauthorized: caller is not the proposed admin");
         }
         new_admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
 
         let mut addrs: ContractAddresses = e
             .storage()
@@ -2936,6 +3088,11 @@ impl Payroll {
     }
 
     /// Accept a treasury-owner rotation (step 2 of 2).
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// the treasury owner can request deposits and emergency withdrawals, so
+    /// handing that role to a new party mid-run could let someone who did
+    /// not authorise the run's preconditions move funds while it is pending.
     pub fn accept_treasury_rotation(e: Env, new_owner: Address) {
         Self::require_not_paused(&e);
         let proposal: PendingRotation = e
@@ -2948,6 +3105,7 @@ impl Payroll {
             panic!("Unauthorized: caller is not the proposed treasury owner");
         }
         new_owner.require_auth();
+        Self::require_no_active_payroll_run(&e);
 
         let old_owner: Address = e
             .storage()
@@ -3252,8 +3410,15 @@ impl Payroll {
     /// Set the company lifecycle state.
     ///
     /// Only the admin may call. After setting to anything other than `Active`,
-    /// all subsequent `batch_process_payroll` calls will be rejected with a
-    /// descriptive error until the state is restored to `Active`.
+    /// all subsequent `prepare_payroll_run` and `batch_process_payroll` calls
+    /// will be rejected with a descriptive error until the state is restored
+    /// to `Active`.
+    ///
+    /// Locked while any payroll run is prepared but not yet resolved (#253):
+    /// changing the company's lifecycle state mid-run is a policy-level
+    /// decision that should not be made while a run's outcome is still
+    /// pending. To stop payroll immediately in an emergency, use the pause
+    /// manager (always available) or cancel the specific pending run.
     pub fn set_company_state(e: Env, admin: Address, state: CompanyState) {
         let addrs: ContractAddresses = e
             .storage()
@@ -3264,6 +3429,7 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
         e.storage().persistent().set(&DataKey::CompanyState, &state);
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "state_changed")),
@@ -7588,5 +7754,52 @@ mod tests {
         assert_eq!(status.employee_count, 1);
         assert_eq!(status.total_amount, 25_000);
         assert!(status.is_cancelled);
+    }
+
+    #[test]
+    fn test_asset_symbol_normalization_mixed_case_and_whitespace() {
+        let env = Env::default();
+
+        assert_eq!(
+            Payroll::normalize_asset_symbol(&env, "usdc"),
+            Symbol::new(&env, "USDC")
+        );
+        assert_eq!(
+            Payroll::normalize_asset_symbol(&env, "  USDC  "),
+            Symbol::new(&env, "USDC")
+        );
+        assert_eq!(
+            Payroll::normalize_asset_symbol(&env, "usd_coin"),
+            Symbol::new(&env, "USD_COIN")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Asset symbol cannot be empty")]
+    fn test_asset_symbol_normalization_rejects_empty_symbol() {
+        let env = Env::default();
+
+        Payroll::normalize_asset_symbol(&env, "   ");
+    }
+
+    #[test]
+    #[should_panic(expected = "Asset symbol too long")]
+    fn test_asset_symbol_normalization_rejects_symbol_over_32_bytes() {
+        let env = Env::default();
+
+        Payroll::normalize_asset_symbol(&env, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890");
+    }
+
+    #[test]
+    fn test_asset_symbol_normalization_before_allowlist_and_reservation_checks() {
+        let env = Env::default();
+        let allowlist_symbol = Symbol::new(&env, "USDC");
+        let submitted_symbol = Payroll::normalize_asset_symbol(&env, "usdc");
+
+        assert_eq!(submitted_symbol, allowlist_symbol);
+        assert_eq!(
+            Payroll::normalize_asset_symbol(&env, "  USDC  "),
+            allowlist_symbol
+        );
     }
 }

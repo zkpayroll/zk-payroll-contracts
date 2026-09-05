@@ -115,6 +115,22 @@ impl SalaryCommitmentContract {
         payroll_events::emit_payroll_operator_set(&env, operator);
     }
 
+    /// Remove the delegated payroll operator. Only the HR admin may call.
+    /// Emits a privacy-safe event indicating the operator address that was
+    /// removed. This does not disclose any payroll-sensitive values.
+    pub fn remove_payroll_operator(env: Env) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        let key = DataKey::PayrollOperator;
+        let prev: Option<Address> = env.storage().persistent().get(&key);
+        if prev.is_none() {
+            panic!("No payroll operator set");
+        }
+        let prev_op = prev.unwrap();
+        env.storage().persistent().remove(&key);
+        payroll_events::emit_payroll_operator_removed(&env, prev_op);
+    }
+
     /// Lock an employee's commitment to prevent updates via `update_commitment`
     /// or `rotate_commitment`. Both the HR admin and the delegated payroll
     /// operator may call.
@@ -738,6 +754,42 @@ mod tests {
         client.update_commitment(&employee_b, &commitment_a);
     }
 
+    #[test]
+    fn test_remove_payroll_operator_emits_event() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let operator = Address::generate(&env);
+        // Set operator first
+        client.set_payroll_operator(&operator);
+
+        let before = env.events().all().len();
+        // Remove the operator
+        client.remove_payroll_operator();
+        let events = env.events().all();
+        assert_eq!(events.len(), before + 1);
+
+        // Find an event whose topics/data include our removal symbol and operator
+        let mut found_symbol = false;
+        let mut found_operator = false;
+        for ev in events.iter() {
+            for i in 0..ev.1.len() {
+                if let Ok(s) = ev.1.get(i).unwrap().try_into_val::<Symbol>(&env.clone()) {
+                    if s == Symbol::new(&env, "PayrollOperatorRemoved") {
+                        found_symbol = true;
+                    }
+                }
+                if let Ok(a) = ev.1.get(i).unwrap().try_into_val::<Address>(&env.clone()) {
+                    if a == operator {
+                        found_operator = true;
+                    }
+                }
+            }
+        }
+        assert!(found_symbol, "PayrollOperatorRemoved event not emitted");
+        assert!(found_operator, "Removed operator address not present in event data");
+    }
+
     /// A commitment value that was rotated out (archived) can never be
     /// reused, even by a brand-new employee — it must remain retired for
     /// the lifetime of the contract (issue #242).
@@ -1195,5 +1247,99 @@ mod tests {
             },
         }]);
         client.set_payroll_operator(&operator);
+    }
+
+    // ── Employee Reference ID Tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_set_and_get_employee_reference_id() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let reference_id = soroban_sdk::String::from_str(&env, "EMP-12345");
+
+        assert!(client.get_employee_reference_id(&employee).is_none());
+        assert!(client.get_employee_by_reference_id(&reference_id).is_none());
+
+        client.set_employee_reference_id(&employee, &reference_id);
+
+        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), reference_id);
+        assert_eq!(client.get_employee_by_reference_id(&reference_id).unwrap(), employee);
+    }
+
+    #[test]
+    fn test_update_employee_reference_id() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let old_ref_id = soroban_sdk::String::from_str(&env, "EMP-OLD");
+        let new_ref_id = soroban_sdk::String::from_str(&env, "EMP-NEW");
+
+        client.set_employee_reference_id(&employee, &old_ref_id);
+        assert_eq!(client.get_employee_by_reference_id(&old_ref_id).unwrap(), employee);
+
+        client.set_employee_reference_id(&employee, &new_ref_id);
+
+        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), new_ref_id);
+        assert_eq!(client.get_employee_by_reference_id(&new_ref_id).unwrap(), employee);
+        
+        // Old reverse mapping should be cleared
+        assert!(client.get_employee_by_reference_id(&old_ref_id).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Reference ID already assigned to another employee")]
+    fn test_set_duplicate_reference_id_panics() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee1 = Address::generate(&env);
+        let employee2 = Address::generate(&env);
+        let reference_id = soroban_sdk::String::from_str(&env, "EMP-COLLISION");
+
+        client.set_employee_reference_id(&employee1, &reference_id);
+        client.set_employee_reference_id(&employee2, &reference_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Reference ID must be 1-256 characters")]
+    fn test_set_empty_reference_id_panics() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let reference_id = soroban_sdk::String::from_str(&env, "");
+
+        client.set_employee_reference_id(&employee, &reference_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "authorized")]
+    fn test_unauthorized_set_reference_id_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        
+        let admin = Address::generate(&env);
+        client.init_commitment_admin(&admin);
+        
+        let unauthorized_user = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let reference_id = soroban_sdk::String::from_str(&env, "EMP-999");
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &unauthorized_user,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_employee_reference_id",
+                args: (employee.clone(), reference_id.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        
+        client.set_employee_reference_id(&employee, &reference_id);
     }
 }

@@ -6,12 +6,15 @@ members = [
     "tests/migrations",
     "tests/audit",
     "tests/event-ordering",
+    "tests/admin",
+    "tests/company-state",
     "tests/metadata",
     "tests/state",
     "tests/storage",
     "tests/access-control",
     "tests/events",
     "tests/event_schema",
+    "tests/init_matrix",
 ]
 exclude = ["fuzz", "contracts/tests"]
 
@@ -22,8 +25,8 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-soroban-sdk = "21.0.0"
-soroban-token-sdk = "21.0.0"
+soroban-sdk = "27.0.6"
+soroban-token-sdk = "27.0.6"
 
 [profile.release]
 opt-level = "z"

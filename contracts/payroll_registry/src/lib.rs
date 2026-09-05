@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 
 extern crate alloc;
 
@@ -305,12 +305,7 @@ impl PayrollRegistry {
             &EmployeeStatus::Active,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "EmployeeAdded"), company_id, employee),
-            (commitment,),
-        );
-        // topics : ("EmployeeAdded", company_id, employee)
-        // data   : (commitment,)
+        payroll_events::emit_employee_added(&env, company_id, employee, commitment);
     }
 
     fn require_valid_employee_wallet_format(employee_wallet: &String) {
