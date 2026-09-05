@@ -109,6 +109,29 @@ as repo standards evolve.
 - [ ] **Tests pass cleanly**: `cargo test -p <crate_name>` exits with zero
   failures before opening a PR.
 
+### Contract Testing Guide
+
+#### Running Tests
+
+Run these commands from the workspace root:
+
+- `cargo test -p payroll_registry` — run unit and integration tests for one crate.
+- `cargo test -p payment_executor --test security_tests` — run only the security regression suite.
+- `cargo test --workspace` — run all contract tests locally before opening a PR.
+
+#### Fixtures
+
+- Name fixture files by contract and scenario, e.g. `fixtures/payroll_registry_operator.json`.
+- Keep fixtures small and focused; one fixture per behavior.
+- Never commit private keys or real salary values. Use dummy addresses and synthetic amounts.
+- If a fixture contains sensitive data, add it to `.gitignore` and document how to regenerate it.
+
+#### Focused Regression Tests
+
+- When fixing a bug, add a regression test that fails on the old code and passes on the fix.
+- Name it after the issue or behavior, e.g. `test_double_init_panics` in the relevant module.
+- Assert the exact error or event, not just that the entry-point returned without panicking.
+
 ---
 
 ## 6. Documentation

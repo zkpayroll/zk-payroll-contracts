@@ -221,6 +221,12 @@ execution, and audit access — with sample payloads and input/output tables.
 See [docs/events.md](docs/events.md) for the full event schema reference and
 consumption expectations.
 
+## Local Setup & Test Troubleshooting
+
+See [contracts/README.md](contracts/README.md) for **environment variables**, local test setup expectations, and a quick manual verification checklist.
+
+See [contracts/tests/README.md](contracts/tests/README.md) for common local setup issues, test panics, missing WASM fixture errors, and ZK proof setup troubleshooting.
+
 ## Contract Error Handling
 
 See [docs/errors.md](docs/errors.md) for common contract failure modes,

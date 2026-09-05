@@ -1,0 +1,56 @@
+{
+  "payment_executor.ExecutorInitialized": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "ExecutorInitialized" }],
+    "data": [
+      { "name": "registry", "type": "Address" },
+      { "name": "token", "type": "Address" }
+    ]
+  },
+  "payment_executor.ExecutorAdminSet": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "ExecutorAdminSet" }],
+    "data": [{ "name": "admin", "type": "Address" }]
+  },
+  "payment_executor.ExecutorPauseMgrSet": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "ExecutorPauseMgrSet" }],
+    "data": [{ "name": "pause_manager", "type": "Address" }]
+  },
+  "payment_executor.PeriodCreated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PeriodCreated" },
+      { "type": "u64" }
+    ],
+    "data": [{ "name": "period_id", "type": "u32" }]
+  },
+  "payment_executor.PeriodClosed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PeriodClosed" },
+      { "type": "u64" }
+    ],
+    "data": [{ "name": "period_id", "type": "u32" }]
+  },
+  "payment_executor.PayrollProcessed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PayrollProcessed" },
+      { "type": "u64" }
+    ],
+    "data": [
+      { "name": "employee", "type": "Address" },
+      { "name": "amount", "type": "i128" },
+      { "name": "period", "type": "u32" }
+    ]
+  },
+  "payment_executor.AssetAllowedChanged": {
+    "schema_version": 1,
+    "topics": [{ "type": "Symbol", "value": "AssetAllowedChanged" }],
+    "data": [
+      { "name": "asset", "type": "Address" },
+      { "name": "allowed", "type": "bool" }
+    ]
+  }
+}

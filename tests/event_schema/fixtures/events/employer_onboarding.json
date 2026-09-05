@@ -1,0 +1,38 @@
+{
+  "onboarding.CompanyRegistered": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompanyRegistered" },
+      { "type": "u64" }
+    ],
+    "data": [
+      { "name": "admin", "type": "Address" },
+      { "name": "treasury", "type": "Address" }
+    ]
+  },
+  "onboarding.CommitmentUpdated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CommitmentUpdated" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "commitment", "type": "BytesN<32>" }]
+  },
+  "onboarding.EmployeeAdded": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "EmployeeAdded" },
+      { "type": "u64" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "commitment", "type": "BytesN<32>" }]
+  },
+  "onboarding.ReferenceIdSet": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "ReferenceIdSet" },
+      { "type": "Address" }
+    ],
+    "data": [{ "name": "reference_id", "type": "String" }]
+  }
+}

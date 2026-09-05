@@ -27,6 +27,8 @@ verifying keys) are load-bearing — please follow this guide carefully.
 | Guide | Description |
 |-------|-------------|
 | [Soroban Build Troubleshooting](docs/troubleshooting-soroban-build.md) | Common local build, optimize, and CLI failures with actionable fixes |
+| [Local Setup & Test Troubleshooting](contracts/tests/README.md) | Local environment setup issues, common test panics, and ZK test failures |
+| [Contracts workspace & env vars](contracts/README.md) | Environment variables, local test expectations, and manual QA checklist |
 | [Incident Response Playbook](docs/incident-response-playbook.md) | How to respond when audit workflows fail or disclosure is handled incorrectly |
 | [WASM Size Regression Thresholds](docs/testing/wasm-size-regression-thresholds.md) | Size alert thresholds, CI behavior, and contributor investigation steps |
 
@@ -80,6 +82,25 @@ cargo test
 # Build for Soroban (WASM)
 stellar contract build
 ```
+
+### Contract environment variables
+
+Local tooling and deployment scripts use shell environment variables for network
+names, signing identities, and deployed contract IDs. Soroban contracts never
+read these at runtime — they are for CLI and test harness use only.
+
+| Category | Variables | Details |
+|----------|-----------|---------|
+| Deployment | `NETWORK`, `SOURCE`, `TOKEN_ID`, `REGISTRY_ID`, `COMMITMENT_ID`, `VERIFIER_ID`, `PAUSE_ID`, `EXECUTOR_ID`, `PAYROLL_ID`, `AUDIT_ID`, `COMPANY_ID` | Set before `stellar contract invoke` / deploy commands |
+| Debugging | `RUST_BACKTRACE=1` | Full backtraces on test panics |
+| Optional | Node.js on `PATH` | Required only for dynamic ZK proof integration tests |
+
+Full tables, export examples, privacy rules, and a manual verification checklist
+are in **[contracts/README.md](contracts/README.md)**.
+
+**Privacy:** never export salary amounts, blinding factors, private keys, or
+proving-key material into environment variables or CI logs. Commitments on-chain
+are Poseidon hashes — salary values stay off-chain.
 
 ---
 
