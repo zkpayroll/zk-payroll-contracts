@@ -250,6 +250,45 @@ pub struct Dispute {
     pub resolution_reason: Option<Symbol>,
 }
 
+// ── Issue #338: per-period payroll capacity limits ─────────────────
+
+/// Employer-configured capacity limits enforced per payroll period.
+///
+/// Limits are opt-in: if no policy has been set via `set_capacity_limits`,
+/// `prepare_payroll_run` and `batch_process_payroll` behave exactly as
+/// before, with no capacity checks performed.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapacityLimits {
+    /// Maximum number of batches (prepared or executed) allowed per period.
+    pub max_batches: u32,
+    /// Maximum cumulative employee count allowed per period.
+    pub max_employees: u32,
+    /// Maximum cumulative committed value allowed per period.
+    pub max_total_value: i128,
+}
+
+/// Accumulated usage counters for a single payroll period, tracked against
+/// the employer's `CapacityLimits` policy.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeriodUsage {
+    pub batch_count: u32,
+    pub employee_count: u32,
+    pub total_value: i128,
+}
+
+/// Category of capacity limit exceeded by a batch, for precise error
+/// identification (issue #338).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CapacityLimitKind {
+    BatchCount = 0,
+    EmployeeCount = 1,
+    TotalValue = 2,
+}
+
 // ?? Issue #91: privileged-role rotation ??????????????????????????????????????
 
 /// Pending two-step role-rotation request.
@@ -583,6 +622,12 @@ pub enum DataKey {
     ActiveDisputeForRun(u64),
     /// Authorized dispute-resolution role registration (#342).
     DisputeAuthority(Address),
+    /// Employer-configured per-period capacity limits (#338).
+    CapacityLimits,
+    /// The payroll period currently open for capacity accounting (#338).
+    CurrentPeriod,
+    /// Accumulated batch/employee/value usage counters for a period (#338).
+    PeriodUsage(Symbol),
     /// Pending admin handover request requiring acceptance (#339).
     PendingAdminHandover,
     /// Locked payroll funds reserved per asset (#343).
@@ -1463,7 +1508,7 @@ impl Payroll {
             .persistent()
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
 
-        payroll_events::emit_asset_allowlist_updated(&e, asset, allowed);
+        payroll_events::emit_asset_allowlist_updated(&e, asset.clone(), allowed);
         let mut assets: Vec<Address> =
             if let Some(stored) = e.storage().persistent().get(&DataKey::SupportedAssets) {
                 stored
@@ -2281,6 +2326,9 @@ impl Payroll {
             panic!("Asset not allowed");
         }
 
+        // Issue #338: enforce per-period capacity limits before the batch is locked in.
+        Self::enforce_and_record_capacity(&e, count, expected_total_spend);
+
         let run_id = Self::derive_run_id(&e);
 
         // Mark nonce as consumed (store run_id for auditability).
@@ -2577,6 +2625,9 @@ impl Payroll {
         }
 
         addrs.admin.require_auth();
+
+        // Issue #338: enforce per-period capacity limits before the batch executes.
+        Self::enforce_and_record_capacity(&e, count, expected_total_spend);
 
         let run_id = Self::derive_run_id(&e);
 
@@ -3486,6 +3537,164 @@ impl Payroll {
             .persistent()
             .get(&DataKey::CompanyState)
             .unwrap_or(CompanyState::Active)
+    }
+
+    // ── Issue #338: per-period payroll capacity limits ───────────────────────
+
+    /// Set (or replace) the employer's per-period capacity policy. Only the
+    /// admin may call. Passing this once opts every subsequent period into
+    /// capacity enforcement; there is no policy prior to the first call.
+    pub fn set_capacity_limits(
+        e: Env,
+        admin: Address,
+        max_batches: u32,
+        max_employees: u32,
+        max_total_value: i128,
+    ) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if max_batches == 0 || max_employees == 0 || max_total_value <= 0 {
+            panic!("Capacity limits must be positive");
+        }
+
+        let limits = CapacityLimits {
+            max_batches,
+            max_employees,
+            max_total_value,
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::CapacityLimits, &limits);
+
+        payroll_events::emit_capacity_limits_set(&e, max_batches, max_employees, max_total_value);
+    }
+
+    /// Return the currently configured capacity policy, if any.
+    pub fn get_capacity_limits(e: Env) -> Option<CapacityLimits> {
+        e.storage().persistent().get(&DataKey::CapacityLimits)
+    }
+
+    /// Open a new payroll period for capacity accounting. Only the admin may
+    /// call. Usage counters are scoped per period label, so opening a period
+    /// that has never been used before starts with fresh (zeroed) counters;
+    /// re-opening a previously used period label resumes accumulating
+    /// against its existing counters.
+    pub fn open_capacity_period(e: Env, admin: Address, period: Symbol) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        Self::validate_symbol_not_empty(&e, &period, "period");
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::CurrentPeriod, &period);
+
+        payroll_events::emit_capacity_period_opened(&e, period);
+    }
+
+    /// Return the payroll period currently open for capacity accounting, if any.
+    pub fn get_current_period(e: Env) -> Option<Symbol> {
+        e.storage().persistent().get(&DataKey::CurrentPeriod)
+    }
+
+    /// Return the accumulated usage counters for a given period. Periods
+    /// with no recorded usage return zeroed counters.
+    pub fn get_period_usage(e: Env, period: Symbol) -> PeriodUsage {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PeriodUsage(period))
+            .unwrap_or(PeriodUsage {
+                batch_count: 0,
+                employee_count: 0,
+                total_value: 0,
+            })
+    }
+
+    /// Enforce the employer's capacity policy against the currently open
+    /// period and record the batch's usage, before the batch is locked in
+    /// (`prepare_payroll_run`) or executed (`batch_process_payroll`).
+    ///
+    /// A no-op when no policy has been configured or no period has been
+    /// opened, preserving backward compatibility for callers that don't use
+    /// this feature.
+    fn enforce_and_record_capacity(e: &Env, employee_count: u32, batch_value: i128) {
+        let limits: CapacityLimits = match e.storage().persistent().get(&DataKey::CapacityLimits) {
+            Some(limits) => limits,
+            None => return,
+        };
+        let period: Symbol = match e.storage().persistent().get(&DataKey::CurrentPeriod) {
+            Some(period) => period,
+            None => return,
+        };
+
+        let usage_key = DataKey::PeriodUsage(period.clone());
+        let usage: PeriodUsage = e
+            .storage()
+            .persistent()
+            .get(&usage_key)
+            .unwrap_or(PeriodUsage {
+                batch_count: 0,
+                employee_count: 0,
+                total_value: 0,
+            });
+
+        let new_batch_count = usage.batch_count + 1;
+        let new_employee_count = usage.employee_count + employee_count;
+        let new_total_value = usage.total_value + batch_value;
+
+        if new_batch_count > limits.max_batches {
+            payroll_events::emit_capacity_limit_exceeded(
+                e,
+                period,
+                CapacityLimitKind::BatchCount as u32,
+            );
+            panic!("Capacity limit exceeded: batch count");
+        }
+        if new_employee_count > limits.max_employees {
+            payroll_events::emit_capacity_limit_exceeded(
+                e,
+                period,
+                CapacityLimitKind::EmployeeCount as u32,
+            );
+            panic!("Capacity limit exceeded: employee count");
+        }
+        if new_total_value > limits.max_total_value {
+            payroll_events::emit_capacity_limit_exceeded(
+                e,
+                period,
+                CapacityLimitKind::TotalValue as u32,
+            );
+            panic!("Capacity limit exceeded: total value");
+        }
+
+        let new_usage = PeriodUsage {
+            batch_count: new_batch_count,
+            employee_count: new_employee_count,
+            total_value: new_total_value,
+        };
+        e.storage().persistent().set(&usage_key, &new_usage);
+
+        payroll_events::emit_capacity_usage_recorded(
+            e,
+            period,
+            new_usage.batch_count,
+            new_usage.employee_count,
+            new_usage.total_value,
+        );
     }
 
     // ?? Issue #146: archived payroll run queries ??????????????????????????????
