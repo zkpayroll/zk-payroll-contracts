@@ -945,6 +945,61 @@ pub fn emit_run_changes_requested(e: &Env, run_id: u64, reviewer: Address, reaso
     );
 }
 
+/// Emitted when a payroll run's archived on-chain record is permanently pruned (#342).
+pub fn emit_run_pruned(e: &Env, run_id: u64, admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_pruned")),
+        (run_id, admin),
+    );
+}
+
+/// Emitted when an address is granted dispute-authority permission (#342).
+pub fn emit_dispute_authority_added(e: &Env, authority: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "dispute_auth_added")),
+        authority,
+    );
+}
+
+/// Emitted when an address has dispute-authority permission revoked (#342).
+pub fn emit_dispute_authority_removed(e: &Env, authority: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "dispute_auth_removed")),
+        authority,
+    );
+}
+
+/// Emitted when a dispute is opened against a payroll run, freezing its
+/// finalization, archival, and pruning (#342).
+pub fn emit_dispute_opened(
+    e: &Env,
+    dispute_id: u64,
+    run_id: u64,
+    opened_by: Address,
+    period: Symbol,
+    batch_root: BytesN<32>,
+    reason: Symbol,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "dispute_opened")),
+        (dispute_id, run_id, opened_by, period, batch_root, reason),
+    );
+}
+
+/// Emitted when an active dispute is resolved, thawing the associated run (#342).
+pub fn emit_dispute_resolved(
+    e: &Env,
+    dispute_id: u64,
+    run_id: u64,
+    resolved_by: Address,
+    resolution_reason: Symbol,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "dispute_resolved")),
+        (dispute_id, run_id, resolved_by, resolution_reason),
+    );
+}
+
 // ?????????????????????????????????????????????????????????????????????????????
 // Payroll Registry Events
 // ?????????????????????????????????????????????????????????????????????????????
