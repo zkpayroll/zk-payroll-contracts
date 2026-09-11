@@ -16,7 +16,7 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Cryptographically secure random bytes (OsRng)
-rand = "0.8"
+rand = "0.10"
 
 # BN254 scalar field for field-element arithmetic
 ark-bn254    = "0.4"
