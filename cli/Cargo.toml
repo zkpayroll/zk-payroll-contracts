@@ -20,7 +20,7 @@ rand = "0.8"
 
 # BN254 scalar field for field-element arithmetic
 ark-bn254    = "0.4"
-ark-ff       = "0.4"
+ark-ff       = "0.5"
 ark-serialize = "0.4"
 
 # Poseidon hash with circomlib-compatible parameters over BN254
