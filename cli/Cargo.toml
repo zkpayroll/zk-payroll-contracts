@@ -38,7 +38,7 @@ anyhow = "1"
 # ── Reconcile command ──────────────────────────────────────────────────────────
 
 # Blocking HTTP client for Soroban JSON-RPC calls
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.13", features = ["blocking", "json"] }
 
 # JSON serialisation / deserialisation for RPC request-response types
 serde = { version = "1", features = ["derive"] }
