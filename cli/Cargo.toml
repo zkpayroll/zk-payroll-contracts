@@ -48,7 +48,7 @@ serde_json = "1"
 stellar-xdr = "21"
 
 # Base64 decoding of XDR blobs returned by the RPC
-base64 = "0.22"
+base64 = "0.23"
 
 # Stellar StrKey encoding (G... addresses) from raw ed25519 public-key bytes
 stellar-strkey = "0.0.16"
