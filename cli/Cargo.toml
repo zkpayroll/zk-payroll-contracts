@@ -19,7 +19,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 rand = "0.10"
 
 # BN254 scalar field for field-element arithmetic
-ark-bn254    = "0.5"
+ark-bn254    = "0.6"
 ark-ff       = "0.5"
 ark-serialize = "0.4"
 
