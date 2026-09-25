@@ -42,6 +42,32 @@ All of the following live in `contracts/proof_verifier/src/lib.rs`.
    - From `expires_at_ledger + 1` onward it is expired
      (`ProofError::ReferenceExpired`) and `verify_with_reference` returns
      `false`.
+   - This same inclusive-at-expiration boundary governs every expiry-gated
+     entry point in `contracts/audit_module/src/lib.rs`: `verify_access`,
+     `authorize_auditor` (the gate behind `verify_commitment_with_key`,
+     `verify_commitment_with_view_key`, `generate_aggregate_report`,
+     `export_audit_summary`, and `verify_payroll_metadata`), and the grace
+     period check in `prune_expired_view_key`. Boundary coverage for all of
+     these lives in `contracts/audit_module/src/tests.rs` (see the "Issue
+     #271: audit request expiration coverage" section) and in
+     `contracts/audit_module/tests/audit_scope_boundary_tests.rs::test_auditor_grant_expiration_blocks_access`.
+     `authorize_auditor` also calls `env.events().publish(...)` with an
+     `AuditAccessExpired` topic immediately before returning
+     `AuditError::KeyExpired` on the expiry path. **This event is not
+     currently observable off-chain**: Soroban rolls back all effects
+     (storage *and* events) of an invocation that returns a typed
+     `contracterror`, so an event published right before such a return never
+     reaches an observer — confirmed empirically in
+     `test_authorize_auditor_after_expiry_commitment_verification_fails_and_rolls_back_event`.
+     It never leaks the claimed salary amount or blinding factor from the
+     triggering request either way, since nothing about the request is
+     observable at all once it fails. `proof_verifier` avoids this trap
+     deliberately, by returning `Ok(false)` instead of an `Err` on expiry (see
+     point 3 below and the "Failure semantics" section) — `authorize_auditor`
+     does not follow that convention, so its expiry event is effectively dead
+     telemetry today. Fixing this would mean changing the error contract of
+     five public `audit_module` entry points, which is a separate, larger
+     change than expiry test coverage and is flagged here rather than made.
 
 3. **Revocation**
    - `revoke_proof_reference` flips `revoked` permanently. Revoked references

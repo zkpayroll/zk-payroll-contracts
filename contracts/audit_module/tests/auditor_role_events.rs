@@ -1,6 +1,15 @@
 use audit_module::{AuditModule, AuditModuleClient};
 use soroban_sdk::testutils::{Address as _, Events};
-use soroban_sdk::{Address, Env, Symbol, TryFromVal, TryIntoVal};
+use soroban_sdk::{Address, Env, IntoVal, Symbol};
+
+// soroban-sdk 27.x changed `Events::all()` to return a `ContractEvents`
+// struct instead of an indexable/iterable `Vec`. `.events()` still exposes
+// the raw XDR events as a plain slice (usable for count checks), and
+// `ContractEvents` keeps a backward-compatible `PartialEq` against a full
+// `Vec<(Address, Vec<Val>, Val)>`, which the content checks below use.
+fn event_count(env: &Env) -> u32 {
+    env.events().all().events().len() as u32
+}
 
 #[test]
 fn assignment_and_removal_events_have_stable_privacy_safe_payloads() {
@@ -13,36 +22,42 @@ fn assignment_and_removal_events_have_stable_privacy_safe_payloads() {
     let expiration = env.ledger().sequence() + 1_000;
 
     client.generate_view_key(&auditor, &expiration);
-    let assigned = env.events().all().last().unwrap();
-    assert_eq!(assigned.1.len(), 2);
     assert_eq!(
-        Symbol::try_from_val(&env, &assigned.1.get(0).unwrap()).unwrap(),
-        Symbol::new(&env, "ViewKeyGenerated")
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                contract.clone(),
+                soroban_sdk::vec![
+                    &env,
+                    Symbol::new(&env, "ViewKeyGenerated").into_val(&env),
+                    auditor.clone().into_val(&env),
+                ],
+                (expiration,).into_val(&env),
+            ),
+        ]
     );
-    assert_eq!(
-        Address::try_from_val(&env, &assigned.1.get(1).unwrap()).unwrap(),
-        auditor
-    );
-    let assignment_data: (u32,) = assigned.2.try_into_val(&env).unwrap();
-    assert_eq!(assignment_data, (expiration,));
 
+    // `env.events().all()` scopes to the *last* invocation only (soroban-sdk
+    // 27.x), so after this call only `AuditAccessRevoked` is present — the
+    // earlier `ViewKeyGenerated` event is not carried over.
     client.revoke_view_key(&admin, &auditor);
-    let removed = env.events().all().last().unwrap();
-    assert_eq!(removed.1.len(), 3);
     assert_eq!(
-        Symbol::try_from_val(&env, &removed.1.get(0).unwrap()).unwrap(),
-        Symbol::new(&env, "AuditAccessRevoked")
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                contract.clone(),
+                soroban_sdk::vec![
+                    &env,
+                    Symbol::new(&env, "AuditAccessRevoked").into_val(&env),
+                    admin.clone().into_val(&env),
+                    auditor.clone().into_val(&env),
+                ],
+                ().into_val(&env),
+            ),
+        ]
     );
-    assert_eq!(
-        Address::try_from_val(&env, &removed.1.get(1).unwrap()).unwrap(),
-        admin
-    );
-    assert_eq!(
-        Address::try_from_val(&env, &removed.1.get(2).unwrap()).unwrap(),
-        auditor
-    );
-    let removal_data: () = removed.2.try_into_val(&env).unwrap();
-    assert_eq!(removal_data, ());
 }
 
 #[test]
@@ -54,11 +69,14 @@ fn failed_removal_emits_no_role_event_and_keeps_assignment() {
     let auditor = Address::generate(&env);
 
     client.generate_view_key(&auditor, &(env.ledger().sequence() + 1_000));
-    let event_count = env.events().all().len();
 
+    // A failed (`Err`-returning) invocation is rolled back by Soroban's
+    // atomicity guarantee, so `env.events().all()` reports zero events for
+    // it regardless of what ran beforehand — confirming no removal-style
+    // event (or anything else) was emitted for this rejected call.
     assert!(client
         .try_revoke_view_key(&Address::generate(&env), &auditor)
         .is_err());
-    assert_eq!(env.events().all().len(), event_count);
+    assert_eq!(event_count(&env), 0);
     assert!(client.verify_access(&auditor));
 }
