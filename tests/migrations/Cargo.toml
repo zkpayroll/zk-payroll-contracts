@@ -18,4 +18,4 @@ token = { path = "../../contracts/token" }
 pause_manager = { path = "../../contracts/pause_manager" }
 payment_executor = { path = "../../contracts/payment_executor" }
 audit_module = { path = "../../contracts/audit_module" }
-stellar-strkey = "0.0.16"
+stellar-strkey = "0.0.18"
