@@ -132,6 +132,16 @@ pub enum PaymentError {
     EmptyBatch = 308,
     /// Provided array lengths do not match (employees, amounts, proofs, etc.).
     ArrayLengthMismatch = 309,
+    /// Execution was attempted before the period's settlement window has
+    /// opened for execution (issue #316).
+    SettlementWindowNotYetOpen = 310,
+    /// Execution was attempted after the period's settlement window has
+    /// closed for execution (grace period or fully closed) (issue #316).
+    SettlementWindowClosed = 311,
+    /// A settlement window configuration was rejected because its open,
+    /// execution, grace, and close timestamps are not monotonically ordered
+    /// (issue #316).
+    InvalidSettlementWindowConfig = 312,
 }
 
 /// Treasury and Asset Errors (400-499)

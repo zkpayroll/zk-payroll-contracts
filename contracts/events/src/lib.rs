@@ -625,10 +625,8 @@ pub fn emit_audit_access_revoked(e: &Env, admin: Address, auditor: Address) {
 
 /// Emitted when an expired audit grant is permanently removed.
 pub fn emit_audit_grant_pruned(e: &Env, admin: Address, auditor: Address) {
-    e.events().publish(
-        (Symbol::new(e, "AuditGrantPruned"), admin, auditor),
-        (),
-    );
+    e.events()
+        .publish((Symbol::new(e, "AuditGrantPruned"), admin, auditor), ());
 }
 
 /// Emitted when an audit commitment verification succeeds.
@@ -841,6 +839,48 @@ pub fn emit_capacity_limit_exceeded(e: &Env, period: Symbol, kind: u32) {
     );
 }
 
+// ── Issue #316: settlement window enforcement ───────────────────────────────
+
+/// Emitted when an admin sets (or replaces) the settlement window for a
+/// payroll period. Only timing metadata is exposed — no payroll amounts,
+/// commitments, or employee identities (#316).
+pub fn emit_settlement_window_set(
+    e: &Env,
+    period: Symbol,
+    open_at: u64,
+    execution_start: u64,
+    execution_end: u64,
+    close_at: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_window_set")),
+        (period, open_at, execution_start, execution_end, close_at),
+    );
+}
+
+/// Emitted when a batch operation is rejected because the period's
+/// settlement window is not currently open for execution. `status` mirrors
+/// `payroll::SettlementWindowStatus` (0 = pre-open, 2 = grace, 3 = closed);
+/// only the timing status is exposed, never payroll amounts (#316).
+pub fn emit_settlement_window_rejected(e: &Env, period: Symbol, status: u32, now: u64) {
+    e.events().publish(
+        (
+            payroll_topic(),
+            Symbol::new(e, "settlement_window_rejected"),
+        ),
+        (period, status, now),
+    );
+}
+
+/// Emitted when a pending payroll run is auto-expired after its period's
+/// settlement window has fully closed (#316).
+pub fn emit_settlement_window_expired(e: &Env, run_id: u64, period: Symbol, expired_at: u64) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_window_expired")),
+        (run_id, period, expired_at),
+    );
+}
+
 /// Emitted when a new admin is proposed (step 1 of 2).
 pub fn emit_admin_proposed(e: &Env, current_admin: Address, new_admin: Address) {
     e.events().publish(
@@ -978,7 +1018,11 @@ pub fn emit_retention_policy_set(
 ) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "retention_policy_set")),
-        (finalized_run_seconds, cancelled_batch_seconds, challenge_seconds),
+        (
+            finalized_run_seconds,
+            cancelled_batch_seconds,
+            challenge_seconds,
+        ),
     );
 }
 

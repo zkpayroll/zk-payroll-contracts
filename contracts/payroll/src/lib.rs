@@ -8,7 +8,7 @@ use soroban_sdk::{
 use pause_manager::PauseManagerClient;
 use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
-use shared_errors::TreasuryError;
+use shared_errors::{AuthError, PaymentError, TreasuryError};
 
 const MAX_BATCH: u32 = 50;
 
@@ -289,6 +289,60 @@ pub enum CapacityLimitKind {
     BatchCount = 0,
     EmployeeCount = 1,
     TotalValue = 2,
+}
+
+// ── Issue #316: settlement window enforcement ───────────────────────────────
+
+/// Employer-configured settlement window for a payroll period.
+///
+/// Timestamps are ledger (unix) time, consistent with `env.ledger().timestamp()`
+/// used throughout this contract. The four timestamps carve the period into
+/// three phases:
+///   - `[open_at, execution_start)`  — period is open (drafting/preparation
+///     may proceed) but batch execution is not yet allowed.
+///   - `[execution_start, execution_end]` — the execution window: batch
+///     execution (`prepare_payroll_run` / `batch_process_payroll`) succeeds.
+///   - `(execution_end, close_at]`   — grace period: execution is blocked,
+///     but pending runs may still be cancelled by the admin, and once
+///     `close_at` has passed, expired via `expire_pending_run`.
+///   - `> close_at`                  — fully closed.
+///
+/// Configuring a window is opt-in and scoped to the capacity-accounting
+/// period label (see `open_capacity_period`): a period with no window
+/// configured is unrestricted, preserving backward compatibility for callers
+/// that don't use this feature.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementWindow {
+    /// Timestamp at which this period opens (drafting/preparation allowed).
+    pub open_at: u64,
+    /// Timestamp at which batch execution becomes allowed.
+    pub execution_start: u64,
+    /// Timestamp after which execution is no longer allowed (grace begins).
+    pub execution_end: u64,
+    /// Timestamp after which the period is fully closed (grace ends).
+    pub close_at: u64,
+    /// Admin that configured this window.
+    pub configured_by: Address,
+    /// Timestamp at which this window was configured.
+    pub configured_at: u64,
+}
+
+/// Timing status of a settlement window relative to the current ledger time,
+/// exposed via events and read-only queries without leaking payroll data
+/// (issue #316).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SettlementWindowStatus {
+    /// Before `execution_start`: period is open but execution not yet allowed.
+    PreOpen = 0,
+    /// Within `[execution_start, execution_end]`: execution is allowed.
+    Executable = 1,
+    /// Within `(execution_end, close_at]`: grace period, execution blocked.
+    Grace = 2,
+    /// After `close_at`: fully closed.
+    Closed = 3,
 }
 
 // ?? Issue #91: privileged-role rotation ??????????????????????????????????????
@@ -673,6 +727,12 @@ pub enum DataKey {
     BatchSplitRecord(u64, u64),
     /// Aggregate batch split tracker per parent run (#352).
     BatchSplitTracker(u64),
+    /// Settlement window configuration for a capacity-accounting period (#316).
+    SettlementWindow(Symbol),
+    /// The capacity-accounting period a pending run was prepared under, if
+    /// any was open at the time — used to locate its settlement window for
+    /// later expiration (#316).
+    PendingRunPeriod(u64),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1560,9 +1620,11 @@ impl Payroll {
 
     /// Check if an asset token is allowlisted for payroll payouts.
     pub fn is_asset_allowed(e: Env, asset: Address) -> bool {
-        let canonical_asset: Option<Address> = e.storage().persistent().get(&DataKey::Addresses).map(
-            |addresses: ContractAddresses| addresses.token,
-        );
+        let canonical_asset: Option<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .map(|addresses: ContractAddresses| addresses.token);
         if canonical_asset.as_ref() != Some(&asset) {
             return false;
         }
@@ -2381,6 +2443,9 @@ impl Payroll {
         // Issue #338: enforce per-period capacity limits before the batch is locked in.
         Self::enforce_and_record_capacity(&e, count, expected_total_spend);
 
+        // Issue #316: enforce the settlement window for the open period, if any.
+        let open_period = Self::enforce_settlement_window_for_current_period(&e);
+
         let run_id = Self::derive_run_id(&e);
 
         // Mark nonce as consumed (store run_id for auditability).
@@ -2403,6 +2468,15 @@ impl Payroll {
             .persistent()
             .set(&DataKey::PendingRun(run_id), &pending_run);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::Submitted);
+
+        // Issue #316: remember which capacity period (if any) was open when
+        // this run was prepared, so `expire_pending_run` can later locate its
+        // settlement window.
+        if let Some(period) = open_period {
+            e.storage()
+                .persistent()
+                .set(&DataKey::PendingRunPeriod(run_id), &period);
+        }
 
         // Issue #253: track this run as "in progress" so unsafe admin
         // configuration changes are locked out until it is resolved.
@@ -2681,6 +2755,9 @@ impl Payroll {
         // Issue #338: enforce per-period capacity limits before the batch executes.
         Self::enforce_and_record_capacity(&e, count, expected_total_spend);
 
+        // Issue #316: enforce the settlement window for the open period, if any.
+        Self::enforce_settlement_window_for_current_period(&e);
+
         let run_id = Self::derive_run_id(&e);
 
         // #103 ? mark nonce as consumed (store run_id for auditability).
@@ -2823,9 +2900,7 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
-        e.storage()
-            .persistent()
-            .set(&period_key, &draft_id);
+        e.storage().persistent().set(&period_key, &draft_id);
 
         payroll_events::emit_draft_created(&e, draft_id, admin, period_label);
 
@@ -3768,6 +3843,225 @@ impl Payroll {
         );
     }
 
+    // ── Issue #316: settlement window enforcement ─────────────────────────────
+
+    /// Set (or replace) the settlement window for a payroll period. Only the
+    /// admin may call, and the timestamps must be monotonically ordered:
+    /// `open_at <= execution_start <= execution_end <= close_at`.
+    ///
+    /// Configuring a window is opt-in per period label (the same label used
+    /// by `open_capacity_period`): periods with no window configured remain
+    /// unrestricted, so existing callers are unaffected.
+    pub fn set_settlement_window(
+        e: Env,
+        admin: Address,
+        period: Symbol,
+        open_at: u64,
+        execution_start: u64,
+        execution_end: u64,
+        close_at: u64,
+    ) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!(
+                "Unauthorized: only the admin may configure a settlement window (error code {})",
+                AuthError::UnauthorizedAdmin as u32
+            );
+        }
+        admin.require_auth();
+
+        Self::validate_symbol_not_empty(&e, &period, "period");
+
+        if !(open_at <= execution_start
+            && execution_start <= execution_end
+            && execution_end <= close_at)
+        {
+            panic!(
+                "Invalid settlement window: timestamps must satisfy open_at <= execution_start <= execution_end <= close_at (error code {})",
+                PaymentError::InvalidSettlementWindowConfig as u32
+            );
+        }
+
+        let window = SettlementWindow {
+            open_at,
+            execution_start,
+            execution_end,
+            close_at,
+            configured_by: admin,
+            configured_at: e.ledger().timestamp(),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::SettlementWindow(period.clone()), &window);
+
+        payroll_events::emit_settlement_window_set(
+            &e,
+            period,
+            open_at,
+            execution_start,
+            execution_end,
+            close_at,
+        );
+    }
+
+    /// Return the settlement window configured for a period, if any.
+    pub fn get_settlement_window(e: Env, period: Symbol) -> Option<SettlementWindow> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period))
+    }
+
+    /// Classify a settlement window's timing status relative to `now`.
+    fn classify_settlement_window(window: &SettlementWindow, now: u64) -> SettlementWindowStatus {
+        if now < window.execution_start {
+            SettlementWindowStatus::PreOpen
+        } else if now <= window.execution_end {
+            SettlementWindowStatus::Executable
+        } else if now <= window.close_at {
+            SettlementWindowStatus::Grace
+        } else {
+            SettlementWindowStatus::Closed
+        }
+    }
+
+    /// Return the current timing status of a period's settlement window, if
+    /// one is configured. Exposes only timing state, never payroll data.
+    pub fn get_settlement_window_status(e: Env, period: Symbol) -> Option<SettlementWindowStatus> {
+        let window: SettlementWindow = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period))?;
+        Some(Self::classify_settlement_window(
+            &window,
+            e.ledger().timestamp(),
+        ))
+    }
+
+    /// Enforce the settlement window for the currently open capacity period,
+    /// if any, before a batch is prepared or executed. A no-op when no
+    /// period is open or no window has been configured for it, preserving
+    /// backward compatibility for callers that don't use this feature.
+    ///
+    /// Returns the open period label, if any, so callers can record it
+    /// against the run for later expiration lookups.
+    fn enforce_settlement_window_for_current_period(e: &Env) -> Option<Symbol> {
+        let period: Symbol = e.storage().persistent().get(&DataKey::CurrentPeriod)?;
+        let window: SettlementWindow = match e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period.clone()))
+        {
+            Some(window) => window,
+            None => return Some(period),
+        };
+
+        let now = e.ledger().timestamp();
+        let status = Self::classify_settlement_window(&window, now);
+        if status != SettlementWindowStatus::Executable {
+            payroll_events::emit_settlement_window_rejected(e, period, status as u32, now);
+            let error_code = if status == SettlementWindowStatus::PreOpen {
+                PaymentError::SettlementWindowNotYetOpen as u32
+            } else {
+                PaymentError::SettlementWindowClosed as u32
+            };
+            panic!(
+                "Settlement window is not open for execution right now (error code {})",
+                error_code
+            );
+        }
+
+        Some(period)
+    }
+
+    /// Expire a pending payroll run whose settlement window has fully closed
+    /// (issue #316).
+    ///
+    /// Unlike `cancel_payroll_run_with_reason` — an explicit admin decision
+    /// available at any time — this path only succeeds once the run's period
+    /// has a settlement window configured AND the current ledger time is at
+    /// or past that window's `close_at`. It exists to sweep pending runs that
+    /// were never finalized before their settlement window closed for good.
+    ///
+    /// Reuses the `Cancelled` terminal state (no new state-machine variant is
+    /// introduced) but is recorded with a distinct `settlement_window_expired`
+    /// reason for audit trails, and only released funds/state are touched —
+    /// no salary amounts or commitments are exposed.
+    pub fn expire_pending_run(e: Env, admin: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if e.storage().persistent().has(&DataKey::PayrollRun(run_id)) {
+            panic!("Cannot expire: run has already been executed");
+        }
+
+        let pending_key = DataKey::PendingRun(run_id);
+        let pending_run: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .expect("Pending run not found");
+
+        let period: Symbol = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRunPeriod(run_id))
+            .expect("No settlement window is associated with this pending run");
+        let window: SettlementWindow = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period.clone()))
+            .expect("No settlement window configured for this run's period");
+
+        let now = e.ledger().timestamp();
+        if now < window.close_at {
+            panic!(
+                "Settlement window has not reached its close timestamp yet (error code {})",
+                PaymentError::SettlementWindowClosed as u32
+            );
+        }
+
+        Self::subtract_locked_funds(&e, addrs.token.clone(), pending_run.total_amount);
+
+        let expire_status = CancelledBatchStatus {
+            run_id,
+            cancelled_at: now,
+            cancelled_by: admin,
+            reason: Symbol::new(&e, "settlement_window_expired"),
+            employee_count: pending_run.employee_count,
+            total_amount: pending_run.total_amount,
+            draft_hash: pending_run.draft_hash.clone(),
+            is_cancelled: true,
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::CancelledBatchRecord(run_id), &expire_status);
+
+        e.storage().persistent().remove(&pending_key);
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PendingRunPeriod(run_id));
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
+
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &Self::pending_payroll_run_count(&e).saturating_sub(1),
+        );
+
+        payroll_events::emit_settlement_window_expired(&e, run_id, period, now);
+    }
+
     // ?? Issue #146: archived payroll run queries ??????????????????????????????
 
     /// Mark a completed payroll run as archived for long-term reporting.
@@ -3794,7 +4088,10 @@ impl Payroll {
         }
 
         // Issue #374: block archival while an audit challenge is unresolved.
-        if e.storage().persistent().has(&DataKey::ChallengedRun(run_id)) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::ChallengedRun(run_id))
+        {
             panic!("Run has an unresolved audit challenge");
         }
 
@@ -3831,7 +4128,9 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
-        e.storage().persistent().set(&DataKey::ChallengedRun(run_id), &true);
+        e.storage()
+            .persistent()
+            .set(&DataKey::ChallengedRun(run_id), &true);
         e.storage().persistent().set(
             &DataKey::ChallengeTimestamp(run_id),
             &e.ledger().timestamp(),
@@ -3854,9 +4153,14 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
-        e.storage().persistent().remove(&DataKey::ChallengedRun(run_id));
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ChallengedRun(run_id));
         e.events().publish(
-            (symbol_short!("payroll"), Symbol::new(&e, "run_challenge_cleared")),
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "run_challenge_cleared"),
+            ),
             run_id,
         );
     }
@@ -3873,7 +4177,10 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
-        if e.storage().persistent().has(&DataKey::ChallengedRun(run_id)) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::ChallengedRun(run_id))
+        {
             panic!("Active audit challenge cannot be pruned");
         }
         let challenged_at: u64 = e
@@ -3882,22 +4189,13 @@ impl Payroll {
             .get(&DataKey::ChallengeTimestamp(run_id))
             .expect("Challenge record not found");
         let policy = Self::get_retention_policy(e.clone());
-        if e.ledger()
-            .timestamp()
-            .saturating_sub(challenged_at)
-            < policy.challenge_seconds
-        {
+        if e.ledger().timestamp().saturating_sub(challenged_at) < policy.challenge_seconds {
             panic!("Challenge retention window has not elapsed");
         }
         e.storage()
             .persistent()
             .remove(&DataKey::ChallengeTimestamp(run_id));
-        payroll_events::emit_retention_pruned(
-            &e,
-            Symbol::new(&e, "challenge"),
-            run_id,
-            admin,
-        );
+        payroll_events::emit_retention_pruned(&e, Symbol::new(&e, "challenge"), run_id, admin);
     }
 
     /// Return a payroll run only if it has been explicitly archived.
@@ -3982,14 +4280,12 @@ impl Payroll {
             panic!("Run must be archived before it can be pruned");
         }
 
-        let marker = Self::get_archive_marker(e.clone()).filter(|marker| marker.run_id == run_id);
+        let marker =
+            Self::get_archive_marker(e.clone(), run_id).filter(|marker| marker.run_id == run_id);
         let archived_at = marker.map(|value| value.archived_at).unwrap_or(0);
         let policy = Self::get_retention_policy(e.clone());
         if archived_at == 0
-            || e.ledger()
-                .timestamp()
-                .saturating_sub(archived_at)
-                < policy.finalized_run_seconds
+            || e.ledger().timestamp().saturating_sub(archived_at) < policy.finalized_run_seconds
         {
             panic!("Finalized run retention window has not elapsed");
         }
@@ -4006,11 +4302,9 @@ impl Payroll {
         e.storage()
             .persistent()
             .remove(&DataKey::PayrollState(run_id));
-        e.storage()
-            .persistent()
-            .remove(&DataKey::RunReview(run_id));
+        e.storage().persistent().remove(&DataKey::RunReview(run_id));
 
-        payroll_events::emit_run_pruned(&e, run_id, admin);
+        payroll_events::emit_run_pruned(&e, run_id, admin.clone());
         payroll_events::emit_retention_pruned(&e, Symbol::new(&e, "finalized_run"), run_id, admin);
     }
 
@@ -4034,9 +4328,7 @@ impl Payroll {
             .get(&DataKey::CancelledBatchRecord(run_id))
             .expect("Cancelled batch not found");
         let policy = Self::get_retention_policy(e.clone());
-        if e.ledger()
-            .timestamp()
-            .saturating_sub(record.cancelled_at)
+        if e.ledger().timestamp().saturating_sub(record.cancelled_at)
             < policy.cancelled_batch_seconds
         {
             panic!("Cancelled batch retention window has not elapsed");
@@ -4266,7 +4558,6 @@ impl Payroll {
             .persistent()
             .has(&DataKey::ActiveDisputeForRun(run_id))
     }
-
 
     // ?? Reviewer Authorization & Run Review Entrypoints ?????????????????????
 
@@ -4824,7 +5115,11 @@ impl Payroll {
     }
 
     /// Get batch split record by parent and child run IDs (#352).
-    pub fn get_batch_split(e: Env, parent_run_id: u64, child_run_id: u64) -> Option<BatchSplitRecord> {
+    pub fn get_batch_split(
+        e: Env,
+        parent_run_id: u64,
+        child_run_id: u64,
+    ) -> Option<BatchSplitRecord> {
         e.storage()
             .persistent()
             .get(&DataKey::BatchSplitRecord(parent_run_id, child_run_id))
@@ -4839,7 +5134,11 @@ impl Payroll {
         expected_employee_count: u32,
     ) -> bool {
         let parent_run_key = DataKey::PayrollRun(parent_run_id);
-        if let Some(parent_run) = e.storage().persistent().get::<DataKey, PayrollRun>(&parent_run_key) {
+        if let Some(parent_run) = e
+            .storage()
+            .persistent()
+            .get::<DataKey, PayrollRun>(&parent_run_key)
+        {
             parent_run.total_amount == expected_total_amount
                 && parent_run.employee_count == expected_employee_count
         } else {
@@ -8305,14 +8604,8 @@ mod tests {
         let nonce = test_nonce(&env, 1);
 
         // Prepare run
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &10_000,
-            &nonce,
-            &None,
-        );
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
         let expected_lock_time = env.ledger().timestamp();
         assert_eq!(
@@ -8350,14 +8643,8 @@ mod tests {
         // Lock funds via prepare_payroll_run
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 50_000);
         let nonce = test_nonce(&env, 2);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &50_000,
-            &nonce,
-            &None,
-        );
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &50_000, &nonce, &None);
 
         let summary_locked = payroll_client.get_safe_treasury_summary(&addrs.token);
         assert_eq!(summary_locked.total_balance, 1_000_000);
@@ -8366,11 +8653,7 @@ mod tests {
         assert_eq!(summary_locked.blocked_balance, 0);
 
         // Cancel run to release reservation
-        payroll_client.cancel_payroll_run(
-            &addrs.admin,
-            &run_id,
-            &Symbol::new(&env, "mistake"),
-        );
+        payroll_client.cancel_payroll_run(&addrs.admin, &run_id, &Symbol::new(&env, "mistake"));
 
         let summary_released = payroll_client.get_safe_treasury_summary(&addrs.token);
         assert_eq!(summary_released.total_balance, 1_000_000);
@@ -8393,20 +8676,16 @@ mod tests {
 
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
         let nonce = test_nonce(&env, 3);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &10_000,
-            &nonce,
-            &None,
-        );
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
         // Approve run
         payroll_client.approve_payroll_run(&reviewer, &run_id);
 
         // Fresh approval is not expired
-        assert!(!payroll_client.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
+        assert!(
+            !payroll_client.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS)
+        );
 
         // Advance ledger timestamp beyond 7 days
         env.ledger().with_mut(|li| {
@@ -8414,11 +8693,15 @@ mod tests {
         });
 
         // Now approval is expired
-        assert!(payroll_client.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
+        assert!(
+            payroll_client.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS)
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Payroll approval expired: approval record exceeds maximum allowed age")]
+    #[should_panic(
+        expected = "Payroll approval expired: approval record exceeds maximum allowed age"
+    )]
     fn test_finalize_panics_on_expired_approval() {
         let env = Env::default();
         let (payroll_client, admin, _treasury, _treasury_owner, employee) =
@@ -8429,14 +8712,8 @@ mod tests {
 
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
         let nonce = test_nonce(&env, 4);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &10_000,
-            &nonce,
-            &None,
-        );
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
         // Approve run
         payroll_client.approve_payroll_run(&reviewer, &run_id);
@@ -8465,14 +8742,8 @@ mod tests {
 
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 25_000);
         let nonce = test_nonce(&env, 5);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &25_000,
-            &nonce,
-            &None,
-        );
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &25_000, &nonce, &None);
 
         // Active pending run is not cancelled
         assert_eq!(payroll_client.get_cancelled_batch_status(&run_id), None);

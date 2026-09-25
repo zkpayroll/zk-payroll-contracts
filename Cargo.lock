@@ -2200,6 +2200,7 @@ dependencies = [
  "payroll_registry",
  "proof_verifier",
  "salary_commitment",
+ "shared_errors",
  "soroban-sdk",
  "soroban-token-sdk",
  "token",
@@ -2214,6 +2215,7 @@ dependencies = [
  "payroll_registry",
  "proof_verifier",
  "salary_commitment",
+ "shared_errors",
  "soroban-sdk",
  "token",
 ]
