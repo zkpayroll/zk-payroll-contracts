@@ -8,6 +8,7 @@ use soroban_sdk::{
 use pause_manager::PauseManagerClient;
 use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
+use shared_errors::TreasuryError;
 
 const MAX_BATCH: u32 = 50;
 
@@ -1505,6 +1506,9 @@ impl Payroll {
             .expect("Not initialized");
         addrs.admin.require_auth();
         Self::require_no_active_payroll_run(&e);
+        if asset != addrs.token {
+            panic!("Cross-asset treasury mismatch");
+        }
         e.storage()
             .persistent()
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
@@ -1535,10 +1539,36 @@ impl Payroll {
 
     /// Check if an asset token is allowlisted for payroll payouts.
     pub fn is_asset_allowed(e: Env, asset: Address) -> bool {
+        let canonical_asset: Option<Address> = e.storage().persistent().get(&DataKey::Addresses).map(
+            |addresses: ContractAddresses| addresses.token,
+        );
+        if canonical_asset.as_ref() != Some(&asset) {
+            return false;
+        }
         e.storage()
             .persistent()
             .get(&DataKey::AllowedAsset(asset))
             .unwrap_or(false)
+    }
+
+    /// Validate the canonical treasury asset used by all payroll transfers.
+    ///
+    /// Asset identity is the serialized Soroban token contract address. A
+    /// different address represents a different asset or issuer and must not
+    /// share this treasury's reserves.
+    pub fn validate_treasury_asset(e: Env, asset: Address) -> Result<(), TreasuryError> {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .ok_or(TreasuryError::InvalidAssetConfiguration)?;
+        if asset != addrs.token {
+            return Err(TreasuryError::CrossAssetMismatch);
+        }
+        if !Self::is_asset_allowed(e, asset) {
+            return Err(TreasuryError::AssetNotAllowed);
+        }
+        Ok(())
     }
 
     /// Return the payroll assets currently enabled for this employer contract.
@@ -3378,6 +3408,9 @@ impl Payroll {
 
     /// Get available unreserved treasury balance for an asset.
     pub fn get_available_treasury_balance(e: Env, asset: Address) -> i128 {
+        if Self::validate_treasury_asset(e.clone(), asset.clone()).is_err() {
+            return 0;
+        }
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -3389,6 +3422,8 @@ impl Payroll {
     }
 
     pub fn add_locked_funds(e: &Env, asset: Address, amount: i128) {
+        Self::validate_treasury_asset(e.clone(), asset.clone())
+            .expect("Cross-asset treasury mismatch");
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_add(amount).expect("Locked funds overflow");
@@ -3397,6 +3432,8 @@ impl Payroll {
     }
 
     pub fn subtract_locked_funds(e: &Env, asset: Address, amount: i128) {
+        Self::validate_treasury_asset(e.clone(), asset.clone())
+            .expect("Cross-asset treasury mismatch");
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_sub(amount).expect("Locked funds underflow");
@@ -4486,6 +4523,8 @@ impl Payroll {
     /// balance allocated to pending payroll runs, blocked balances, and the net
     /// available balance without disclosing individual salary rows.
     pub fn get_safe_treasury_summary(e: Env, asset: Address) -> SafeTreasurySummary {
+        Self::validate_treasury_asset(e.clone(), asset.clone())
+            .expect("Cross-asset treasury mismatch");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()

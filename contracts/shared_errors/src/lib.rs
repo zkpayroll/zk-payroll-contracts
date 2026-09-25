@@ -162,6 +162,10 @@ pub enum TreasuryError {
     InvalidAssetSymbol = 408,
     /// The provided asset symbol does not match its normalized on-chain form.
     AssetSymbolMismatch = 409,
+    /// The requested asset differs from the contract's canonical treasury asset.
+    CrossAssetMismatch = 410,
+    /// The requested asset contract does not represent the configured issuer.
+    AssetIssuerMismatch = 411,
 }
 
 /// Payroll State Machine and Lifecycle Errors (500-599)

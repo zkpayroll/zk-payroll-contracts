@@ -7,6 +7,7 @@ use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
+use shared_errors::TreasuryError;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
@@ -71,6 +72,10 @@ pub enum PaymentError {
     AssetDecimalsMissing = 9,
     /// Asset decimal mismatch between payment and contract assumptions (issue #354).
     AssetDecimalsMismatch = 10,
+    /// The supplied asset differs from the configured treasury asset.
+    CrossAssetMismatch = 11,
+    /// The supplied asset uses a different issuer/token contract.
+    AssetIssuerMismatch = 12,
 }
 
 /// Contract addresses for dependencies
@@ -191,6 +196,14 @@ impl PaymentExecutor {
             .get(&DataKey::ExecutorAdmin)
             .expect("Executor admin not set");
         admin.require_auth();
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if asset != addresses.token {
+            panic!("Cross-asset treasury mismatch");
+        }
         env.storage()
             .persistent()
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
@@ -203,10 +216,39 @@ impl PaymentExecutor {
 
     /// Check if an asset token is allowlisted for payments (issue #175).
     pub fn is_asset_allowed(env: Env, asset: Address) -> bool {
+        let canonical_asset: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .map(|addresses: ContractAddresses| addresses.token);
+        if canonical_asset.as_ref() != Some(&asset) {
+            return false;
+        }
         env.storage()
             .persistent()
             .get(&DataKey::AllowedAsset(asset))
             .unwrap_or(false)
+    }
+
+    /// Validate the canonical token contract used for every executor transfer.
+    /// A token contract address is the canonical serialized asset identity;
+    /// another address cannot consume this treasury's reserves.
+    pub fn validate_treasury_asset(
+        env: Env,
+        asset: Address,
+    ) -> Result<(), TreasuryError> {
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .ok_or(TreasuryError::InvalidAssetConfiguration)?;
+        if asset != addresses.token {
+            return Err(TreasuryError::CrossAssetMismatch);
+        }
+        if !Self::is_asset_allowed(env, asset) {
+            return Err(TreasuryError::AssetNotAllowed);
+        }
+        Ok(())
     }
 
     /// Read contract storage schema version (issue #174).

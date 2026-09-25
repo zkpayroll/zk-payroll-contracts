@@ -16,6 +16,7 @@ payroll_registry = { path = "../payroll_registry" }
 proof_verifier = { path = "../proof_verifier" }
 pause_manager = { path = "../pause_manager" }
 salary_commitment = { path = "../salary_commitment" }
+shared_errors = { path = "../shared_errors" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
