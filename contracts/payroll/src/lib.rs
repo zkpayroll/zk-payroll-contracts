@@ -394,6 +394,15 @@ pub struct ArchiveMarker {
     pub archive_reason: Symbol,
 }
 
+/// Administrator-controlled storage retention windows, in ledger seconds.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub finalized_run_seconds: u64,
+    pub cancelled_batch_seconds: u64,
+    pub challenge_seconds: u64,
+}
+
 // ?? Issue #402: Safe Treasury Balance Summary ??????????????????????????????????
 
 /// Safe treasury balance summary by asset (#402).
@@ -643,6 +652,10 @@ pub enum DataKey {
     ReservationExpiry(Address),
     /// Archive marker for finalized payroll runs (#335).
     ArchiveMarker(u64),
+    /// Administrator-controlled retention windows (#321).
+    RetentionPolicy,
+    /// Timestamp of the latest audit challenge marker (#321).
+    ChallengeTimestamp(u64),
     /// Latest accepted payroll nonce per employer for monotonicity enforcement (#362).
     EmployerNonceSequence(Address),
     /// Compliance evidence pointer record for off-chain encrypted evidence (#361).
@@ -802,6 +815,14 @@ impl Payroll {
             .persistent()
             .set(&DataKey::TreasuryOwner, &treasury_owner);
         e.storage().persistent().set(&DataKey::RunCounter, &0u64);
+        e.storage().persistent().set(
+            &DataKey::RetentionPolicy,
+            &RetentionPolicy {
+                finalized_run_seconds: 30 * 24 * 60 * 60,
+                cancelled_batch_seconds: 7 * 24 * 60 * 60,
+                challenge_seconds: 30 * 24 * 60 * 60,
+            },
+        );
 
         payroll_events::emit_payroll_initialized(
             &e,
@@ -3745,6 +3766,15 @@ impl Payroll {
             panic!("Run is already archived");
         }
         e.storage().persistent().set(&archive_key, &true);
+        e.storage().persistent().set(
+            &DataKey::ArchiveMarker(run_id),
+            &ArchiveMarker {
+                run_id,
+                archived_at: e.ledger().timestamp(),
+                archived_by: admin.clone(),
+                archive_reason: Symbol::new(&e, "retention_policy"),
+            },
+        );
 
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_archived")),
@@ -3765,6 +3795,10 @@ impl Payroll {
         }
         admin.require_auth();
         e.storage().persistent().set(&DataKey::ChallengedRun(run_id), &true);
+        e.storage().persistent().set(
+            &DataKey::ChallengeTimestamp(run_id),
+            &e.ledger().timestamp(),
+        );
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_challenged")),
             run_id,
@@ -3790,6 +3824,45 @@ impl Payroll {
         );
     }
 
+    /// Remove the timestamp of a resolved challenge after its retention window.
+    pub fn prune_resolved_challenge(e: Env, admin: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        if e.storage().persistent().has(&DataKey::ChallengedRun(run_id)) {
+            panic!("Active audit challenge cannot be pruned");
+        }
+        let challenged_at: u64 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ChallengeTimestamp(run_id))
+            .expect("Challenge record not found");
+        let policy = Self::get_retention_policy(e.clone());
+        if e.ledger()
+            .timestamp()
+            .saturating_sub(challenged_at)
+            < policy.challenge_seconds
+        {
+            panic!("Challenge retention window has not elapsed");
+        }
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ChallengeTimestamp(run_id));
+        payroll_events::emit_retention_pruned(
+            &e,
+            Symbol::new(&e, "challenge"),
+            run_id,
+            admin,
+        );
+    }
+
     /// Return a payroll run only if it has been explicitly archived.
     ///
     /// This is the dedicated archived-query path: it is fully read-only and
@@ -3810,6 +3883,42 @@ impl Payroll {
     pub fn is_run_archived(e: Env, run_id: u64) -> bool {
         Self::validate_run_id(run_id);
         e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+    }
+
+    /// Set the retention windows used by administrative pruning operations.
+    pub fn set_retention_policy(e: Env, admin: Address, policy: RetentionPolicy) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        if policy.finalized_run_seconds == 0
+            || policy.cancelled_batch_seconds == 0
+            || policy.challenge_seconds == 0
+        {
+            panic!("Retention windows must be non-zero");
+        }
+        e.storage()
+            .persistent()
+            .set(&DataKey::RetentionPolicy, &policy);
+        payroll_events::emit_retention_policy_set(
+            &e,
+            policy.finalized_run_seconds,
+            policy.cancelled_batch_seconds,
+            policy.challenge_seconds,
+        );
+    }
+
+    /// Return the current retention policy.
+    pub fn get_retention_policy(e: Env) -> RetentionPolicy {
+        e.storage()
+            .persistent()
+            .get(&DataKey::RetentionPolicy)
+            .expect("Retention policy not configured")
     }
 
     /// Permanently remove an archived payroll run's on-chain record once its
@@ -3836,14 +3945,77 @@ impl Payroll {
             panic!("Run must be archived before it can be pruned");
         }
 
+        let marker = Self::get_archive_marker(e.clone()).filter(|marker| marker.run_id == run_id);
+        let archived_at = marker.map(|value| value.archived_at).unwrap_or(0);
+        let policy = Self::get_retention_policy(e.clone());
+        if archived_at == 0
+            || e.ledger()
+                .timestamp()
+                .saturating_sub(archived_at)
+                < policy.finalized_run_seconds
+        {
+            panic!("Finalized run retention window has not elapsed");
+        }
+
         e.storage()
             .persistent()
             .remove(&DataKey::PayrollRun(run_id));
         e.storage()
             .persistent()
             .remove(&DataKey::ArchivedRun(run_id));
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ArchiveMarker(run_id));
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PayrollState(run_id));
+        e.storage()
+            .persistent()
+            .remove(&DataKey::RunReview(run_id));
 
         payroll_events::emit_run_pruned(&e, run_id, admin);
+        payroll_events::emit_retention_pruned(&e, Symbol::new(&e, "finalized_run"), run_id, admin);
+    }
+
+    /// Permanently remove cancellation metadata after its retention window.
+    pub fn prune_cancelled_batch(e: Env, admin: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
+        Self::require_run_not_disputed(&e, run_id);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let record: CancelledBatchStatus = e
+            .storage()
+            .persistent()
+            .get(&DataKey::CancelledBatchRecord(run_id))
+            .expect("Cancelled batch not found");
+        let policy = Self::get_retention_policy(e.clone());
+        if e.ledger()
+            .timestamp()
+            .saturating_sub(record.cancelled_at)
+            < policy.cancelled_batch_seconds
+        {
+            panic!("Cancelled batch retention window has not elapsed");
+        }
+        e.storage()
+            .persistent()
+            .remove(&DataKey::CancelledBatchRecord(run_id));
+        e.storage()
+            .persistent()
+            .remove(&DataKey::PayrollState(run_id));
+        payroll_events::emit_retention_pruned(
+            &e,
+            Symbol::new(&e, "cancelled_batch"),
+            run_id,
+            admin,
+        );
     }
 
     // ── Issue #342: dispute freeze/thaw controls ─────────────────────────────
@@ -4405,7 +4577,16 @@ impl Payroll {
         run_id: u64,
         archive_reason: Symbol,
     ) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
         admin.require_auth();
+        Self::require_run_not_disputed(&e, run_id);
 
         let run_key = DataKey::PayrollRun(run_id);
         let _run: PayrollRun = e
@@ -4433,6 +4614,9 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::ArchiveMarker(run_id), &marker);
+        e.storage()
+            .persistent()
+            .set(&DataKey::ArchivedRun(run_id), &true);
 
         payroll_events::emit_payroll_run_archived(&e, run_id, admin, archive_reason);
     }

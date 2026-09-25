@@ -623,6 +623,14 @@ pub fn emit_audit_access_revoked(e: &Env, admin: Address, auditor: Address) {
         .publish((Symbol::new(e, "AuditAccessRevoked"), admin, auditor), ());
 }
 
+/// Emitted when an expired audit grant is permanently removed.
+pub fn emit_audit_grant_pruned(e: &Env, admin: Address, auditor: Address) {
+    e.events().publish(
+        (Symbol::new(e, "AuditGrantPruned"), admin, auditor),
+        (),
+    );
+}
+
 /// Emitted when an audit commitment verification succeeds.
 pub fn emit_audit_successful(e: &Env, auditor: Address, scope: Symbol) {
     e.events()
@@ -950,6 +958,27 @@ pub fn emit_run_pruned(e: &Env, run_id: u64, admin: Address) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "run_pruned")),
         (run_id, admin),
+    );
+}
+
+/// Emitted when an eligible retained record is permanently removed.
+pub fn emit_retention_pruned(e: &Env, record_type: Symbol, record_id: u64, admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "retention_pruned")),
+        (record_type, record_id, admin),
+    );
+}
+
+/// Emitted when the administrator changes the retention policy.
+pub fn emit_retention_policy_set(
+    e: &Env,
+    finalized_run_seconds: u64,
+    cancelled_batch_seconds: u64,
+    challenge_seconds: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "retention_policy_set")),
+        (finalized_run_seconds, cancelled_batch_seconds, challenge_seconds),
     );
 }
 

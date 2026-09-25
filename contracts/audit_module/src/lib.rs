@@ -275,6 +275,39 @@ impl AuditModule {
         Ok(())
     }
 
+    /// Remove an expired grant after an administrator-defined ledger grace
+    /// period. The grantor remains the authority for its own grant.
+    pub fn prune_expired_view_key(
+        env: Env,
+        admin: Address,
+        auditor: Address,
+        retention_ledgers: u32,
+    ) -> Result<(), AuditError> {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+        let record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor.clone()))
+            .ok_or(AuditError::KeyNotFound)?;
+        if record.granted_by != admin {
+            return Err(AuditError::NotKeyGranter);
+        }
+        if env.ledger().sequence() <= record.expiration_ledger
+            || env.ledger().sequence()
+                < record.expiration_ledger.saturating_add(retention_ledgers)
+        {
+            return Err(AuditError::KeyExpired);
+        }
+
+        Self::revoke_descendants(&env, &auditor);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AuditorKey(auditor.clone()));
+        payroll_events::emit_audit_grant_pruned(&env, admin, auditor);
+        Ok(())
+    }
+
     pub fn get_view_key(env: Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
         env.storage()
             .persistent()
