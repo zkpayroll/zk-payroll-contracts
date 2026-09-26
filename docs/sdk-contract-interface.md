@@ -289,6 +289,25 @@ Drafts let you correct totals before committing on-chain.
 | `run_id` | `u64` | Completed run ID |
 | `status` | `ReconciliationStatus` | `Reconciled`, `Unreconciled`, or `Failed` |
 
+#### Stale prepared runs: expiration (#474)
+
+A run prepared via `prepare_payroll_run` (or a two-step flow that leaves a run
+pending) reserves treasury funds until it is resolved. When the admin has
+enabled a pending-run expiry policy, a run that is not finalized within the
+configured window can no longer be finalized and anyone may retire it:
+
+| Entrypoint | Who | Purpose |
+|------------|-----|---------|
+| `set_run_expiration_policy(admin, max_age_seconds)` | Admin | Enable/update the window (`0` disables, only while no runs are pending). |
+| `get_run_expiration_policy()` | Anyone | Returns the active policy, if any. |
+| `is_payroll_run_expired(run_id)` | Anyone | Check whether a pending run is past its window before offering Finalize. |
+| `expire_payroll_run(caller, run_id)` | Anyone | Retire an aged run: releases reserved funds, stores a redacted record, emits `run_expired`. |
+| `get_expired_run_record(run_id)` | Anyone | Redacted audit record for an expired run (no amounts or employees). |
+
+Finalizing an expired run fails with
+`"Run has expired: it was not finalized within the configured window; call expire_payroll_run"`.
+See [Payroll Run Expiration](./run-expiration.md).
+
 ### Path B — Single payment via PaymentExecutor
 
 #### Step 1 — Create a payroll period

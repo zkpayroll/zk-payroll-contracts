@@ -204,6 +204,17 @@
       { "name": "admin", "type": "Address" }
     ]
   },
+  "payroll.run_expired": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_expired" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "expired_by", "type": "Address" }
+    ]
+  },
   "payroll.period_frozen": {
     "schema_version": 1,
     "topics": [

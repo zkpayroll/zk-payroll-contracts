@@ -93,9 +93,18 @@
       "retryable": false,
       "user_visible": true,
       "description": "Payments executed, but reconciliation still needs review or finalization."
+    },
+    {
+      "name": "expired",
+      "contract_variant": "Expired",
+      "ordinal": 10,
+      "terminal": true,
+      "retryable": false,
+      "user_visible": true,
+      "description": "The prepared run was never finalized within its expiry window (#474); its funds reservation was released and nothing was executed."
     }
   ],
-  "terminal_states": ["completed", "cancelled"],
+  "terminal_states": ["completed", "cancelled", "expired"],
   "retryable_states": ["failed"],
   "transitions": [
     {
@@ -197,6 +206,13 @@
       "reason": "Cancel a prepared run before execution."
     },
     {
+      "from": "submitted",
+      "to": "expired",
+      "initiator": "any_observer_or_automation",
+      "user_visible": true,
+      "reason": "Retire a prepared run that aged past the configured expiry window before finalization (#474)."
+    },
+    {
       "from": "confirming",
       "to": "completed",
       "initiator": "contract_or_reconciliation_operator",
@@ -273,11 +289,22 @@
       "from": "cancelled",
       "to": "submitted",
       "reason": "Cancelled is terminal and immutable."
+    },
+    {
+      "from": "expired",
+      "to": "confirming",
+      "reason": "Expired is terminal — a run that aged past its window cannot be finalized."
+    },
+    {
+      "from": "completed",
+      "to": "expired",
+      "reason": "Expiration only applies to prepared-but-unresolved runs."
     }
   ],
   "contract_entrypoints": {
     "prepare_payroll_run": "submitted",
     "cancel_payroll_run": "cancelled",
+    "expire_payroll_run": "expired",
     "batch_process_payroll": "reconciliation_required",
     "update_reconciliation_status_reconciled": "completed",
     "update_reconciliation_status_unreconciled": "reconciliation_required",
