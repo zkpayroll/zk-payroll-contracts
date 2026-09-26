@@ -424,7 +424,7 @@ pub struct PayrollRunMetadataVersion {
 pub struct PayrollCurrencyConfig {
     pub asset: Address,
     pub currency_code: Symbol,
-    pub decimals: u8,
+    pub decimals: u32,
     pub configured_at: u64,
     pub configured_by: Address,
 }
@@ -5783,7 +5783,7 @@ impl Payroll {
         admin: Address,
         asset: Address,
         currency_code: Symbol,
-        decimals: u8,
+        decimals: u32,
     ) {
         let addrs: ContractAddresses = env
             .storage()
@@ -5810,7 +5810,7 @@ impl Payroll {
             &config,
         );
 
-        env.events().publish((symbol_short!("currencies"), ), config);
+        env.events().publish((symbol_short!("currency"),), config);
     }
 
     /// Get the configured payroll currency for this contract.
@@ -5826,12 +5826,12 @@ impl Payroll {
     ///
     /// # Panics
     /// If the asset does not match the configured payroll currency.
-    fn validate_payroll_currency(env: &Env, asset: &Address) -> Result<(), PaymentError> {
+    fn validate_payroll_currency(env: &Env, asset: &Address) -> Result<(), TreasuryError> {
         if let Some(config) = env.storage().persistent().get::<_, PayrollCurrencyConfig>(
             &DataKey::PayrollCurrencyConfig
         ) {
             if config.asset != *asset {
-                return Err(PaymentError::InvalidAsset);
+                return Err(TreasuryError::CrossAssetMismatch);
             }
         }
         Ok(())
