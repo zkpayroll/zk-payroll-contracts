@@ -115,6 +115,7 @@ pub struct AdminConfigVersion {
 /// - `PendingTreasuryRotation(u64)` ? `PendingCompanyRotation` (Persistent, issue #91)
 /// - `ApprovalThreshold(u64)`     ? `ApprovalThreshold`        (Persistent, issue #353)
 /// - `PendingThresholdRotation(u64)` ? `PendingThresholdRotation` (Persistent, issue #353)
+/// - `AdminConfigVersion(u64)`    ? `AdminConfigVersion`       (Persistent, versioned config)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
@@ -257,10 +258,18 @@ pub trait PayrollRegistryTrait {
     fn get_approval_threshold(env: Env, company_id: u64) -> Option<ApprovalThreshold>;
 
     /// Get any pending approval threshold rotation for a company (#353).
-    fn get_pending_threshold_rotation(env: Env, company_id: u64) -> Option<PendingThresholdRotation>;
+    fn get_pending_threshold_rotation(
+        env: Env,
+        company_id: u64,
+    ) -> Option<PendingThresholdRotation>;
 
     /// Set the initial approval threshold when a company is registered (#353).
-    fn set_initial_approval_threshold(env: Env, company_id: u64, admin: Address, required_approvals: u32);
+    fn set_initial_approval_threshold(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        required_approvals: u32,
+    );
 
     // ── Issue #486: Employee Payout Destination Update Flow ────────────────
 
@@ -450,6 +459,35 @@ impl PayrollRegistry {
             }
         }
         crc
+    }
+
+    // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
+
+    /// Increment the admin configuration version for a company.
+    ///
+    /// This helper function increments the version counter when admin or treasury
+    /// configuration changes, allowing off-chain clients to reliably detect changes.
+    fn increment_admin_config_version(env: &Env, company_id: u64, updated_by: Address) {
+        let mut current_version: AdminConfigVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
+            .expect("Admin config version not found - company may not exist");
+
+        current_version.version += 1;
+        current_version.updated_at = env.ledger().timestamp();
+        current_version.updated_by = updated_by.clone();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminConfigVersion(company_id), &current_version);
+
+        payroll_events::emit_admin_config_version_updated(
+            env,
+            company_id,
+            current_version.version,
+            updated_by,
+        );
     }
 }
 
@@ -858,6 +896,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::PendingTreasuryRotation(company_id));
 
+        // Increment admin configuration version
+        Self::increment_admin_config_version(&env, company_id, new_treasury.clone());
+
         env.events().publish(
             (Symbol::new(&env, "TreasuryRotated"), company_id),
             (old_treasury, new_treasury.clone()),
@@ -969,10 +1010,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
             effective_after,
         };
 
-        env.storage().persistent().set(
-            &DataKey::PendingThresholdRotation(company_id),
-            &pending,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingThresholdRotation(company_id), &pending);
 
         env.events().publish(
             (Symbol::new(&env, "ThresholdRotationProposed"), company_id),
@@ -997,7 +1037,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
         let pending = env
             .storage()
             .persistent()
-            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(company_id))
+            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(
+                company_id,
+            ))
             .expect("No pending threshold rotation");
 
         if env.ledger().timestamp() < pending.effective_after {
@@ -1043,7 +1085,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
         let pending = env
             .storage()
             .persistent()
-            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(company_id))
+            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(
+                company_id,
+            ))
             .expect("No pending threshold rotation");
 
         env.storage()
@@ -1062,7 +1106,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .get(&DataKey::ApprovalThreshold(company_id))
     }
 
-    fn get_pending_threshold_rotation(env: Env, company_id: u64) -> Option<PendingThresholdRotation> {
+    fn get_pending_threshold_rotation(
+        env: Env,
+        company_id: u64,
+    ) -> Option<PendingThresholdRotation> {
         env.storage()
             .persistent()
             .get(&DataKey::PendingThresholdRotation(company_id))
@@ -1134,7 +1181,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
             panic!("Destination address is already on file");
         }
 
-        let zero_wallet = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
+        let zero_wallet = String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
         if new_destination == Address::from_string(&zero_wallet) {
             panic!("Cannot set zero address as payout destination");
         }
@@ -1145,7 +1195,11 @@ impl PayrollRegistryTrait for PayrollRegistry {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "PayoutDestinationUpdated"), company_id, employee),
+            (
+                Symbol::new(&env, "PayoutDestinationUpdated"),
+                company_id,
+                employee,
+            ),
             (current_dest, new_destination),
         );
     }
@@ -1173,6 +1227,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .get(&DataKey::PayoutDestination(company_id, employee.clone()))
             .unwrap_or(employee)
+    }
+
+    // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
+
+    fn get_admin_config_version(env: Env, company_id: u64) -> Option<AdminConfigVersion> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
     }
 }
 

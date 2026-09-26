@@ -254,12 +254,7 @@ pub fn emit_batch_checkpoint_cleaned(
 ) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "batch_checkpoint_cleaned")),
-        (
-            employer,
-            batch_root,
-            asset,
-            execution_nonce,
-        ),
+        (employer, batch_root, asset, execution_nonce),
     );
 }
 
@@ -705,6 +700,26 @@ pub fn emit_quorum_consumed(e: &Env, batch_root: BytesN<32>, employer: Address, 
     e.events().publish(
         (Symbol::new(e, "signing"), Symbol::new(e, "quorum_consumed")),
         (batch_root, employer, nonce),
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Versioned Admin Configuration Events
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when admin configuration version is incremented.
+///
+/// This event allows off-chain clients to reliably detect when admin or treasury
+/// configuration has changed without polling individual fields.
+pub fn emit_admin_config_version_updated(
+    e: &Env,
+    company_id: u64,
+    new_version: u64,
+    updated_by: Address,
+) {
+    e.events().publish(
+        (Symbol::new(e, "AdminConfigVersionUpdated"), company_id),
+        (new_version, updated_by),
     );
 }
 
