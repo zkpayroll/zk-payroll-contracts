@@ -68,6 +68,7 @@ data   = ( <payload> )
 | Treasury administration | [? Treasury Events](#treasury-events) | `payroll_registry`, `pause_manager` |
 | Audit & compliance | [? Audit Events](#audit-events) | `audit_module` |
 | ZK proof verification | [? Proof Events](#proof-events) | `proof_verifier` (cross-contract effects) |
+| Configuration audit | [Configuration Audit Events](#configuration-audit-events) | `payroll` |
 
 ---
 
@@ -715,6 +716,36 @@ Every `PayrollProcessed` event (? Payroll Events) is also an implicit
 
 ---
 
+## Configuration Audit Events
+
+### `payroll / config_changed` — `payroll`
+
+Emitted exactly once per successful configuration change (#490): admin,
+treasury owner, pause manager, asset allowlist, company state, capacity
+limits, settlement windows, period freezes, retention policy, reviewers,
+dispute authorities, reservation expiry policy, payroll currency, and storage
+version. No-op and failed changes emit nothing.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("config_changed")
+topics[2]  Symbol     key               e.g. "capacity_limits", "reviewer", "admin"
+data       (Address actor, BytesN<32> subject_ref, BytesN<32> previous_ref,
+            BytesN<32> new_ref, u64 revision, u32 ledger_sequence, u64 timestamp)
+```
+
+Values are referenced by `sha256` of their canonical XDR, and 32 zero bytes
+mean "no value/subject". `revision` is contract-wide and gap-free, and
+`get_config_revision()` returns its latest value. See
+[config-audit-events.md](./config-audit-events.md) for the key table, how to
+verify a reference, and the privacy model.
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` (privileged configuration change) | Compliance auditors, security monitoring, admin dashboards, indexers |
+
+---
+
 ## Consumer Matrix
 
 Quick-reference: which consumer types should subscribe to which domain.
@@ -806,6 +837,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `PauseManager / op_proposed` | `pause_manager` | `("PauseManager", "op_proposed")` | `(current_operator, new_operator)` |
 | `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address ? single-value data)* |
 | `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address ? single-value data)* |
+| `payroll / config_changed` | `payroll` | `("payroll", "config_changed", key)` | `(actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp)` |
 
 ---
 

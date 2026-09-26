@@ -17,7 +17,7 @@ alert routing guidance.
 | Funding | `FND` | `payroll` | Treasury deposit and balance management |
 | Execution | `EXE` | `payroll`, `payment_executor` | Payroll run and individual payment execution |
 | Audit | `AUD` | `audit_module` | Compliance verification and report generation |
-| Security | `SEC` | `pause_manager`, `payment_executor` | Pause/unpause, replay protection, auth failures |
+| Security | `SEC` | `pause_manager`, `payment_executor`, `payroll` | Pause/unpause, replay protection, auth failures, configuration audit |
 
 ---
 
@@ -245,6 +245,32 @@ Emitted by `pause_manager` when the system resumes.
 Notes:
 - Treat as `HIGH` — verify the root cause of the preceding pause was resolved before
   accepting this event as routine.
+
+### `payroll / config_changed`
+
+Emitted by `payroll` once per successful configuration change (#490). See
+[config-audit-events.md](../config-audit-events.md) for the full key table and
+verification steps.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| topic[0] | `Symbol` | `"payroll"` |
+| topic[1] | `Symbol` | `"config_changed"` |
+| topic[2] | `Symbol` | Configuration key, e.g. `"admin"`, `"capacity_limits"` |
+| data[0] | `Address` | Actor that authorized the change |
+| data[1] | `BytesN<32>` | `sha256` of the setting's subject (asset, period, role holder); zeros if none |
+| data[2] | `BytesN<32>` | `sha256` of the previous value; zeros if none |
+| data[3] | `BytesN<32>` | `sha256` of the new value; zeros if removed |
+| data[4] | `u64` | Contract-wide configuration revision |
+| data[5] | `u32` | Ledger sequence |
+| data[6] | `u64` | Ledger timestamp |
+
+Notes:
+- Values are never published in plaintext; only digests.
+- A gap in `revision` means a missed event; reconcile against
+  `get_config_revision()`.
+- Treat `admin`, `treasury_owner`, and `pause_manager` changes as `HIGH`; others
+  as `MEDIUM`.
 
 ---
 

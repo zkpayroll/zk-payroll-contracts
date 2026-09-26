@@ -122,6 +122,33 @@ payroll_registry.accept_admin_rotation(company_id, new_admin);
 - **Event Emission**: `AdminConfigVersionUpdated` events are emitted for reliable change notification
 - **Backward Compatible**: Existing operations continue to work without changes
 
+### Payroll Configuration Audit Events
+
+Every successful configuration change on the `payroll` contract publishes one
+`("payroll", "config_changed", key)` event and bumps a contract-wide revision
+(#490). This covers admin and treasury-owner handoffs, pause manager, asset
+allowlist, company state, capacity limits, settlement windows, period freezes,
+retention policy, reviewers, dispute authorities, reservation expiry, payroll
+currency, and storage version.
+
+```rust
+// data = (actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp)
+payroll.set_capacity_limits(&admin, &10, &100, &1_000_000);
+let revision = payroll.get_config_revision(); // 1, 2, 3, ... with no gaps
+```
+
+- **Actor:** the address whose authorization the change required (checked
+  against the stored role).
+- **Value references:** `sha256` of each value's canonical XDR; 32 zero bytes
+  mean "no value". Consecutive changes chain (`previous_ref` = prior
+  `new_ref`).
+- **Privacy:** configuration values are never emitted in plaintext, and no
+  salary, employee, or commitment data is involved.
+- **No-op / failed changes:** no audit event and no revision bump.
+
+See [docs/config-audit-events.md](docs/config-audit-events.md) for the schema,
+key table, and how to verify a reference.
+
 ### Register Employee with Private Salary
 
 ```rust
