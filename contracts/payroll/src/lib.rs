@@ -5264,7 +5264,8 @@ impl Payroll {
     /// Set or update the funding reservation expiry policy for an asset (#337).
     ///
     /// # Authorization
-    /// Requires authorization from the contract admin.
+    /// Requires authorization from the contract admin. `admin` must be the
+    /// stored admin, not just any address that signs the call (#490).
     pub fn set_reservation_expiry_policy(
         e: Env,
         admin: Address,
@@ -5272,6 +5273,17 @@ impl Payroll {
         reserved_amount: i128,
         expiry_ledger_offset: u64,
     ) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!(
+                "Unauthorized: only the admin may set a reservation expiry policy (error code {})",
+                AuthError::UnauthorizedAdmin as u32
+            );
+        }
         admin.require_auth();
 
         let now = e.ledger().timestamp();
