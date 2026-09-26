@@ -1,6 +1,6 @@
-use payroll_registry::PayrollRegistryClient;
-use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
+use soroban_sdk::testutils::Address as _;
+use payroll_registry::PayrollRegistryClient;
 
 #[test]
 fn test_admin_config_version_initialized_on_registration() {

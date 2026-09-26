@@ -299,9 +299,8 @@ pub trait PayrollRegistryTrait {
 
     /// Get the current admin configuration version for a company.
     ///
-    /// Returns the version tracking structure that allows off-chain clients
-    /// to reliably detect when admin or treasury configuration has changed.
-    /// Returns None if the company does not exist.
+    /// Returns None if the company does not exist. The version increments
+    /// whenever admin or treasury configuration changes.
     fn get_admin_config_version(env: Env, company_id: u64) -> Option<AdminConfigVersion>;
 }
 
@@ -526,10 +525,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::CompanyAdmin(admin.clone()), &id);
 
-        // Initialize admin configuration version tracking
+        // Initialize admin config version at 1
         let initial_version = AdminConfigVersion {
             version: 1,
-            updated_at: env.ledger().timestamp(),
+            updated_at: env.ledger().sequence() as u64,
             updated_by: admin.clone(),
         };
         env.storage()
@@ -609,6 +608,12 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .get(&DataKey::Company(company_id))
             .expect("Company not found")
+    }
+
+    fn get_admin_config_version(env: Env, company_id: u64) -> Option<AdminConfigVersion> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
     }
 
     fn get_commitment(env: Env, company_id: u64, employee: Address) -> BytesN<32> {
@@ -773,11 +778,28 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::CompanyAdmin(new_admin.clone()), &company_id);
+        payroll_events::emit_company_admin_rotated(&env, company_id, old_admin, new_admin.clone());
 
-        // Increment admin configuration version
-        Self::increment_admin_config_version(&env, company_id, new_admin.clone());
-
-        payroll_events::emit_company_admin_rotated(&env, company_id, old_admin, new_admin);
+        // Increment admin config version
+        let current_version: AdminConfigVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
+            .expect("Admin config version not found");
+        let updated_version = AdminConfigVersion {
+            version: current_version.version + 1,
+            updated_at: env.ledger().sequence() as u64,
+            updated_by: new_admin.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
+        payroll_events::emit_registry_admin_config_version_updated(
+            &env,
+            company_id,
+            updated_version.version,
+            new_admin,
+        );
     }
 
     fn cancel_admin_rotation(env: Env, company_id: u64, current_admin: Address) {
@@ -879,7 +901,28 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         env.events().publish(
             (Symbol::new(&env, "TreasuryRotated"), company_id),
-            (old_treasury, new_treasury),
+            (old_treasury, new_treasury.clone()),
+        );
+
+        // Increment admin config version
+        let current_version: AdminConfigVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
+            .expect("Admin config version not found");
+        let updated_version = AdminConfigVersion {
+            version: current_version.version + 1,
+            updated_at: env.ledger().sequence() as u64,
+            updated_by: new_treasury.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
+        payroll_events::emit_registry_admin_config_version_updated(
+            &env,
+            company_id,
+            updated_version.version,
+            new_treasury,
         );
     }
 

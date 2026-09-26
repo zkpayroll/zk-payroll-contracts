@@ -1165,3 +1165,18 @@ pub fn emit_employee_status_changed(
         (previous_status, new_status),
     );
 }
+
+// ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
+
+/// Emitted when the admin configuration version is updated.
+pub fn emit_registry_admin_config_version_updated(
+    e: &Env,
+    company_id: u64,
+    new_version: u64,
+    updated_by: Address,
+) {
+    e.events().publish(
+        (Symbol::new(e, "AdminConfigVersionUpdated"), company_id),
+        (new_version, updated_by),
+    );
+}
