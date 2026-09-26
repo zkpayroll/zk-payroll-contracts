@@ -100,6 +100,28 @@ payroll_registry.register_company(
 
 ## Usage
 
+### Versioned Admin Configuration Updates
+
+The payroll registry now tracks configuration revisions so off-chain clients can detect changes reliably. Each company maintains a version counter that increments whenever admin or treasury configuration changes.
+
+```rust
+// Get current admin configuration version
+let version = payroll_registry.get_admin_config_version(company_id);
+// Returns: AdminConfigVersion { version: u64, updated_at: u64, updated_by: Address }
+
+// The version automatically increments on admin/treasury rotations
+payroll_registry.propose_admin_rotation(company_id, current_admin, new_admin);
+payroll_registry.accept_admin_rotation(company_id, new_admin);
+// Version now incremented to previous_version + 1
+```
+
+**Key Guarantees:**
+- **Version Tracking**: Each company starts at version 1 when registered
+- **Automatic Incrementing**: Version increments on admin or treasury rotation acceptance
+- **Change Detection**: Off-chain clients can poll the version to detect configuration changes
+- **Event Emission**: `AdminConfigVersionUpdated` events are emitted for reliable change notification
+- **Backward Compatible**: Existing operations continue to work without changes
+
 ### Register Employee with Private Salary
 
 ```rust
