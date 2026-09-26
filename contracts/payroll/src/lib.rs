@@ -2180,6 +2180,54 @@ impl Payroll {
         true
     }
 
+    /// Clean up a completed or failed batch checkpoint.
+    pub fn cleanup_batch_checkpoint(
+        e: Env,
+        admin: Address,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+    ) {
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_non_zero_digest(&e, &execution_nonce, "execution_nonce");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::BatchCheckpoint(
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+        );
+        let checkpoint: BatchCheckpoint = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Batch execution checkpoint not found");
+
+        if !checkpoint.completed && !checkpoint.failed {
+            panic!("Cannot cleanup active batch checkpoint");
+        }
+
+        e.storage().persistent().remove(&key);
+
+        payroll_events::emit_batch_checkpoint_cleaned(
+            &e,
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+        );
+    }
+
     /// Return the canonical state for a payroll run ID.
     pub fn get_payroll_run_state(e: Env, run_id: u64) -> PayrollRunState {
         Self::get_payroll_run_state_internal(&e, run_id)
