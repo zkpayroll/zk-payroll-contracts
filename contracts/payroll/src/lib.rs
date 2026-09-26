@@ -2837,6 +2837,206 @@ impl Payroll {
         run_id
     }
 
+    // ── Issue #475: Bounded batch processing for employee payments ────────────
+
+    /// Bounded batch processing for large payroll runs (#475).
+    ///
+    /// Accepts a configurable `batch_size` parameter bounded by a hard cap (MAX_BATCH = 50).
+    /// Processes employees in deterministic order within each batch, tracks progress via
+    /// privacy-safe checkpoints, and allows partial runs to be safely resumed without double-paying.
+    pub fn batch_process_payroll_bounded(
+        e: Env,
+        proofs: Vec<BytesN<256>>,
+        amounts: Vec<i128>,
+        employees: Vec<Address>,
+        expected_total_spend: i128,
+        nonce: BytesN<32>,
+        draft_hash: Option<BytesN<32>>,
+        batch_size: u32,
+    ) -> u64 {
+        Self::require_company_active(&e);
+
+        Self::validate_storage_version_for_operation(&e, "batch_process_payroll_bounded");
+
+        if batch_size == 0 {
+            panic!("Batch size must be greater than zero");
+        }
+        if batch_size > MAX_BATCH {
+            panic!("Batch size exceeds maximum limit of 50");
+        }
+
+        Self::validate_non_zero_digest(&e, &nonce, "nonce");
+        if let Some(ref dh) = draft_hash {
+            Self::validate_non_zero_digest(&e, dh, "draft_hash");
+        }
+
+        let count = proofs.len();
+        if amounts.len() != count || employees.len() != count {
+            panic!("Array length mismatch");
+        }
+        if count == 0 {
+            panic!("Empty payroll batch");
+        }
+        if count > MAX_BATCH {
+            panic!("Batch employee count exceeds maximum limit of 50");
+        }
+
+        let mut total: i128 = 0;
+        for i in 0..count {
+            let amt = amounts.get(i).unwrap();
+            if amt <= 0 {
+                panic!("Amount must be positive");
+            }
+            total += amt;
+        }
+        if total != expected_total_spend {
+            panic!(
+                "Expected spend mismatch: authorised {} but batch totals {}",
+                expected_total_spend, total
+            );
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        addrs.admin.require_auth();
+
+        let batch_root = draft_hash.clone().unwrap_or_else(|| nonce.clone());
+        let checkpoint_key = DataKey::BatchCheckpoint(
+            addrs.admin.clone(),
+            batch_root.clone(),
+            addrs.token.clone(),
+            nonce.clone(),
+        );
+
+        let mut checkpoint: BatchCheckpoint = if e.storage().persistent().has(&checkpoint_key) {
+            let cp: BatchCheckpoint = e.storage().persistent().get(&checkpoint_key).unwrap();
+            if cp.completed {
+                panic!("Payroll batch already completed");
+            }
+            payroll_events::emit_batch_checkpoint_resumed(
+                &e,
+                addrs.admin.clone(),
+                batch_root.clone(),
+                addrs.token.clone(),
+                nonce.clone(),
+                cp.last_checkpoint_index,
+            );
+            cp
+        } else {
+            let cp = BatchCheckpoint {
+                employer: addrs.admin.clone(),
+                batch_root: batch_root.clone(),
+                asset: addrs.token.clone(),
+                execution_nonce: nonce.clone(),
+                state: BatchCheckpointState::Started,
+                last_checkpoint_index: 0,
+                total_checkpoints: count,
+                completed: false,
+                failed: false,
+            };
+            e.storage().persistent().set(&checkpoint_key, &cp);
+            payroll_events::emit_batch_checkpoint_started(
+                &e,
+                addrs.admin.clone(),
+                batch_root.clone(),
+                addrs.token.clone(),
+                nonce.clone(),
+                0,
+            );
+            cp
+        };
+
+        let start_index = checkpoint.last_checkpoint_index;
+        if start_index >= count {
+            panic!("Payroll batch already fully processed");
+        }
+        let end_index = core::cmp::min(start_index + batch_size, count);
+
+        Self::validate_no_duplicate_employees(&employees);
+
+        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+            panic!("Asset not allowed");
+        }
+
+        if e.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = e
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(&e, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
+        }
+
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+        let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+
+        for i in start_index..end_index {
+            let proof = proofs.get(i).unwrap();
+            let amount = amounts.get(i).unwrap();
+            let employee = employees.get(i).unwrap();
+
+            if amount <= 0 {
+                panic!("Amount must be positive");
+            }
+
+            let commitment_struct = commitment_client.get_commitment(&employee);
+            let commitment = commitment_struct.commitment;
+
+            let mut nullifier_arr = [0u8; 32];
+            nullifier_arr[0] = (i % 256) as u8;
+            nullifier_arr[1] = (i / 256) as u8;
+            let nullifier = BytesN::from_array(&e, &nullifier_arr);
+            let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
+
+            let mut public_inputs = Vec::new(&e);
+            public_inputs.push_back(commitment.clone());
+            public_inputs.push_back(nullifier.clone());
+            public_inputs.push_back(recipient_hash.clone());
+
+            let ok = verifier.verify_payment_proof(&proof, &public_inputs);
+            if !ok {
+                panic!("Invalid payment proof for employee {}", i);
+            }
+
+            commitment_client.record_nullifier(&nullifier);
+            token_client.transfer(&addrs.treasury, &employee, &amount);
+            commitment_client.lock_commitment_updates(&employee);
+
+            payroll_events::emit_payment_executed(&e, employee.clone(), amount);
+        }
+
+        checkpoint.last_checkpoint_index = end_index;
+        if end_index >= count {
+            checkpoint.completed = true;
+            checkpoint.state = BatchCheckpointState::Completed;
+        } else {
+            checkpoint.state = BatchCheckpointState::PartiallyCheckpointed;
+        }
+
+        e.storage().persistent().set(&checkpoint_key, &checkpoint);
+
+        payroll_events::emit_batch_checkpoint_updated(
+            &e,
+            addrs.admin.clone(),
+            batch_root.clone(),
+            addrs.token.clone(),
+            nonce.clone(),
+            checkpoint.last_checkpoint_index,
+            checkpoint.state as u32,
+        );
+
+        let run_id = Self::derive_run_id(&e);
+        run_id
+    }
+
     // ?? Issue #89: payroll amendment flow ????????????????????????????????????
 
     /// Create a correctable payroll run draft.

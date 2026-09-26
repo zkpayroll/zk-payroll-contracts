@@ -863,3 +863,126 @@ fn test_is_employee_active_helper_tracks_status_without_exposing_commitment() {
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
     assert!(client.is_employee_active(&company_id, &employee));
 }
+
+// ── Issue #486: Employee Payout Destination Update Flow Tests ───────────────
+
+#[test]
+fn test_successful_payout_destination_update_by_employee() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let new_destination = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    // Initial payout destination defaults to employee address
+    assert_eq!(client.get_payout_destination(&company_id, &employee), employee);
+
+    // Employee updates their payout destination
+    client.update_payout_destination(&company_id, &employee, &new_destination);
+    assert_eq!(client.get_payout_destination(&company_id, &employee), new_destination);
+}
+
+#[test]
+#[should_panic(expected = "authorized")]
+fn test_update_payout_destination_rejects_non_owner() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, PayrollRegistry);
+    let registry = PayrollRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "register_company",
+            args: (admin.clone(), treasury.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let company_id = registry.register_company(&admin, &treasury);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_employee",
+            args: (company_id, employee.clone(), commitment.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    // Attacker (not employee) attempts to update employee's payout destination
+    let attacker = Address::generate(&env);
+    let new_destination = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "update_payout_destination",
+            args: (company_id, employee.clone(), new_destination.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    registry.update_payout_destination(&company_id, &employee, &new_destination);
+}
+
+#[test]
+#[should_panic(expected = "Cannot set zero address as payout destination")]
+fn test_update_payout_destination_rejects_zero_address() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    let zero_addr = Address::from_string(&String::from_str(&env, VALID_EMPLOYEE_WALLET));
+    client.update_payout_destination(&company_id, &employee, &zero_addr);
+}
+
+#[test]
+#[should_panic(expected = "Destination address is already on file")]
+fn test_update_payout_destination_rejects_duplicate_address() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    // Attempting to update to the same address already on file (the employee address itself)
+    client.update_payout_destination(&company_id, &employee, &employee);
+}
+
+#[test]
+#[should_panic(expected = "Invalid employee wallet address format")]
+fn test_update_payout_destination_by_wallet_rejects_invalid_wallet() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+
+    let bad_wallet = String::from_str(&env, BAD_CHECKSUM_EMPLOYEE_WALLET);
+    client.update_payout_destination_wallet(&company_id, &employee, &bad_wallet);
+}
