@@ -463,32 +463,6 @@ impl PayrollRegistry {
 
     // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
-    /// Increment the admin configuration version for a company.
-    ///
-    /// This helper function increments the version counter when admin or treasury
-    /// configuration changes, allowing off-chain clients to reliably detect changes.
-    fn increment_admin_config_version(env: &Env, company_id: u64, updated_by: Address) {
-        let mut current_version: AdminConfigVersion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AdminConfigVersion(company_id))
-            .expect("Admin config version not found - company may not exist");
-
-        current_version.version += 1;
-        current_version.updated_at = env.ledger().timestamp();
-        current_version.updated_by = updated_by.clone();
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminConfigVersion(company_id), &current_version);
-
-        payroll_events::emit_admin_config_version_updated(
-            env,
-            company_id,
-            current_version.version,
-            updated_by,
-        );
-    }
 }
 
 #[contractimpl]
@@ -896,9 +870,6 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::PendingTreasuryRotation(company_id));
 
-        // Increment admin configuration version
-        Self::increment_admin_config_version(&env, company_id, new_treasury.clone());
-
         env.events().publish(
             (Symbol::new(&env, "TreasuryRotated"), company_id),
             (old_treasury, new_treasury.clone()),
@@ -1227,14 +1198,6 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .get(&DataKey::PayoutDestination(company_id, employee.clone()))
             .unwrap_or(employee)
-    }
-
-    // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
-
-    fn get_admin_config_version(env: Env, company_id: u64) -> Option<AdminConfigVersion> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::AdminConfigVersion(company_id))
     }
 }
 
