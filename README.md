@@ -12,6 +12,7 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 - **Proof-Based Payments** — Verify payments without exposing values
 - **Batch Payroll** — Process multiple employees in single transaction
 - **Period Freeze Guard** — Finalized payroll periods are locked against further edits, with an admin-controlled unfreeze path for authorized corrections
+- **Run Expiration** — Prepared-but-unfinalized payroll runs can expire after a configurable window, releasing reserved funds and stopping stale submissions
 - **Compliance Ready** — Selective disclosure for audits via view keys
 - **On-Chain Verification** — Groth16 proof verification on Soroban
 
@@ -49,6 +50,10 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 > **Period lifecycle:** finalized payroll periods are protected by a freeze
 > guard (#471) — see [docs/period-freeze-guard.md](docs/period-freeze-guard.md)
 > for what is blocked, the escape hatches, and the authorized correction flow.
+>
+> **Run lifecycle:** prepared-but-unfinalized runs can expire (#474) — see
+> [docs/run-expiration.md](docs/run-expiration.md) for the expiry policy, the
+> permissionless expiry flow, and SDK guidance.
 
 ## Prerequisites
 

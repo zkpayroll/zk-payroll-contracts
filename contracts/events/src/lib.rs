@@ -776,6 +776,19 @@ pub fn emit_draft_expired(e: &Env, draft_id: u64, admin: Address) {
     );
 }
 
+/// Emitted when a prepared payroll run expires before finalization (#474).
+///
+/// `expired_by` is the caller that submitted the expiry transaction
+/// (permissionless). The payload is deliberately redacted: no amounts, no
+/// employee addresses, no commitment material — only identifiers needed to
+/// correlate the expiry with the run's audit trail.
+pub fn emit_run_expired(e: &Env, run_id: u64, expired_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_expired")),
+        (run_id, expired_by),
+    );
+}
+
 /// Emitted when a payroll run's reconciliation status is updated.
 pub fn emit_reconciliation_updated(e: &Env, run_id: u64, status: Symbol) {
     e.events().publish(

@@ -40,6 +40,11 @@ pub enum ReconciliationStatus {
 /// labels. Off-chain clients should mirror these exact names and transition
 /// rules from `docs/payroll-state-machine.md` and the JSON fixture under
 /// `fixtures/state-machine/`.
+///
+/// `Cancelled` and `Expired` are distinct outcomes: `Cancelled` is the admin's
+/// intentional stop, while `Expired` means the run was never finalized before
+/// its expiry policy elapsed (#474). Both release the treasury funds
+/// reservation without executing any payment.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -54,6 +59,12 @@ pub enum PayrollRunState {
     Failed = 7,
     Cancelled = 8,
     ReconciliationRequired = 9,
+    /// Prepared run whose expiry policy elapsed without finalization (#474).
+    /// Terminal — it is removed from `PendingRun` (releasing its funds
+    /// reservation) and kept only as a redacted `ExpiredRunRecord` audit
+    /// marker. Ordinal 10 appends after the #159 set so pre-existing
+    /// storage discriminants are unchanged.
+    Expired = 10,
 }
 
 /// A pending payroll run that has been prepared but not yet finalized.
@@ -384,6 +395,52 @@ pub struct BatchSplitRecord {
 /// Default maximum validity age for reviewer approvals (7 days in seconds) (#403).
 pub const DEFAULT_APPROVAL_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+// ?? Issue #474: Payroll Run Expiration ?????????????????????????????????????
+
+/// Expiry policy for prepared-but-not-finalized payroll runs (#474).
+///
+/// Stored under `DataKey::RunExpiryPolicy` when the admin enables expiration.
+/// Once enabled, a run that is still pending (`DataKey::PendingRun`) past
+/// `max_age_seconds` after its `prepared_at` timestamp can no longer be
+/// finalized and may be expired by anyone, releasing its treasury funds
+/// reservation. The policy contains no salary values — only the age bound and
+/// who configured it.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRunExpiryPolicy {
+    /// Maximum age (in seconds) a prepared run may remain un-finalized.
+    pub max_age_seconds: u64,
+    /// Ledger timestamp when the policy was set.
+    pub set_at: u64,
+    /// Address that configured the policy (the contract admin).
+    pub set_by: Address,
+}
+
+/// Redacted audit record left behind when a pending payroll run expires (#474).
+///
+/// Stored under `DataKey::ExpiredRunRecord(run_id)`. Deliberately contains no
+/// employee addresses, amounts, or commitment material — the same redaction
+/// rule as `CancelledBatchStatus` (#404) — so dashboards can distinguish an
+/// expiry from a cancellation without exposing payroll values.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpiredRunRecord {
+    /// Run that expired.
+    pub run_id: u64,
+    /// Ledger timestamp when the run was marked expired.
+    pub expired_at: u64,
+    /// Address that submitted the expiry transaction.
+    pub expired_by: Address,
+    /// Number of payments the batch contained (metadata only).
+    pub employee_count: u32,
+    /// Nonce binding that was burned at preparation; remains unspendable.
+    pub nonce: BytesN<32>,
+    /// Off-chain draft hash bound at preparation (zero when none was bound).
+    pub draft_hash: BytesN<32>,
+    /// Always `true`; mirrors `is_cancelled` on `CancelledBatchStatus`.
+    pub is_expired: bool,
+}
+
 // ?? Issue #147: company lifecycle state ??????????????????????????????????????????
 
 /// Lifecycle state of the company operating this payroll contract.
@@ -580,6 +637,12 @@ pub enum DataKey {
     /// key blocks further payroll edits for the period until explicitly
     /// unfrozen.
     PeriodFreeze(Symbol),
+    /// Expiry policy for prepared-but-not-finalized payroll runs (#474).
+    /// Absent means expiration is disabled (current behavior).
+    RunExpiryPolicy,
+    /// Redacted audit record for a payroll run that expired before
+    /// finalization (#474).
+    ExpiredRunRecord(u64),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1618,7 +1681,10 @@ impl Payroll {
             ),
             PayrollRunState::Submitted => matches!(
                 to,
-                PayrollRunState::Confirming | PayrollRunState::Failed | PayrollRunState::Cancelled
+                PayrollRunState::Confirming
+                    | PayrollRunState::Failed
+                    | PayrollRunState::Cancelled
+                    | PayrollRunState::Expired
             ),
             PayrollRunState::Confirming => matches!(
                 to,
@@ -1635,14 +1701,16 @@ impl Payroll {
             PayrollRunState::ReconciliationRequired => {
                 matches!(to, PayrollRunState::Completed | PayrollRunState::Failed)
             }
-            PayrollRunState::Completed | PayrollRunState::Cancelled => false,
+            PayrollRunState::Completed | PayrollRunState::Cancelled | PayrollRunState::Expired => {
+                false
+            }
         }
     }
 
     fn is_terminal_payroll_state_internal(state: PayrollRunState) -> bool {
         matches!(
             state,
-            PayrollRunState::Completed | PayrollRunState::Cancelled
+            PayrollRunState::Completed | PayrollRunState::Cancelled | PayrollRunState::Expired
         )
     }
 
@@ -2375,6 +2443,13 @@ impl Payroll {
         // Validate approval expiry if a review exists (#403)
         Self::validate_approval_not_expired(&e, run_id, DEFAULT_APPROVAL_EXPIRY_SECONDS);
 
+        // Issue #474: reject finalization once the run's expiry window has
+        // passed. Stale runs must be expired (releasing their funds
+        // reservation) rather than executed long after preparation, so the
+        // run's preconditions (treasury balance, asset allowlist, roster)
+        // cannot silently drift before settlement.
+        Self::validate_run_not_expired(&e, run_id);
+
         // Issue #218: Check if run has already been finalized
         // Once a run is executed, it cannot be cancelled
         let run_key = DataKey::PayrollRun(run_id);
@@ -2495,6 +2570,181 @@ impl Payroll {
     /// Alias for cancel_payroll_run_with_reason
     pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64, reason: Symbol) {
         Self::cancel_payroll_run_with_reason(e, admin, run_id, reason);
+    }
+
+    // ?? Issue #474: Payroll Run Expiration ??????????????????????????????????
+
+    /// Enable or update the expiry policy for prepared payroll runs (#474).
+    ///
+    /// Once set, a run that is still pending past `max_age_seconds` after its
+    /// `prepared_at` timestamp can no longer be finalized and may be expired
+    /// by anyone via `expire_payroll_run`, releasing its treasury funds
+    /// reservation. Pass `0` to disable expiration (removes the policy).
+    ///
+    /// # Authorization
+    /// Requires authorization from the contract admin.
+    ///
+    /// # Panics
+    /// - If the contract is paused or the caller is not the admin.
+    pub fn set_run_expiration_policy(e: Env, admin: Address, max_age_seconds: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let policy_key = DataKey::RunExpiryPolicy;
+        if max_age_seconds == 0 {
+            // Disabling expiration must not orphan already-stale runs: while
+            // runs are pending, the policy can only be tightened or kept,
+            // never removed.
+            if Self::pending_payroll_run_count(&e) > 0 {
+                panic!("Cannot disable run expiration while payroll runs are pending");
+            }
+            e.storage().persistent().remove(&policy_key);
+            return;
+        }
+
+        let policy = PendingRunExpiryPolicy {
+            max_age_seconds,
+            set_at: e.ledger().timestamp(),
+            set_by: admin,
+        };
+        e.storage().persistent().set(&policy_key, &policy);
+    }
+
+    /// Return the active expiry policy for prepared runs, if any (#474).
+    pub fn get_run_expiration_policy(e: Env) -> Option<PendingRunExpiryPolicy> {
+        e.storage().persistent().get(&DataKey::RunExpiryPolicy)
+    }
+
+    /// Return whether a pending payroll run has aged past the configured
+    /// expiry window (#474).
+    ///
+    /// Returns `false` when no policy is configured or the run is not in the
+    /// pending state; expiration only applies to prepared-but-not-finalized
+    /// runs.
+    pub fn is_payroll_run_expired(e: Env, run_id: u64) -> bool {
+        let policy: PendingRunExpiryPolicy =
+            match e.storage().persistent().get(&DataKey::RunExpiryPolicy) {
+                Some(policy) => policy,
+                None => return false,
+            };
+        let pending: PendingPayrollRun =
+            match e.storage().persistent().get(&DataKey::PendingRun(run_id)) {
+                Some(pending) => pending,
+                // Finalized, cancelled, already-expired, or unknown runs are not
+                // "pending" and therefore cannot expire again.
+                None => return false,
+            };
+        e.ledger().timestamp() > pending.prepared_at.saturating_add(policy.max_age_seconds)
+    }
+
+    /// Expire a prepared-but-not-finalized payroll run once its expiry
+    /// window has elapsed (#474).
+    ///
+    /// Permissionless by design: any observer can retire stale work, so the
+    /// treasury funds reservation (#343) is not held hostage by an idle
+    /// admin. No payment is executed and no token moves. The run is removed
+    /// from the pending set, marked `Expired` in the canonical state machine,
+    /// and a redacted `ExpiredRunRecord` is stored for audit. The run nonce
+    /// stays burned.
+    ///
+    /// # Panics
+    /// - If the run is not in the pending state (unknown, finalized,
+    ///   cancelled, or already expired).
+    /// - If no expiry policy is configured or the run has not aged past it.
+    pub fn expire_payroll_run(e: Env, caller: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
+        caller.require_auth();
+
+        let pending_key = DataKey::PendingRun(run_id);
+        let pending_run: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .expect("Pending run not found");
+
+        if !Self::is_payroll_run_expired(e.clone(), run_id) {
+            panic!("Run has not expired: the configured expiry window has not elapsed");
+        }
+
+        // Guard against double resolution: a finalized run cannot also be
+        // expired (defense in depth — the pending record is removed on
+        // finalization, so the read above already implies this).
+        if e.storage().persistent().has(&DataKey::PayrollRun(run_id)) {
+            panic!("Cannot expire a finalized payroll run");
+        }
+
+        // Release the treasury funds reservation (#343).
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        Self::subtract_locked_funds(&e, addrs.token.clone(), pending_run.total_amount);
+
+        // Store a redacted audit record — no amounts, no employee rows.
+        let expired_record = ExpiredRunRecord {
+            run_id,
+            expired_at: e.ledger().timestamp(),
+            expired_by: caller.clone(),
+            employee_count: pending_run.employee_count,
+            nonce: pending_run.nonce.clone(),
+            draft_hash: pending_run.draft_hash.clone(),
+            is_expired: true,
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::ExpiredRunRecord(run_id), &expired_record);
+
+        // Remove the pending run and mark the canonical state as Expired.
+        e.storage().persistent().remove(&pending_key);
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Expired);
+
+        // Issue #253: this run is resolved — release the configuration lock
+        // once no other pending runs remain.
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &Self::pending_payroll_run_count(&e).saturating_sub(1),
+        );
+
+        payroll_events::emit_run_expired(&e, run_id, caller);
+    }
+
+    /// Return the redacted audit record for an expired run, if any (#474).
+    pub fn get_expired_run_record(e: Env, run_id: u64) -> Option<ExpiredRunRecord> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ExpiredRunRecord(run_id))
+    }
+
+    /// Panic if the pending run `run_id` has aged past the configured expiry
+    /// window (#474). No-op when expiration is disabled or the run is not
+    /// pending. Used as a gate on resolution paths that execute payments.
+    fn validate_run_not_expired(e: &Env, run_id: u64) {
+        let policy: PendingRunExpiryPolicy =
+            match e.storage().persistent().get(&DataKey::RunExpiryPolicy) {
+                Some(policy) => policy,
+                None => return,
+            };
+        if let Some(pending) = e
+            .storage()
+            .persistent()
+            .get::<_, PendingPayrollRun>(&DataKey::PendingRun(run_id))
+        {
+            let now = e.ledger().timestamp();
+            if now > pending.prepared_at.saturating_add(policy.max_age_seconds) {
+                panic!(
+                    "Run has expired: it was not finalized within the configured window; call expire_payroll_run"
+                );
+            }
+        }
     }
 
     pub fn batch_process_payroll(
@@ -5027,6 +5277,41 @@ mod tests {
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Submitted));
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Cancelled));
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Expired));
+    }
+
+    // ?? Issue #474: run expiration conformance ????????????????????????????
+
+    #[test]
+    fn test_expired_run_state_is_terminal_and_reachable_from_submitted() {
+        // Conformance with the #159 canonical state machine: `Expired` is
+        // reachable only from `Submitted` (a prepared-but-unresolved run)
+        // and is terminal, mirroring `Cancelled`.
+        assert!(Payroll::is_allowed_payroll_state_transition_internal(
+            PayrollRunState::Submitted,
+            PayrollRunState::Expired
+        ));
+        assert!(!Payroll::is_allowed_payroll_state_transition_internal(
+            PayrollRunState::Draft,
+            PayrollRunState::Expired
+        ));
+        assert!(!Payroll::is_allowed_payroll_state_transition_internal(
+            PayrollRunState::Expired,
+            PayrollRunState::Submitted
+        ));
+        assert!(!Payroll::is_allowed_payroll_state_transition_internal(
+            PayrollRunState::Expired,
+            PayrollRunState::Confirming
+        ));
+        assert!(!Payroll::is_allowed_payroll_state_transition_internal(
+            PayrollRunState::Expired,
+            PayrollRunState::Failed
+        ));
+        assert!(Payroll::is_terminal_payroll_state_internal(
+            PayrollRunState::Expired
+        ));
+        assert!(!Payroll::is_retryable_payroll_state_internal(
+            PayrollRunState::Expired
+        ));
     }
 
     // ?? Issue #103: per-payroll run nonce uniqueness ???????????????????????????

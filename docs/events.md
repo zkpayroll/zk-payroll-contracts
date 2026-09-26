@@ -501,6 +501,28 @@ data       (Symbol period_label, Address unfrozen_by)
 |----------|-----------|
 | `HIGH` | Compliance monitors (audit trail), SDKs, dashboards (re-enable edits) |
 
+#### `payroll / run_expired` (#474)
+
+Emitted when a prepared-but-unfinalized payroll run is expired via
+`expire_payroll_run` after its configured expiry window elapsed. The run's
+treasury funds reservation (#343) is released and nothing was executed. The
+expiry submission is permissionless — `expired_by` may be any observer, not
+necessarily the admin.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_expired")
+data       (u64 run_id, Address expired_by)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` | Payroll dashboards (mark run terminal, release reservation badge), SDKs, treasury monitors |
+
+> Privacy: the payload carries only the run id and the submitting caller. No
+> amounts, employee addresses, commitments, or proof material are included;
+> the on-chain `ExpiredRunRecord` is redacted the same way.
+
 #### `payroll / deposit`
 
 ```

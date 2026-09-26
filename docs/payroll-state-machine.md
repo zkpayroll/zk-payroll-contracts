@@ -19,11 +19,12 @@ is `fixtures/state-machine/payroll-run-state-machine.json`.
 | `failed` | `Failed` | No | Yes | The run failed before a terminal outcome and may be retried or cancelled. |
 | `cancelled` | `Cancelled` | Yes | No | The run was intentionally stopped and cannot be reopened. |
 | `reconciliation_required` | `ReconciliationRequired` | No | No | Payments executed, but reconciliation still needs review or finalization. |
+| `expired` | `Expired` | Yes | No | The prepared run was never finalized within its expiry window (#474); its funds reservation was released and nothing was executed. |
 
-`completed` and `cancelled` are immutable terminal states. `failed` is the only
-retryable state. `reconciliation_required` is reviewable, but clients should not
-show it as a retry action by default because the next step is reconciliation or
-operator review.
+`completed`, `cancelled`, and `expired` are immutable terminal states. `failed`
+is the only retryable state. `reconciliation_required` is reviewable, but
+clients should not show it as a retry action by default because the next step is
+reconciliation or operator review.
 
 ## Allowed Transitions
 
@@ -43,6 +44,7 @@ operator review.
 | `submitted` | `confirming` | Contract, submitter, or indexer | Execution has been sent and confirmation is pending. |
 | `submitted` | `failed` | Contract, submitter, or indexer | Submission failed before confirmation. |
 | `submitted` | `cancelled` | Admin | Cancel a prepared run before execution. |
+| `submitted` | `expired` | Any observer or automation | Retire a prepared run that aged past the configured expiry window before finalization (#474). |
 | `confirming` | `completed` | Contract or reconciliation operator | Execution and reconciliation are final. |
 | `confirming` | `failed` | Contract or reconciliation operator | Confirmation failed before a terminal success. |
 | `confirming` | `reconciliation_required` | Contract or reconciliation operator | Execution happened, but reconciliation must be completed. |
@@ -54,7 +56,8 @@ operator review.
 
 All other transitions are forbidden. In particular, clients and integrations
 must reject direct jumps such as `draft -> completed`, reverse transitions such
-as `submitted -> draft`, and any transition out of `completed` or `cancelled`.
+as `submitted -> draft`, and any transition out of `completed`, `cancelled`, or
+`expired`.
 
 ## Contract Entry Points
 
@@ -64,6 +67,7 @@ The payroll contract records canonical state for the on-chain lifecycle:
 | --- | --- |
 | `prepare_payroll_run` | Stores `submitted` for the new pending run. |
 | `cancel_payroll_run` | Stores `cancelled` and removes the pending run. |
+| `expire_payroll_run` | Stores `expired`, removes the pending run, and releases its funds reservation (#474). |
 | `batch_process_payroll` | Stores `reconciliation_required` after execution. |
 | `update_reconciliation_status(Reconciled)` | Stores `completed`. |
 | `update_reconciliation_status(Unreconciled)` | Keeps or stores `reconciliation_required`. |
@@ -74,6 +78,27 @@ The payroll contract records canonical state for the on-chain lifecycle:
 The contract exposes `is_payroll_state_transition_allowed`,
 `is_payroll_state_terminal`, and `is_payroll_state_retryable` so tests and
 off-chain mirrors can assert the same semantics without duplicating rules.
+
+### Run Expiration (#474)
+
+Prepared-but-unfinalized runs can expire so stale batches cannot be settled
+long after their preconditions (treasury balance, asset allowlist, roster)
+stopped holding:
+
+- Expiration is **opt-in**. The admin sets a maximum pending age via
+  `set_run_expiration_policy`; without a policy, behavior is unchanged.
+- While the policy is active, `finalize_payroll_run` rejects runs older than
+  the window ("Run has expired…") and `expire_payroll_run` moves them to the
+  terminal `expired` state.
+- Expiry is **permissionless** — any observer may submit it — so idle funds
+  reservations (#343) and the #253 configuration lock cannot be held hostage
+  by an unresponsive operator.
+- Expiry executes nothing: no token transfer, no salary row, no exposure of
+  amounts. A redacted `ExpiredRunRecord` and a `run_expired` event
+  `(run_id, expired_by)` are all that remain. The run nonce stays burned.
+
+See [Payroll Run Expiration](./run-expiration.md) for the full workflow,
+SDK guidance, and error recovery.
 
 ## Future Additions
 

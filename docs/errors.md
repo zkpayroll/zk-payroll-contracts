@@ -51,6 +51,10 @@ where the contract exposes `Result<_, Error>`.
 | `payroll.freeze_payroll_period` / `unfreeze_payroll_period` | `"Payroll period is already frozen"` / `"Payroll period is not frozen"` | Duplicate freeze, or unfreeze on a period that is not frozen. | Retryable after state refresh | Refresh the freeze state (`get_period_freeze`) and render the correct action. |
 | `payroll.freeze_payroll_period`, `unfreeze_payroll_period` | Host `authorized` failure | The signer is not the contract admin. | Non-retryable until signer changes | Require the admin to sign; do not expose freeze controls to non-admin sessions. |
 | `payroll` draft flows | Draft missing, duplicate nonce, or hash not pre-committed | UI skipped the commit step or reused a finalized run nonce. | Non-retryable for same nonce/hash | Restart the draft flow with a new nonce and pre-commit the expected hash. |
+| `payroll.finalize_payroll_run` | `"Run has expired: it was not finalized within the configured window; call expire_payroll_run"` | The run was prepared but not finalized before the configured expiry window (#474) elapsed. | Non-retryable for this run | Submit `expire_payroll_run` (anyone can) to release the reserved funds, then prepare a fresh run with a new nonce. See [Payroll Run Expiration](./run-expiration.md). |
+| `payroll.expire_payroll_run` | `"Run has not expired: the configured expiry window has not elapsed"` | Expiry was submitted while the run was still inside its window. | Retryable after the window elapses | Wait until `is_payroll_run_expired(run_id)` returns true, or finalize/cancel the run instead. |
+| `payroll.expire_payroll_run` | `"Pending run not found"` | The run is unknown, or already finalized/cancelled/expired. | Non-retryable for this run ID | Refresh state via `get_payroll_run_state`; for expired runs read `get_expired_run_record`. |
+| `payroll.set_run_expiration_policy` | `"Cannot disable run expiration while payroll runs are pending"` | Admin passed `max_age_seconds = 0` while runs are pending. | Non-retryable until runs resolve | Resolve (finalize/cancel/expire) the pending runs first, then disable. |
 
 ## Treasury and Token Checks
 
