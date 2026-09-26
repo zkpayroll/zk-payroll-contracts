@@ -345,6 +345,24 @@ pub enum SettlementWindowStatus {
     Closed = 3,
 }
 
+// ── Issue #248: payroll period configuration freeze guard ───────────────────
+
+/// Freeze state of a payroll period's configuration.
+///
+/// A period's configuration (currently its settlement window) may be edited
+/// while `Editable`. Once a period is frozen — explicitly by the admin, or
+/// implicitly because a payroll run was submitted against it or it became
+/// settlement-ready — unsafe edits are rejected.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PeriodConfigState {
+    /// Configuration may still be edited.
+    Editable = 0,
+    /// Configuration is locked and must not change.
+    Frozen = 1,
+}
+
 // ?? Issue #91: privileged-role rotation ??????????????????????????????????????
 
 /// Pending two-step role-rotation request.
@@ -733,6 +751,10 @@ pub enum DataKey {
     /// any was open at the time — used to locate its settlement window for
     /// later expiration (#316).
     PendingRunPeriod(u64),
+    /// Freeze state for a payroll period's configuration (#248). Present and
+    /// `true` once the period is frozen; absent means editable unless the
+    /// period is implicitly frozen (settlement-ready or a submitted run).
+    PeriodConfigFrozen(Symbol),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -2476,6 +2498,10 @@ impl Payroll {
             e.storage()
                 .persistent()
                 .set(&DataKey::PendingRunPeriod(run_id), &period);
+            // Issue #248: submitting a run freezes the period's configuration.
+            e.storage()
+                .persistent()
+                .set(&DataKey::PeriodConfigFrozen(period.clone()), &true);
         }
 
         // Issue #253: track this run as "in progress" so unsafe admin
@@ -4076,6 +4102,9 @@ impl Payroll {
 
         Self::validate_symbol_not_empty(&e, &period, "period");
 
+        // Issue #248: reject edits to a period whose configuration is frozen.
+        Self::assert_period_config_editable(&e, &period);
+
         if !(open_at <= execution_start
             && execution_start <= execution_end
             && execution_end <= close_at)
@@ -4139,6 +4168,91 @@ impl Payroll {
             &window,
             e.ledger().timestamp(),
         ))
+    }
+
+    // ── Issue #248: payroll period configuration freeze guard ───────────────
+
+    /// Explicitly freeze a payroll period's configuration. Only the admin may
+    /// call. Once frozen, `set_settlement_window` rejects further edits for the
+    /// period, in addition to the implicit freeze applied once a payroll run is
+    /// submitted against the period or the period becomes settlement-ready.
+    pub fn freeze_period_config(e: Env, admin: Address, period: Symbol) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!(
+                "Unauthorized: only the admin may freeze a payroll period (error code {})",
+                AuthError::UnauthorizedAdmin as u32
+            );
+        }
+        admin.require_auth();
+
+        Self::validate_symbol_not_empty(&e, &period, "period");
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::PeriodConfigFrozen(period), &true);
+    }
+
+    /// Return the recorded freeze state for a period.
+    ///
+    /// This reflects only the explicit freeze marker. Use
+    /// [`is_period_config_frozen`](Self::is_period_config_frozen) to also
+    /// account for the implicit conditions (submitted run, settlement-ready)
+    /// that block configuration edits.
+    pub fn get_period_config_state(e: Env, period: Symbol) -> PeriodConfigState {
+        if e.storage()
+            .persistent()
+            .get(&DataKey::PeriodConfigFrozen(period))
+            .unwrap_or(false)
+        {
+            PeriodConfigState::Frozen
+        } else {
+            PeriodConfigState::Editable
+        }
+    }
+
+    /// Whether configuration edits for a period must be rejected.
+    ///
+    /// A period is frozen when any of the following holds:
+    /// - the admin explicitly froze it via `freeze_period_config`;
+    /// - a payroll run was submitted against it; or
+    /// - it is settlement-ready: its settlement window has reached the
+    ///   `Executable`, `Grace`, or `Closed` status.
+    pub fn is_period_config_frozen(e: Env, period: Symbol) -> bool {
+        if e.storage()
+            .persistent()
+            .get(&DataKey::PeriodConfigFrozen(period.clone()))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        let window: Option<SettlementWindow> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period));
+        if let Some(window) = window {
+            let status = Self::classify_settlement_window(&window, e.ledger().timestamp());
+            if status != SettlementWindowStatus::PreOpen {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Panic when a period's configuration is frozen and must not be edited.
+    fn assert_period_config_editable(e: &Env, period: &Symbol) {
+        if Self::is_period_config_frozen(e.clone(), period.clone()) {
+            panic!(
+                "Payroll period configuration is frozen: settlement window cannot be edited (error code {})",
+                PaymentError::InvalidSettlementWindowConfig as u32
+            );
+        }
     }
 
     /// Enforce the settlement window for the currently open capacity period,
