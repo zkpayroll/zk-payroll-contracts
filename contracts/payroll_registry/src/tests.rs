@@ -320,7 +320,7 @@ fn test_add_employee_sets_active_status() {
 }
 
 #[test]
-fn test_set_employee_status_inactive_makes_ineligible() {
+fn test_set_employee_status_suspended_makes_ineligible() {
     let (env, contract_id) = setup();
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -331,11 +331,11 @@ fn test_set_employee_status_inactive_makes_ineligible() {
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
 
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
 
     assert_eq!(
         client.get_employee_status(&company_id, &employee),
-        EmployeeStatus::Inactive,
+        EmployeeStatus::Suspended,
     );
     assert!(!client.is_eligible(&company_id, &employee));
 }
@@ -371,7 +371,7 @@ fn test_unregistered_employee_is_not_eligible() {
 }
 
 #[test]
-fn test_reactivating_inactive_employee_restores_eligibility() {
+fn test_reactivating_suspended_employee_restores_eligibility() {
     let (env, contract_id) = setup();
     let client = PayrollRegistryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -381,7 +381,7 @@ fn test_reactivating_inactive_employee_restores_eligibility() {
 
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
     assert!(!client.is_eligible(&company_id, &employee));
 
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
@@ -502,7 +502,7 @@ fn test_deactivate_employee_emits_lifecycle_event() {
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
     let before = env.events().all().len();
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
     let after = env.events().all().len();
     assert_eq!(after, before + 1);
 
@@ -527,7 +527,7 @@ fn test_reactivate_employee_emits_lifecycle_event() {
 
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
     let before = env.events().all().len();
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
     let after = env.events().all().len();
@@ -857,13 +857,12 @@ fn test_is_employee_active_helper_tracks_status_without_exposing_commitment() {
     client.add_employee(&company_id, &employee, &commitment);
     assert!(client.is_employee_active(&company_id, &employee));
 
-    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Inactive);
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
     assert!(!client.is_employee_active(&company_id, &employee));
 
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
     assert!(client.is_employee_active(&company_id, &employee));
 }
-
 // ── Issue #486: Employee Payout Destination Update Flow Tests ───────────────
 
 #[test]
@@ -985,4 +984,24 @@ fn test_update_payout_destination_by_wallet_rejects_invalid_wallet() {
 
     let bad_wallet = String::from_str(&env, BAD_CHECKSUM_EMPLOYEE_WALLET);
     client.update_payout_destination_wallet(&company_id, &employee, &bad_wallet);
+}
+
+#[test]
+#[should_panic(expected = "Offboarded employee status cannot be changed")]
+fn test_offboarded_employee_cannot_be_changed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[0; 32]);
+    let client = PayrollRegistryClient::new(&env, &env.register_contract(None, PayrollRegistry {}));
+    
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Offboarded);
+    
+    // Attempting to change status should panic
+    client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
 }

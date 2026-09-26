@@ -244,6 +244,25 @@ pub fn emit_batch_checkpoint_resumed(
     );
 }
 
+/// Emitted when a completed or failed batch checkpoint is cleaned up.
+pub fn emit_batch_checkpoint_cleaned(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "batch_checkpoint_cleaned")),
+        (
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+        ),
+    );
+}
+
 /// Emitted when a payroll run draft is created.
 pub fn emit_draft_created(e: &Env, draft_id: u64, admin: Address, period_label: Symbol) {
     e.events().publish(

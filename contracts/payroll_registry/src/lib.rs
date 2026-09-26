@@ -28,7 +28,7 @@ pub struct CompanyInfo {
 /// Eligibility checks use this to decide whether an employee can be included
 /// in a payroll execution:
 ///   - `Active`     ? eligible; commitment is registered and record is complete.
-///   - `Inactive`   ? temporarily ineligible (e.g. on leave, terminated).
+///   - `Suspended`  ? temporarily ineligible (e.g. on leave).
 ///   - `Incomplete` ? missing required registration data; never eligible until
 ///                    the record is corrected and marked `Active`.
 #[contracttype]
@@ -36,8 +36,9 @@ pub struct CompanyInfo {
 #[repr(u32)]
 pub enum EmployeeStatus {
     Active = 0,
-    Inactive = 1,
+    Suspended = 1,
     Incomplete = 2,
+    Offboarded = 3,
 }
 
 // ?? Issue #91: privileged-role rotation ??????????????????????????????????????
@@ -168,7 +169,7 @@ pub trait PayrollRegistryTrait {
     /// Return `true` iff the employee is registered AND has `Active` status.
     fn is_eligible(env: Env, company_id: u64, employee: Address) -> bool;
 
-    /// Read-only helper for clients that only need active/inactive state.
+    /// Read-only helper for clients that only need active/suspended state.
     fn is_employee_active(env: Env, company_id: u64, employee: Address) -> bool;
 
     // ?? Issue #91: company-level admin/treasury rotation ?????????????????????
@@ -565,14 +566,19 @@ impl PayrollRegistryTrait for PayrollRegistry {
             return;
         }
 
+        if previous_status == EmployeeStatus::Offboarded {
+            panic!("Offboarded employee status cannot be changed");
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::EmpStatus(company_id, employee.clone()), &status);
 
         let event_name = match status {
             EmployeeStatus::Active => Symbol::new(&env, "EmployeeReactivated"),
-            EmployeeStatus::Inactive => Symbol::new(&env, "EmployeeDeactivated"),
+            EmployeeStatus::Suspended => Symbol::new(&env, "EmployeeSuspended"),
             EmployeeStatus::Incomplete => Symbol::new(&env, "EmployeeStatusUpdated"),
+            EmployeeStatus::Offboarded => Symbol::new(&env, "EmployeeOffboarded"),
         };
         env.events().publish(
             (event_name, company_id, employee),
