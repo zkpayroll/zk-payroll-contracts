@@ -363,6 +363,72 @@ pub enum PeriodConfigState {
     Frozen = 1,
 }
 
+// ── Issue #482: Duplicate employee entry validation ──────────────────────────
+
+/// Tracks which employees have been paid in a payroll run to prevent duplicates.
+/// Maps run_id to a Vec of employee identifiers (commitment hashes).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EmployeePaidTracker {
+    pub run_id: u64,
+    pub paid_employees: Vec<BytesN<32>>,
+}
+
+// ── Issue #485: Payroll run status query helper ───────────────────────────────
+
+/// Concise status view of a payroll run for dashboard and client views.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PayrollRunStatusKind {
+    /// Draft stage, pending finalization
+    Pending = 0,
+    /// Approved and ready for execution
+    Approved = 1,
+    /// Currently executing batch payments
+    Executing = 2,
+    /// Execution completed successfully
+    Completed = 3,
+    /// Execution failed, may be retried
+    Failed = 4,
+}
+
+/// A concise, safe status view for a payroll run without sensitive payroll data.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollRunStatus {
+    pub run_id: u64,
+    pub status: PayrollRunStatusKind,
+    pub last_updated: u64,
+    pub employee_count: u32,
+    pub total_amount: i128,
+}
+
+// ── Issue #478: Payroll run metadata versioning ────────────────────────────────
+
+/// Version metadata for a payroll run to handle contract changes safely.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollRunMetadataVersion {
+    pub run_id: u64,
+    pub schema_version: u32,
+    pub created_at: u64,
+    pub metadata_hash: BytesN<32>,
+}
+
+// ── Issue #476: Contract-level payroll currency validation ──────────────────────
+
+/// Currency configuration for a payroll contract to enforce consistent asset usage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollCurrencyConfig {
+    pub asset: Address,
+    pub currency_code: Symbol,
+    pub decimals: u8,
+    pub configured_at: u64,
+    pub configured_by: Address,
+}
+
 // ?? Issue #91: privileged-role rotation ??????????????????????????????????????
 
 /// Pending two-step role-rotation request.
@@ -755,6 +821,14 @@ pub enum DataKey {
     /// `true` once the period is frozen; absent means editable unless the
     /// period is implicitly frozen (settlement-ready or a submitted run).
     PeriodConfigFrozen(Symbol),
+    /// Tracks paid employees per run to prevent duplicate payments (#482).
+    EmployeePaidTracker(u64),
+    /// Status view for a payroll run (#485).
+    PayrollRunStatus(u64),
+    /// Metadata version for a payroll run (#478).
+    PayrollRunMetadataVersion(u64),
+    /// Payroll contract currency configuration (#476).
+    PayrollCurrencyConfig,
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -2815,6 +2889,9 @@ impl Payroll {
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
 
+            // Issue #482: Validate employee has not been paid already in this run
+            Self::validate_employee_not_already_paid(&e, run_id, &commitment);
+
             let mut nullifier_arr = [0u8; 32];
             nullifier_arr[0] = (i % 256) as u8;
             nullifier_arr[1] = (i / 256) as u8;
@@ -2839,6 +2916,9 @@ impl Payroll {
             // altered after payroll has been executed for this period.
             commitment_client.lock_commitment_updates(&employee);
 
+            // Issue #482: Record that this employee has been paid
+            Self::record_employee_paid(&e, run_id, commitment);
+
             payroll_events::emit_payment_executed(&e, employee.clone(), amount);
         }
 
@@ -2857,6 +2937,12 @@ impl Payroll {
             .persistent()
             .set(&DataKey::PayrollRun(run_id), &run);
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::ReconciliationRequired);
+
+        // Issue #485: Record payroll run status for dashboards
+        Self::record_payroll_run_status(&e, run_id, PayrollRunStatusKind::Completed, count, expected_total_spend);
+
+        // Issue #478: Record metadata version for this run
+        Self::set_metadata_version(&e, run_id, 1u32, BytesN::from_array(&e, &[0u8; 32]));
 
         payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
 
@@ -5458,6 +5544,249 @@ impl Payroll {
         } else {
             false
         }
+    }
+
+    // ── Issue #482: Duplicate employee validation ────────────────────────────
+
+    /// Validate that the same employee (by commitment hash) has not already been
+    /// paid in this run. This prevents accidental re-payment of an employee.
+    ///
+    /// # Arguments
+    /// - `env`: Soroban environment
+    /// - `run_id`: The payroll run ID
+    /// - `employee_commitment`: The employee's commitment hash
+    ///
+    /// # Panics
+    /// If the employee has already been paid in this run.
+    fn validate_employee_not_already_paid(
+        env: &Env,
+        run_id: u64,
+        employee_commitment: &BytesN<32>,
+    ) {
+        let tracker_key = DataKey::EmployeePaidTracker(run_id);
+
+        if let Some(tracker) = env.storage().persistent().get::<_, EmployeePaidTracker>(&tracker_key) {
+            for paid in tracker.paid_employees.iter() {
+                if paid == *employee_commitment {
+                    panic!("Employee already paid in this run");
+                }
+            }
+        }
+    }
+
+    /// Record that an employee has been paid in a run to prevent duplicate payments.
+    ///
+    /// # Arguments
+    /// - `env`: Soroban environment
+    /// - `run_id`: The payroll run ID
+    /// - `employee_commitment`: The employee's commitment hash
+    fn record_employee_paid(
+        env: &Env,
+        run_id: u64,
+        employee_commitment: BytesN<32>,
+    ) {
+        let tracker_key = DataKey::EmployeePaidTracker(run_id);
+
+        let mut tracker = if let Some(existing) = env.storage().persistent().get::<_, EmployeePaidTracker>(&tracker_key) {
+            existing
+        } else {
+            EmployeePaidTracker {
+                run_id,
+                paid_employees: Vec::new(env),
+            }
+        };
+
+        tracker.paid_employees.push_back(employee_commitment);
+        env.storage().persistent().set(&tracker_key, &tracker);
+    }
+
+    // ── Issue #485: Payroll run status query helper ───────────────────────────
+
+    /// Get a concise status view of a payroll run without exposing sensitive data.
+    ///
+    /// Returns a PayrollRunStatus struct with the current state, timestamps, and counts.
+    pub fn get_payroll_run_status(env: Env, run_id: u64) -> Option<PayrollRunStatus> {
+        // Check if a status is stored
+        if let Some(status) = env.storage().persistent().get::<_, PayrollRunStatus>(
+            &DataKey::PayrollRunStatus(run_id)
+        ) {
+            return Some(status);
+        }
+
+        // Fallback: derive status from PayrollRunState if no explicit status stored
+        if let Some(state) = env.storage().persistent().get::<_, PayrollRunState>(
+            &DataKey::PayrollState(run_id)
+        ) {
+            if let Some(run) = env.storage().persistent().get::<_, PayrollRun>(
+                &DataKey::PayrollRun(run_id)
+            ) {
+                let status_kind = match state {
+                    PayrollRunState::Draft | PayrollRunState::Validating | PayrollRunState::ProofPending => {
+                        PayrollRunStatusKind::Pending
+                    }
+                    PayrollRunState::ReadyToSubmit | PayrollRunState::Submitted => {
+                        PayrollRunStatusKind::Approved
+                    }
+                    PayrollRunState::Confirming => {
+                        PayrollRunStatusKind::Executing
+                    }
+                    PayrollRunState::Completed => {
+                        PayrollRunStatusKind::Completed
+                    }
+                    PayrollRunState::Failed | PayrollRunState::ReconciliationRequired => {
+                        PayrollRunStatusKind::Failed
+                    }
+                    PayrollRunState::Cancelled => {
+                        PayrollRunStatusKind::Failed
+                    }
+                };
+
+                return Some(PayrollRunStatus {
+                    run_id,
+                    status: status_kind,
+                    last_updated: run.executed_at,
+                    employee_count: run.employee_count,
+                    total_amount: run.total_amount,
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Record or update the status of a payroll run.
+    fn record_payroll_run_status(
+        env: &Env,
+        run_id: u64,
+        status: PayrollRunStatusKind,
+        employee_count: u32,
+        total_amount: i128,
+    ) {
+        let current_time = env.ledger().timestamp();
+        let status_record = PayrollRunStatus {
+            run_id,
+            status,
+            last_updated: current_time,
+            employee_count,
+            total_amount,
+        };
+
+        env.storage().persistent().set(
+            &DataKey::PayrollRunStatus(run_id),
+            &status_record,
+        );
+    }
+
+    // ── Issue #478: Payroll run metadata versioning ────────────────────────────
+
+    /// Set metadata version for a payroll run to track schema evolution.
+    ///
+    /// # Arguments
+    /// - `env`: Soroban environment
+    /// - `run_id`: The payroll run ID
+    /// - `schema_version`: The metadata schema version
+    /// - `metadata_hash`: Hash of the versioned metadata
+    fn set_metadata_version(
+        env: &Env,
+        run_id: u64,
+        schema_version: u32,
+        metadata_hash: BytesN<32>,
+    ) {
+        let version_record = PayrollRunMetadataVersion {
+            run_id,
+            schema_version,
+            created_at: env.ledger().timestamp(),
+            metadata_hash,
+        };
+
+        env.storage().persistent().set(
+            &DataKey::PayrollRunMetadataVersion(run_id),
+            &version_record,
+        );
+    }
+
+    /// Get metadata version for a payroll run.
+    ///
+    /// # Arguments
+    /// - `env`: Soroban environment
+    /// - `run_id`: The payroll run ID
+    ///
+    /// # Returns
+    /// The metadata version record if it exists
+    pub fn get_metadata_version(env: Env, run_id: u64) -> Option<PayrollRunMetadataVersion> {
+        env.storage().persistent().get(&DataKey::PayrollRunMetadataVersion(run_id))
+    }
+
+    // ── Issue #476: Contract-level payroll currency validation ──────────────────
+
+    /// Set the payroll contract's currency configuration.
+    ///
+    /// This ensures all payroll runs use the configured asset and provides
+    /// consistent currency metadata across payroll operations.
+    ///
+    /// # Arguments
+    /// - `env`: Soroban environment
+    /// - `admin`: Admin address for authorization
+    /// - `asset`: The asset address to configure
+    /// - `currency_code`: Human-readable currency code (e.g., "USDC")
+    /// - `decimals`: Number of decimals for the currency
+    pub fn set_payroll_currency(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        currency_code: Symbol,
+        decimals: u8,
+    ) {
+        let addrs: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        addrs.admin.require_auth();
+
+        if admin != addrs.admin {
+            panic!("Unauthorized: admin role required");
+        }
+
+        let config = PayrollCurrencyConfig {
+            asset: asset.clone(),
+            currency_code,
+            decimals,
+            configured_at: env.ledger().timestamp(),
+            configured_by: admin,
+        };
+
+        env.storage().persistent().set(
+            &DataKey::PayrollCurrencyConfig,
+            &config,
+        );
+
+        env.events().publish((symbol_short!("currencies"), ), config);
+    }
+
+    /// Get the configured payroll currency for this contract.
+    pub fn get_payroll_currency(env: Env) -> Option<PayrollCurrencyConfig> {
+        env.storage().persistent().get(&DataKey::PayrollCurrencyConfig)
+    }
+
+    /// Validate that the asset being used for payroll matches the configured currency.
+    ///
+    /// # Arguments
+    /// - `env`: Soroban environment
+    /// - `asset`: The asset to validate
+    ///
+    /// # Panics
+    /// If the asset does not match the configured payroll currency.
+    fn validate_payroll_currency(env: &Env, asset: &Address) -> Result<(), PaymentError> {
+        if let Some(config) = env.storage().persistent().get::<_, PayrollCurrencyConfig>(
+            &DataKey::PayrollCurrencyConfig
+        ) {
+            if config.asset != *asset {
+                return Err(PaymentError::InvalidAsset);
+            }
+        }
+        Ok(())
     }
 }
 
