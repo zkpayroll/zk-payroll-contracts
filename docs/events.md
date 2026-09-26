@@ -461,6 +461,46 @@ data       (u64 draft_id, Symbol period_label, i128 total_amount, u32 employee_c
 | Severity | Consumers |
 |----------|-----------|
 | `LOW` | SDKs, dashboards, draft-review indexers |
+
+#### `payroll / period_frozen` (#471)
+
+Emitted when a payroll period is frozen — either manually by the admin via
+`freeze_payroll_period`, or automatically when `submit_run_draft` converts a
+draft into an executable run (in which case `reason` is `finalized`). After
+this event, all payroll edit paths for the period are blocked until the
+matching `period_unfrozen` event arrives.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("period_frozen")
+data       (Symbol period_label, Address frozen_by, Symbol reason)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` | Payroll dashboards (disable edit affordances for the period), SDKs, compliance monitors |
+
+> Privacy: the payload carries only the period label, freezer identity, and a
+> short reason label. No salary values, commitments, or employee lists are
+> ever included.
+
+#### `payroll / period_unfrozen` (#471)
+
+Emitted when the admin lifts a period freeze via `unfreeze_payroll_period`
+(authorized correction flow). Treat this as an exceptional, audited action:
+indexers should surface it prominently, since edits become possible for the
+period again.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("period_unfrozen")
+data       (Symbol period_label, Address unfrozen_by)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `HIGH` | Compliance monitors (audit trail), SDKs, dashboards (re-enable edits) |
+
 #### `payroll / deposit`
 
 ```

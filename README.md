@@ -11,6 +11,7 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 - **Private Salary Commitments** — Salary amounts stored as ZK commitments
 - **Proof-Based Payments** — Verify payments without exposing values
 - **Batch Payroll** — Process multiple employees in single transaction
+- **Period Freeze Guard** — Finalized payroll periods are locked against further edits, with an admin-controlled unfreeze path for authorized corrections
 - **Compliance Ready** — Selective disclosure for audits via view keys
 - **On-Chain Verification** — Groth16 proof verification on Soroban
 
@@ -44,6 +45,10 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 | `proof_verifier` | Groth16 proof verification using BN254 |
 | `payment_executor` | Private payment execution |
 | `audit_module` | Selective disclosure for compliance |
+
+> **Period lifecycle:** finalized payroll periods are protected by a freeze
+> guard (#471) — see [docs/period-freeze-guard.md](docs/period-freeze-guard.md)
+> for what is blocked, the escape hatches, and the authorized correction flow.
 
 ## Prerequisites
 

@@ -577,6 +577,75 @@ fn case_draft_expired(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_period_frozen(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let period_label = Symbol::new(env, "aug_2026");
+    let frozen_by = Address::generate(env);
+    let reason = Symbol::new(env, "finalized");
+    env.as_contract(cid, || {
+        payroll_events::emit_period_frozen(
+            env,
+            period_label.clone(),
+            frozen_by.clone(),
+            reason.clone(),
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "period_frozen"),
+        "payroll.period_frozen topics changed"
+    );
+    let decoded: (Symbol, Address, Symbol) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (period_label, frozen_by, reason),
+        "payroll.period_frozen payload changed"
+    );
+    out.insert(
+        "payroll.period_frozen".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("period_frozen")],
+            data: vec![
+                field("period_label", "Symbol"),
+                field("frozen_by", "Address"),
+                field("reason", "Symbol"),
+            ],
+        },
+    );
+}
+
+fn case_period_unfrozen(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let period_label = Symbol::new(env, "aug_2026");
+    let unfrozen_by = Address::generate(env);
+    env.as_contract(cid, || {
+        payroll_events::emit_period_unfrozen(env, period_label.clone(), unfrozen_by.clone());
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "period_unfrozen"),
+        "payroll.period_unfrozen topics changed"
+    );
+    let decoded: (Symbol, Address) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (period_label, unfrozen_by),
+        "payroll.period_unfrozen payload changed"
+    );
+    out.insert(
+        "payroll.period_unfrozen".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("period_unfrozen")],
+            data: vec![
+                field("period_label", "Symbol"),
+                field("unfrozen_by", "Address"),
+            ],
+        },
+    );
+}
+
 fn case_reconciliation_updated(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let run_id: u64 = 27;
     let status = Symbol::new(env, "reconciled");
@@ -969,6 +1038,8 @@ fn payroll_events_match_fixture() {
     case_draft_submitted(&env, &cid, &mut observed);
     case_draft_cancelled(&env, &cid, &mut observed);
     case_draft_expired(&env, &cid, &mut observed);
+    case_period_frozen(&env, &cid, &mut observed);
+    case_period_unfrozen(&env, &cid, &mut observed);
     case_reconciliation_updated(&env, &cid, &mut observed);
     case_admin_proposed(&env, &cid, &mut observed);
     case_admin_rotated(&env, &cid, &mut observed);
