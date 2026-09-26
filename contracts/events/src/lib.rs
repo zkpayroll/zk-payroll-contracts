@@ -23,7 +23,7 @@
 //! predate this module may use other conventions and are preserved for
 //! backward compatibility.
 
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contractevent, symbol_short, Address, BytesN, Env, Symbol};
 
 /// Pause category symbols for event emission.
 /// Defined here to avoid circular dependency with pause_manager.
@@ -1089,6 +1089,44 @@ pub fn emit_dispute_resolved(
         (payroll_topic(), Symbol::new(e, "dispute_resolved")),
         (dispute_id, run_id, resolved_by, resolution_reason),
     );
+}
+
+// ── Issue #490: payroll configuration audit events ──────────────────────────
+
+/// Emitted by the Payroll contract once per successful configuration change
+/// (#490). Published through `record_config_change` in the payroll
+/// contract's `config_audit` module.
+///
+/// ```text
+/// topics = ( Symbol("payroll"), Symbol("config_changed"), Symbol(key) )
+/// data   = ( actor, subject_ref, previous_ref, new_ref, revision,
+///            ledger_sequence, timestamp )
+/// ```
+///
+/// Configuration values are never published in plaintext: `subject_ref`,
+/// `previous_ref`, and `new_ref` are `sha256` digests of the canonical XDR
+/// encoding of the subject and values, with an all-zero digest meaning
+/// "no subject" / "no value". See `docs/config-audit-events.md`.
+#[contractevent(topics = ["payroll", "config_changed"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigChanged {
+    /// Configuration setting that changed (e.g. `"capacity_limits"`).
+    #[topic]
+    pub key: Symbol,
+    /// Authenticated address that made the change.
+    pub actor: Address,
+    /// Digest of the asset, period, or role holder the setting is keyed by.
+    pub subject_ref: BytesN<32>,
+    /// Digest of the value before the change.
+    pub previous_ref: BytesN<32>,
+    /// Digest of the value after the change.
+    pub new_ref: BytesN<32>,
+    /// Contract-wide configuration revision after this change.
+    pub revision: u64,
+    /// Ledger sequence at which the change was applied.
+    pub ledger_sequence: u32,
+    /// Ledger timestamp at which the change was applied.
+    pub timestamp: u64,
 }
 
 // ?????????????????????????????????????????????????????????????????????????????

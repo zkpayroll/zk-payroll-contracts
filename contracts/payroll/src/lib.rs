@@ -10,6 +10,9 @@ use proof_verifier::ProofVerifierClient;
 use salary_commitment::SalaryCommitmentContractClient;
 use shared_errors::{AuthError, PaymentError, TreasuryError};
 
+pub mod config_audit;
+use config_audit::{config_keys, no_value_ref, record_config_change, stored_ref, value_ref};
+
 const MAX_BATCH: u32 = 50;
 
 #[contract]
@@ -829,6 +832,9 @@ pub enum DataKey {
     PayrollRunMetadataVersion(u64),
     /// Payroll contract currency configuration (#476).
     PayrollCurrencyConfig,
+    /// Contract-wide configuration revision, bumped once per audited
+    /// configuration change (#490). Absent means `0`.
+    ConfigRevision,
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1477,6 +1483,7 @@ impl Payroll {
             version_description: description,
         };
 
+        let previous_ref = stored_ref(&e, &DataKey::StorageVersion);
         e.storage()
             .persistent()
             .set(&DataKey::StorageVersion, &state);
@@ -1499,7 +1506,15 @@ impl Payroll {
                 symbol_short!("payroll"),
                 Symbol::new(&e, "storage_version_set"),
             ),
-            (version, admin),
+            (version, admin.clone()),
+        );
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::STORAGE_VERSION,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::StorageVersion),
         );
     }
 
@@ -1663,11 +1678,31 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
         addrs.admin.require_auth();
+        let previous_ref = stored_ref(&e, &DataKey::PauseManager);
         e.storage()
             .persistent()
             .set(&DataKey::PauseManager, &pause_manager);
 
         payroll_events::emit_pause_manager_set(&e, pause_manager);
+        record_config_change(
+            &e,
+            &addrs.admin,
+            config_keys::PAUSE_MANAGER,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::PauseManager),
+        );
+    }
+
+    /// Return the contract-wide configuration revision (#490).
+    ///
+    /// Starts at `0` and increases by exactly one for every audited
+    /// configuration change, matching the `revision` field of the latest
+    /// `("payroll", "config_changed", key)` event. Off-chain auditors can
+    /// compare it with the events they have indexed to confirm none are
+    /// missing.
+    pub fn get_config_revision(e: Env) -> u64 {
+        config_audit::config_revision(&e)
     }
 
     /// Allow or disallow an asset token for payroll payouts.
@@ -1686,11 +1721,19 @@ impl Payroll {
         if asset != addrs.token {
             panic!("Cross-asset treasury mismatch");
         }
-        e.storage()
-            .persistent()
-            .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
+        let allowed_key = DataKey::AllowedAsset(asset.clone());
+        let previous_ref = stored_ref(&e, &allowed_key);
+        e.storage().persistent().set(&allowed_key, &allowed);
 
         payroll_events::emit_asset_allowlist_updated(&e, asset.clone(), allowed);
+        record_config_change(
+            &e,
+            &addrs.admin,
+            config_keys::ASSET_ALLOWED,
+            value_ref(&e, &asset),
+            previous_ref,
+            stored_ref(&e, &allowed_key),
+        );
         let mut assets: Vec<Address> =
             if let Some(stored) = e.storage().persistent().get(&DataKey::SupportedAssets) {
                 stored
@@ -3619,7 +3662,16 @@ impl Payroll {
             .persistent()
             .remove(&DataKey::PendingAdminRotation);
 
-        payroll_events::emit_admin_rotated(&e, old_admin, new_admin);
+        let previous_ref = value_ref(&e, &old_admin);
+        payroll_events::emit_admin_rotated(&e, old_admin, new_admin.clone());
+        record_config_change(
+            &e,
+            &new_admin,
+            config_keys::ADMIN,
+            no_value_ref(&e),
+            previous_ref,
+            value_ref(&e, &new_admin),
+        );
     }
 
     /// Cancel a pending admin rotation proposal.
@@ -3704,6 +3756,7 @@ impl Payroll {
             .persistent()
             .get(&DataKey::TreasuryOwner)
             .expect("Treasury owner not set");
+        let previous_ref = stored_ref(&e, &DataKey::TreasuryOwner);
 
         e.storage()
             .persistent()
@@ -3721,7 +3774,15 @@ impl Payroll {
             .persistent()
             .remove(&DataKey::PendingTreasuryRotation);
 
-        payroll_events::emit_treasury_rotated(&e, old_owner, new_owner);
+        payroll_events::emit_treasury_rotated(&e, old_owner, new_owner.clone());
+        record_config_change(
+            &e,
+            &new_owner,
+            config_keys::TREASURY_OWNER,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::TreasuryOwner),
+        );
     }
 
     /// Cancel a pending treasury-owner rotation.
@@ -3821,7 +3882,16 @@ impl Payroll {
             .persistent()
             .remove(&DataKey::PendingAdminHandover);
 
-        payroll_events::emit_admin_handover_accepted(&e, old_admin, pending_admin);
+        let previous_ref = value_ref(&e, &old_admin);
+        payroll_events::emit_admin_handover_accepted(&e, old_admin, pending_admin.clone());
+        record_config_change(
+            &e,
+            &pending_admin,
+            config_keys::ADMIN,
+            no_value_ref(&e),
+            previous_ref,
+            value_ref(&e, &pending_admin),
+        );
     }
 
     /// Cancel a pending admin handover.
@@ -4029,10 +4099,19 @@ impl Payroll {
         }
         admin.require_auth();
         Self::require_no_active_payroll_run(&e);
+        let previous_ref = stored_ref(&e, &DataKey::CompanyState);
         e.storage().persistent().set(&DataKey::CompanyState, &state);
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "state_changed")),
             state,
+        );
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::COMPANY_STATE,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::CompanyState),
         );
     }
 
@@ -4076,11 +4155,20 @@ impl Payroll {
             max_employees,
             max_total_value,
         };
+        let previous_ref = stored_ref(&e, &DataKey::CapacityLimits);
         e.storage()
             .persistent()
             .set(&DataKey::CapacityLimits, &limits);
 
         payroll_events::emit_capacity_limits_set(&e, max_batches, max_employees, max_total_value);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::CAPACITY_LIMITS,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::CapacityLimits),
+        );
     }
 
     /// Return the currently configured capacity policy, if any.
@@ -4254,20 +4342,28 @@ impl Payroll {
             execution_start,
             execution_end,
             close_at,
-            configured_by: admin,
+            configured_by: admin.clone(),
             configured_at: e.ledger().timestamp(),
         };
-        e.storage()
-            .persistent()
-            .set(&DataKey::SettlementWindow(period.clone()), &window);
+        let window_key = DataKey::SettlementWindow(period.clone());
+        let previous_ref = stored_ref(&e, &window_key);
+        e.storage().persistent().set(&window_key, &window);
 
         payroll_events::emit_settlement_window_set(
             &e,
-            period,
+            period.clone(),
             open_at,
             execution_start,
             execution_end,
             close_at,
+        );
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::SETTLEMENT_WINDOW,
+            value_ref(&e, &period),
+            previous_ref,
+            stored_ref(&e, &window_key),
         );
     }
 
@@ -4326,9 +4422,17 @@ impl Payroll {
 
         Self::validate_symbol_not_empty(&e, &period, "period");
 
-        e.storage()
-            .persistent()
-            .set(&DataKey::PeriodConfigFrozen(period), &true);
+        let frozen_key = DataKey::PeriodConfigFrozen(period.clone());
+        let previous_ref = stored_ref(&e, &frozen_key);
+        e.storage().persistent().set(&frozen_key, &true);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::PERIOD_FROZEN,
+            value_ref(&e, &period),
+            previous_ref,
+            stored_ref(&e, &frozen_key),
+        );
     }
 
     /// Return the recorded freeze state for a period.
@@ -4685,6 +4789,7 @@ impl Payroll {
         {
             panic!("Retention windows must be non-zero");
         }
+        let previous_ref = stored_ref(&e, &DataKey::RetentionPolicy);
         e.storage()
             .persistent()
             .set(&DataKey::RetentionPolicy, &policy);
@@ -4693,6 +4798,14 @@ impl Payroll {
             policy.finalized_run_seconds,
             policy.cancelled_batch_seconds,
             policy.challenge_seconds,
+        );
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::RETENTION_POLICY,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::RetentionPolicy),
         );
     }
 
@@ -4813,11 +4926,19 @@ impl Payroll {
         }
         admin.require_auth();
 
-        e.storage()
-            .persistent()
-            .set(&DataKey::DisputeAuthority(authority.clone()), &true);
+        let authority_key = DataKey::DisputeAuthority(authority.clone());
+        let previous_ref = stored_ref(&e, &authority_key);
+        e.storage().persistent().set(&authority_key, &true);
 
-        payroll_events::emit_dispute_authority_added(&e, authority);
+        payroll_events::emit_dispute_authority_added(&e, authority.clone());
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::DISPUTE_AUTHORITY,
+            value_ref(&e, &authority),
+            previous_ref,
+            stored_ref(&e, &authority_key),
+        );
     }
 
     /// Revoke dispute-authority permission from an address. Only the admin may call.
@@ -4833,11 +4954,19 @@ impl Payroll {
         }
         admin.require_auth();
 
-        e.storage()
-            .persistent()
-            .remove(&DataKey::DisputeAuthority(authority.clone()));
+        let authority_key = DataKey::DisputeAuthority(authority.clone());
+        let previous_ref = stored_ref(&e, &authority_key);
+        e.storage().persistent().remove(&authority_key);
 
-        payroll_events::emit_dispute_authority_removed(&e, authority);
+        payroll_events::emit_dispute_authority_removed(&e, authority.clone());
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::DISPUTE_AUTHORITY,
+            value_ref(&e, &authority),
+            previous_ref,
+            stored_ref(&e, &authority_key),
+        );
     }
 
     /// Return `true` if the address may open or resolve disputes: the
@@ -5022,11 +5151,19 @@ impl Payroll {
         }
         admin.require_auth();
 
-        e.storage()
-            .persistent()
-            .set(&DataKey::AuthorizedReviewer(reviewer.clone()), &true);
+        let reviewer_key = DataKey::AuthorizedReviewer(reviewer.clone());
+        let previous_ref = stored_ref(&e, &reviewer_key);
+        e.storage().persistent().set(&reviewer_key, &true);
 
-        payroll_events::emit_reviewer_added(&e, reviewer);
+        payroll_events::emit_reviewer_added(&e, reviewer.clone());
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::REVIEWER,
+            value_ref(&e, &reviewer),
+            previous_ref,
+            stored_ref(&e, &reviewer_key),
+        );
     }
 
     /// Revoke reviewer authorization from an address. Only the admin may call.
@@ -5042,11 +5179,19 @@ impl Payroll {
         }
         admin.require_auth();
 
-        e.storage()
-            .persistent()
-            .remove(&DataKey::AuthorizedReviewer(reviewer.clone()));
+        let reviewer_key = DataKey::AuthorizedReviewer(reviewer.clone());
+        let previous_ref = stored_ref(&e, &reviewer_key);
+        e.storage().persistent().remove(&reviewer_key);
 
-        payroll_events::emit_reviewer_removed(&e, reviewer);
+        payroll_events::emit_reviewer_removed(&e, reviewer.clone());
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::REVIEWER,
+            value_ref(&e, &reviewer),
+            previous_ref,
+            stored_ref(&e, &reviewer_key),
+        );
     }
 
     /// Return `true` if the address is an authorized reviewer, `false` otherwise.
@@ -5296,9 +5441,17 @@ impl Payroll {
             created_at: now,
         };
 
-        e.storage()
-            .persistent()
-            .set(&DataKey::ReservationExpiry(asset), &expiry);
+        let expiry_key = DataKey::ReservationExpiry(asset.clone());
+        let previous_ref = stored_ref(&e, &expiry_key);
+        e.storage().persistent().set(&expiry_key, &expiry);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::RESERVATION_EXPIRY,
+            value_ref(&e, &asset),
+            previous_ref,
+            stored_ref(&e, &expiry_key),
+        );
     }
 
     /// Release expired funding reservations and make funds available (#337).
@@ -5814,15 +5967,24 @@ impl Payroll {
             currency_code,
             decimals,
             configured_at: env.ledger().timestamp(),
-            configured_by: admin,
+            configured_by: admin.clone(),
         };
 
+        let previous_ref = stored_ref(&env, &DataKey::PayrollCurrencyConfig);
         env.storage().persistent().set(
             &DataKey::PayrollCurrencyConfig,
             &config,
         );
 
         env.events().publish((symbol_short!("currency"),), config);
+        record_config_change(
+            &env,
+            &admin,
+            config_keys::PAYROLL_CURRENCY,
+            no_value_ref(&env),
+            previous_ref,
+            stored_ref(&env, &DataKey::PayrollCurrencyConfig),
+        );
     }
 
     /// Get the configured payroll currency for this contract.
