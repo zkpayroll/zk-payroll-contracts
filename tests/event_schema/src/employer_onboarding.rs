@@ -5,7 +5,7 @@
 //! broader registry/salary_commitment domain fixtures so onboarding parsers
 //! can depend on a single, stable contract.
 
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events};
 use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, TryIntoVal, Val, Vec as SVec};
 
 use crate::support::{
@@ -153,7 +153,11 @@ fn employer_onboarding_event_order_is_stable() {
     });
 
     let events = env.events().all();
-    assert_eq!(events.len(), 3, "onboarding flow must emit exactly three events");
+    assert_eq!(
+        events.len(),
+        3,
+        "onboarding flow must emit exactly three events"
+    );
 
     let expected = [
         Symbol::new(&env, "CompanyRegistered"),

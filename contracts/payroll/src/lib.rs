@@ -576,6 +576,10 @@ pub enum DataKey {
     BatchSplitRecord(u64, u64),
     /// Aggregate batch split tracker per parent run (#352).
     BatchSplitTracker(u64),
+    /// Freeze guard for a finalized payroll period (#471). Presence of this
+    /// key blocks further payroll edits for the period until explicitly
+    /// unfrozen.
+    PeriodFreeze(Symbol),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -636,6 +640,31 @@ pub struct EmployerNonceSequenceState {
     pub last_accepted_at: u64,
     /// The nonce value from the last accepted payroll run.
     pub last_nonce: BytesN<32>,
+}
+
+// ?? Issue #471: payroll period freeze guard ??????????????????????????????????
+
+/// Freeze guard record for a finalized payroll period (#471).
+///
+/// Stored under `DataKey::PeriodFreeze(period_label)` while the period is
+/// frozen. The record intentionally contains no salary values or per-employee
+/// data — only who froze the period, when, why, and how many runs were
+/// accepted against it.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodFreeze {
+    /// Period label this freeze guards (matches the draft `period_label`).
+    pub period_label: Symbol,
+    /// Address that applied the freeze (admin, or the admin that submitted
+    /// the run which auto-froze the period).
+    pub frozen_by: Address,
+    /// Ledger timestamp when the freeze was applied.
+    pub frozen_at: u64,
+    /// Short operator label for the freeze (e.g. `finalized`, `manual`).
+    pub reason: Symbol,
+    /// Number of payroll runs that had been submitted for this period when
+    /// the freeze was applied.
+    pub runs_count: u32,
 }
 
 // ?? Issue #361: Compliance Evidence Pointer Validation ?????????????????????????
@@ -824,16 +853,17 @@ impl Payroll {
     }
 
     fn validate_draft_description(description: &String) {
-        let bytes = description.to_bytes();
-        if bytes.len() == 0 {
+        if description.is_empty() {
             panic!("Description cannot be blank");
         }
-        if bytes.len() > MAX_DRAFT_DESCRIPTION_BYTES {
+        if description.len() > MAX_DRAFT_DESCRIPTION_BYTES {
             panic!("Description exceeds 256 bytes");
         }
+        let mut bytes = [0u8; MAX_DRAFT_DESCRIPTION_BYTES as usize];
+        description.copy_into_slice(&mut bytes[..description.len() as usize]);
         let mut has_non_whitespace = false;
-        for byte in bytes.iter() {
-            if byte != 9 && byte != 10 && byte != 13 && byte != 32 {
+        for byte in bytes.iter().take(description.len() as usize) {
+            if byte != &9 && byte != &10 && byte != &13 && byte != &32 {
                 has_non_whitespace = true;
                 break;
             }
@@ -2202,12 +2232,15 @@ impl Payroll {
 
         let count = proofs.len();
 
-        if amounts.len() != count || employees.len() != count {
-            panic!("Array length mismatch");
+        // #390: a missing proof gets its own actionable error before the
+        // generic length check, so an empty batch is never reported as a
+        // mismatch.
+        if count == 0 {
+            panic!("Missing payroll proof: one proof is required per payment");
         }
 
-        if count == 0 {
-            panic!("Empty payroll batch");
+        if amounts.len() != count || employees.len() != count {
+            panic!("Array length mismatch");
         }
 
         assert!(count <= MAX_BATCH, "Batch too large");
@@ -2484,12 +2517,15 @@ impl Payroll {
         }
         let count = proofs.len();
 
-        if amounts.len() != count || employees.len() != count {
-            panic!("Array length mismatch");
+        // #390: a missing proof gets its own actionable error before the
+        // generic length check, so an empty batch is never reported as a
+        // mismatch.
+        if count == 0 {
+            panic!("Missing payroll proof: one proof is required per payment");
         }
 
-        if count == 0 {
-            panic!("Empty payroll batch");
+        if amounts.len() != count || employees.len() != count {
+            panic!("Array length mismatch");
         }
 
         assert!(count <= MAX_BATCH, "Batch too large");
@@ -2668,6 +2704,9 @@ impl Payroll {
             panic!("total_amount must be positive");
         }
 
+        // Issue #471: reject new payroll work for a frozen (finalized) period.
+        Self::require_period_not_frozen(&e, &period_label);
+
         // Issue #398: reject a duplicate draft for a period that already has
         // one pending. Cleared when the existing draft leaves Pending
         // (finalize/cancel/expire) — not wired into those paths in this
@@ -2729,6 +2768,8 @@ impl Payroll {
         if draft.state != RunDraftState::Pending {
             panic!("Only pending drafts can be amended");
         }
+        // Issue #471: a frozen period cannot receive draft edits.
+        Self::require_period_not_frozen(&e, &draft.period_label);
         Self::validate_draft_description(&description);
         e.storage()
             .persistent()
@@ -2772,6 +2813,8 @@ impl Payroll {
         if draft.state != RunDraftState::Pending {
             panic!("Only pending drafts can be amended");
         }
+        // Issue #471: a frozen period cannot receive draft edits.
+        Self::require_period_not_frozen(&e, &draft.period_label);
         if new_total_amount <= 0 {
             panic!("total_amount must be positive");
         }
@@ -2882,6 +2925,10 @@ impl Payroll {
             panic!("Draft is already finalized");
         }
 
+        // Issue #471: a frozen period cannot have its drafts locked in for
+        // submission; unfreeze first (authorized correction flow).
+        Self::require_period_not_frozen(&e, &draft.period_label);
+
         draft.state = RunDraftState::Finalized;
         e.storage()
             .persistent()
@@ -2939,10 +2986,44 @@ impl Payroll {
             panic!("Invalid draft state transition");
         }
 
+        // Issue #471: submitting a draft into an executable run is the act
+        // that finalizes the period — the freeze must be lifted (or never
+        // applied) before a run may be submitted against it.
+        Self::require_period_not_frozen(&e, &draft.period_label);
+
         draft.state = RunDraftState::Submitted;
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
+
+        // Issue #471 (follow-up to #398): clear the per-period slot — the
+        // draft has been consumed into a run and the period is about to be
+        // frozen, so nothing may create against it either way.
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDraftForPeriod(draft.period_label.clone()));
+
+        // Issue #471: the period is now final — auto-freeze it so no further
+        // payroll edits can slip in after submission without an explicit
+        // authorized unfreeze.
+        let freeze_key = DataKey::PeriodFreeze(draft.period_label.clone());
+        if !e.storage().persistent().has(&freeze_key) {
+            let freeze = PeriodFreeze {
+                period_label: draft.period_label.clone(),
+                frozen_by: admin.clone(),
+                frozen_at: e.ledger().timestamp(),
+                reason: Symbol::new(&e, "finalized"),
+                runs_count: Self::count_runs_for_period(&e, &draft.period_label),
+            };
+            e.storage().persistent().set(&freeze_key, &freeze);
+
+            payroll_events::emit_period_frozen(
+                &e,
+                draft.period_label.clone(),
+                admin.clone(),
+                Symbol::new(&e, "finalized"),
+            );
+        }
 
         payroll_events::emit_draft_submitted(&e, draft_id, admin);
     }
@@ -2978,6 +3059,14 @@ impl Payroll {
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
 
+        // Issue #471 (follow-up to #398): the draft has left Pending, so the
+        // per-period slot must be cleared or a later draft for the same
+        // period (e.g. during an unfrozen correction flow) would be
+        // incorrectly rejected as a duplicate.
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDraftForPeriod(draft.period_label.clone()));
+
         payroll_events::emit_draft_cancelled(&e, draft_id, admin);
     }
 
@@ -3010,6 +3099,12 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
+
+        // Issue #471 (follow-up to #398): clear the per-period slot so the
+        // period can receive a fresh draft after this terminal transition.
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDraftForPeriod(draft.period_label.clone()));
 
         payroll_events::emit_draft_expired(&e, draft_id, admin);
     }
@@ -3475,6 +3570,147 @@ impl Payroll {
     /// decision that should not be made while a run's outcome is still
     /// pending. To stop payroll immediately in an emergency, use the pause
     /// manager (always available) or cancel the specific pending run.
+    // ?? Issue #471: payroll period freeze guard ??????????????????????????????
+
+    /// Panic if the given payroll period is currently frozen (#471).
+    ///
+    /// Called by every state-mutating payroll edit path that must be blocked
+    /// once a period has been finalized (draft creation, amendment,
+    /// description updates, draft finalization, and draft submission).
+    fn require_period_not_frozen(e: &Env, period_label: &Symbol) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label.clone()))
+        {
+            panic!("Payroll period is frozen: it has been finalized and can no longer be edited");
+        }
+    }
+
+    /// Freeze a payroll period.
+    ///
+    /// Once frozen, no new drafts can be created for `period_label`, and
+    /// existing pending/finalized drafts for the period can no longer be
+    /// amended, described, finalized, or submitted. Cancelling or expiring a
+    /// draft remains possible as an operator escape hatch — those paths
+    /// remove pending payroll work instead of adding or changing it.
+    ///
+    /// Only the `admin` may freeze. Freezing an already-frozen period is
+    /// rejected so the audit trail stays unambiguous; use `unfreeze` first.
+    ///
+    /// Emits `period_frozen`.
+    pub fn freeze_payroll_period(e: Env, admin: Address, period_label: Symbol, reason: Symbol) {
+        Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        Self::validate_symbol_not_empty(&e, &reason, "reason");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let freeze_key = DataKey::PeriodFreeze(period_label.clone());
+        if e.storage().persistent().has(&freeze_key) {
+            panic!("Payroll period is already frozen");
+        }
+
+        let freeze = PeriodFreeze {
+            period_label: period_label.clone(),
+            frozen_by: admin.clone(),
+            frozen_at: e.ledger().timestamp(),
+            reason: reason.clone(),
+            runs_count: Self::count_runs_for_period(&e, &period_label),
+        };
+        e.storage().persistent().set(&freeze_key, &freeze);
+
+        payroll_events::emit_period_frozen(&e, period_label, admin, reason);
+    }
+
+    /// Lift the freeze on a payroll period (authorized correction flow).
+    ///
+    /// Only the `admin` may unfreeze. This is the sole path back to editing
+    /// after a freeze and should be used only for documented corrections; the
+    /// unfreeze event preserves the full audit trail.
+    ///
+    /// Emits `period_unfrozen`.
+    pub fn unfreeze_payroll_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let freeze_key = DataKey::PeriodFreeze(period_label.clone());
+        if !e.storage().persistent().has(&freeze_key) {
+            panic!("Payroll period is not frozen");
+        }
+
+        e.storage().persistent().remove(&freeze_key);
+
+        payroll_events::emit_period_unfrozen(&e, period_label, admin);
+    }
+
+    /// Return the freeze record for a period, if it is frozen.
+    pub fn get_period_freeze(e: Env, period_label: Symbol) -> Option<PeriodFreeze> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PeriodFreeze(period_label))
+    }
+
+    /// Return `true` if the payroll period is currently frozen.
+    pub fn is_period_frozen(e: Env, period_label: Symbol) -> bool {
+        e.storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label))
+    }
+
+    /// Count executed payroll runs whose metadata was bound to `period_label`
+    /// via `set_run_metadata` (#471).
+    ///
+    /// The on-chain run record only stores a `metadata_hash`, so this scan
+    /// recomputes the canonical period hash for the label and compares it to
+    /// each executed run's bound metadata hash. Runs never bound to this
+    /// period are not counted. The comparison is hash-only, so no salary
+    /// value is read or exposed; the scan cost is bounded by the total number
+    /// of executed runs.
+    fn count_runs_for_period(e: &Env, period_label: &Symbol) -> u32 {
+        let total = Self::get_run_counter(e.clone());
+        let expected = Self::hash_period_metadata(e, period_label);
+        let mut matched = 0u32;
+        for run_id in 1..=total {
+            if let Some(run) = e
+                .storage()
+                .persistent()
+                .get::<_, PayrollRun>(&DataKey::PayrollRun(run_id))
+            {
+                if run.metadata_hash == expected {
+                    matched += 1;
+                }
+            }
+        }
+        matched
+    }
+
+    /// Recompute the canonical period metadata hash for a label.
+    ///
+    /// Mirrors the documented off-chain binding formula (#177) restricted to
+    /// its period field: SHA-256 over `period:<label>`. The domain prefix
+    /// prevents a label from colliding with other metadata field types.
+    fn hash_period_metadata(e: &Env, period_label: &Symbol) -> BytesN<32> {
+        let mut bin = soroban_sdk::Bytes::new(e);
+        bin.extend_from_array(b"period:");
+        bin.append(&period_label.to_xdr(e));
+        e.crypto().sha256(&bin).into()
+    }
+
     pub fn set_company_state(e: Env, admin: Address, state: CompanyState) {
         let addrs: ContractAddresses = e
             .storage()
@@ -4588,9 +4824,12 @@ mod tests {
         let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
             setup_simple_payroll(&env);
 
-        let label = Symbol::new(&env, "Q1_2025");
-        let id1 = payroll_client.create_run_draft(&admin, &5_000i128, &10u32, &label);
-        let id2 = payroll_client.create_run_draft(&admin, &3_000i128, &5u32, &label);
+        // Distinct periods: the duplicate-period guard (#398) rejects a second
+        // Pending draft for the same period label.
+        let q1 = Symbol::new(&env, "Q1_2025");
+        let q2 = Symbol::new(&env, "Q2_2025");
+        let id1 = payroll_client.create_run_draft(&admin, &5_000i128, &10u32, &q1);
+        let id2 = payroll_client.create_run_draft(&admin, &3_000i128, &5u32, &q2);
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);

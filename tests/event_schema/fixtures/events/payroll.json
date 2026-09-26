@@ -204,6 +204,29 @@
       { "name": "admin", "type": "Address" }
     ]
   },
+  "payroll.period_frozen": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "period_frozen" }
+    ],
+    "data": [
+      { "name": "period_label", "type": "Symbol" },
+      { "name": "frozen_by", "type": "Address" },
+      { "name": "reason", "type": "Symbol" }
+    ]
+  },
+  "payroll.period_unfrozen": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "period_unfrozen" }
+    ],
+    "data": [
+      { "name": "period_label", "type": "Symbol" },
+      { "name": "unfrozen_by", "type": "Address" }
+    ]
+  },
   "payroll.reconciliation_updated": {
     "schema_version": 1,
     "topics": [
