@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 
 extern crate alloc;
 
@@ -111,6 +111,8 @@ pub enum DataKey {
     ApprovalThreshold(u64),
     /// Pending approval threshold rotation (issue #353).
     PendingThresholdRotation(u64),
+    /// Custom payout destination for a registered employee (issue #486).
+    PayoutDestination(u64, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +236,30 @@ pub trait PayrollRegistryTrait {
 
     /// Set the initial approval threshold when a company is registered (#353).
     fn set_initial_approval_threshold(env: Env, company_id: u64, admin: Address, required_approvals: u32);
+
+    // ── Issue #486: Employee Payout Destination Update Flow ────────────────
+
+    /// Update the payout destination address for a registered employee (#486).
+    /// Requires authorisation from the employee.
+    fn update_payout_destination(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination: Address,
+    );
+
+    /// Update the payout destination address from a Stellar wallet string (#486).
+    /// Requires authorisation from the employee.
+    fn update_payout_destination_wallet(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination_wallet: String,
+    );
+
+    /// Read an employee's payout destination address under a company (#486).
+    /// Returns the stored payout destination, or defaults to `employee` address if none set.
+    fn get_payout_destination(env: Env, company_id: u64, employee: Address) -> Address;
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +1009,74 @@ impl PayrollRegistryTrait for PayrollRegistry {
             (Symbol::new(&env, "InitialThresholdConfigured"), company_id),
             (required_approvals, env.ledger().timestamp()),
         );
+    }
+
+    // ── Issue #486: Employee Payout Destination Update Flow ────────────────
+
+    fn update_payout_destination(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination: Address,
+    ) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        // Only the employee themselves can update their own payout destination
+        employee.require_auth();
+
+        let current_dest = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+
+        if current_dest == new_destination {
+            panic!("Destination address is already on file");
+        }
+
+        let zero_wallet = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
+        if new_destination == Address::from_string(&zero_wallet) {
+            panic!("Cannot set zero address as payout destination");
+        }
+
+        env.storage().persistent().set(
+            &DataKey::PayoutDestination(company_id, employee.clone()),
+            &new_destination,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "PayoutDestinationUpdated"), company_id, employee),
+            (current_dest, new_destination),
+        );
+    }
+
+    fn update_payout_destination_wallet(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination_wallet: String,
+    ) {
+        Self::require_valid_employee_wallet_format(&new_destination_wallet);
+        let new_destination = Address::from_string(&new_destination_wallet);
+        Self::update_payout_destination(env, company_id, employee, new_destination);
+    }
+
+    fn get_payout_destination(env: Env, company_id: u64, employee: Address) -> Address {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayoutDestination(company_id, employee.clone()))
+            .unwrap_or(employee)
     }
 }
 

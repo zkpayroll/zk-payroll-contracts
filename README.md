@@ -132,6 +132,53 @@ payment_executor.process_payment(
 );
 ```
 
+### Employee Payout Destination Updates
+
+Employees can securely manage and update their payment receiving addresses:
+
+```rust
+// Update payout destination (requires employee authorization)
+payroll_registry.update_payout_destination(
+    company_id,
+    employee_address,
+    new_destination_address
+);
+
+// Update payout destination using wallet string (validates format/checksum)
+payroll_registry.update_payout_destination_wallet(
+    company_id,
+    employee_address,
+    wallet_string
+);
+
+// Retrieve current payout destination (defaults to employee address if unset)
+let destination = payroll_registry.get_payout_destination(company_id, employee_address);
+```
+
+**Key Guarantees:**
+- **Authorization**: Only the employee (`employee.require_auth()`) can modify their own destination.
+- **Validations**: Rejects zero-address (`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`), existing duplicate destination on file, or invalid Stellar wallet formatting.
+- **Isolation**: Pending/in-flight payroll runs retain their original snapshot parameters, isolating existing runs from destination updates.
+
+### Bounded Batch Payroll Processing
+
+Process large employee pools across multiple bounded transactions:
+
+```rust
+// Process a bounded batch (up to 50 employees per batch)
+let processed_count = payroll.batch_process_payroll_bounded(
+    company_id,
+    run_id,
+    batch_size // Max 50
+);
+```
+
+**Key Guarantees:**
+- **Hard Cap**: Strictly limits `batch_size <= 50` to prevent gas exhaustion and block limit failures.
+- **Progress Tracking**: Tracks `BatchCheckpoint` state (`processed_count` out of `total_count`). Resumption starts at `last_processed_index` without double payments.
+- **Halt-on-Error**: Halts and rolls back state atomically if any single employee payment or proof fails.
+- **Authorization**: Requires operator/admin authorization (`admin.require_auth()`). Rejects empty batch parameters.
+
 ### Compliance Audit
 
 ```rust
