@@ -2839,6 +2839,44 @@ impl Payroll {
         run_id
     }
 
+    /// Transfer the admin role of a pending payroll run to a new admin.
+    pub fn transfer_pending_run_admin(
+        e: Env,
+        current_admin: Address,
+        run_id: u64,
+        new_admin: Address,
+    ) {
+        Self::require_not_paused(&e);
+        Self::validate_run_id(run_id);
+        Self::require_run_not_disputed(&e, run_id);
+        
+        let pending_key = DataKey::PendingRun(run_id);
+        let mut pending_run: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .expect("Pending run not found");
+            
+        if pending_run.admin != current_admin {
+            panic!("Unauthorized: caller is not the pending run admin");
+        }
+        
+        current_admin.require_auth();
+        
+        if current_admin == new_admin {
+            panic!("Invalid transfer: new admin is the same as current admin");
+        }
+        
+        pending_run.admin = new_admin.clone();
+        
+        e.storage().persistent().set(&pending_key, &pending_run);
+        
+        e.events().publish(
+            (Symbol::new(&e, "payroll"), Symbol::new(&e, "run_admin_transferred")),
+            (run_id, current_admin, new_admin)
+        );
+    }
+
     /// Get a pending payroll run, if it exists.
     pub fn get_pending_run(e: Env, run_id: u64) -> Option<PendingPayrollRun> {
         e.storage().persistent().get(&DataKey::PendingRun(run_id))
