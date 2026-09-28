@@ -395,6 +395,91 @@ pub struct BatchSplitRecord {
 /// Default maximum validity age for reviewer approvals (7 days in seconds) (#403).
 pub const DEFAULT_APPROVAL_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+// ---- Issue #571: Payroll approval timestamp validation -----------------------
+
+/// Maximum ledger-clock skew (in seconds) an approval timestamp may carry into
+/// the future relative to the current ledger clock at validation time (#571).
+pub const MAX_APPROVAL_CLOCK_SKEW_SECONDS: u64 = 300;
+
+/// Maximum grace period (in seconds) between run preparation and a reviewer
+/// approval for that run (#571). An approval stamped after this window is
+/// rejected as stale: the run's preconditions may have drifted while it sat
+/// unapproved, so a long-parked approval must not be trusted to finalize it.
+pub const MAX_APPROVAL_LAG_SECONDS: u64 = 60 * 60 * 24 * 30;
+
+/// Privacy-safe view of the approval timestamp validation window for a run
+/// (#571). Exposes only identifiers and ledger timestamps — no payroll values.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalTimestampWindow {
+    /// The run the approval is attached to.
+    pub run_id: u64,
+    /// Ledger timestamp when the run was prepared.
+    pub prepared_at: u64,
+    /// Ledger timestamp when the reviewer approved the run.
+    pub approved_at: u64,
+    /// Maximum allowed lag between preparation and approval (seconds).
+    pub max_lag_seconds: u64,
+}
+
+// ---- Issue #573: Payer account status gate -----------------------------------
+
+/// Operating status of the payer account that funds payroll execution (#573).
+///
+/// A non-Active status blocks payment-executing operations. Absent status
+/// defaults to Active for backward compatibility with deployments created
+/// before this gate existed.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PayerAccountStatus {
+    /// Normal operating state; payroll execution permitted.
+    Active = 0,
+    /// Payments suspended; payroll execution rejected until reactivated.
+    Paused = 1,
+    /// Payer account decommissioned; no further payroll execution.
+    Archived = 2,
+    /// Payer account onboarding incomplete; execution not yet permitted.
+    Incomplete = 3,
+}
+
+/// Privacy-safe record of payer account status transitions (#573).
+///
+/// Deliberately contains no payroll values -- only the ledger timestamp of
+/// the last status change and how many changes have occurred, so off-chain
+/// tooling can detect status churn without exposing salary data.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PayerAccountStatusRecord {
+    /// Ledger timestamp of the last effective status change.
+    pub last_changed_at: u64,
+    /// Number of effective status changes since deployment.
+    pub change_count: u32,
+}
+
+// ---- Issue #572: Pending payroll obligations query ----------------------------
+
+/// Privacy-safe view of one pending payroll obligation (#572).
+///
+/// Mirrors the redaction rules of `CancelledBatchStatus` (#404) and
+/// `ExpiredRunRecord` (#474): only operational metadata -- identifiers,
+/// counts, timestamps, and reservation state -- is exposed. `total_amount`
+/// and any employee-level detail are deliberately omitted so dashboards can
+/// track outstanding obligations without leaking salary values.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingPayrollObligation {
+    /// The prepared-but-unresolved payroll run this obligation belongs to.
+    pub run_id: u64,
+    /// Ledger timestamp when the run was prepared.
+    pub prepared_at: u64,
+    /// Number of payments in the batch (metadata only).
+    pub employee_count: u32,
+    /// `true` while the treasury funds reservation (#343) for this run is
+    /// still outstanding in `LockedPayrollFunds`.
+    pub reservation_outstanding: bool,
+}
+
 // ?? Issue #474: Payroll Run Expiration ?????????????????????????????????????
 
 /// Expiry policy for prepared-but-not-finalized payroll runs (#474).
@@ -587,6 +672,16 @@ pub enum DataKey {
     ActiveDraftForPeriod(Symbol),
     /// Company lifecycle state gate for payroll execution (#147).
     CompanyState,
+    /// Payer account status gate for payment execution (#573). Absent means
+    /// Active for backward compatibility with pre-#573 deployments.
+    PayerAccountStatus,
+    /// Privacy-safe payer status transition record (#573).
+    PayerStatusTransition,
+    /// Receipt reference index: receipt reference -> run_id (#574). The
+    /// reference is an opaque commitment; no payroll values are stored.
+    ReceiptReference(BytesN<32>),
+    /// Auto-increment counter of indexed receipt references (#574).
+    ReceiptReferenceCounter,
     /// Canonical payroll run state for SDK/dashboard conformance (#159).
     PayrollState(u64),
     /// Allowed asset token map for payroll payouts.
@@ -807,6 +902,11 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::AllowedAsset(addrs.token.clone()), &true);
+        // Issue #573: payer account starts Active; the admin can restrict it
+        // later via `set_payer_account_status`.
+        e.storage()
+            .persistent()
+            .set(&DataKey::PayerAccountStatus, &PayerAccountStatus::Active);
         e.storage()
             .persistent()
             .set(&DataKey::TreasuryOwner, &treasury_owner);
@@ -2158,6 +2258,9 @@ impl Payroll {
         recipient: Address,
     ) {
         Self::require_not_paused(&e);
+        // Issue #573: emergency payouts also debit the payer treasury, so the
+        // payer account must be in good standing.
+        Self::require_payer_account_active(&e);
         if amount <= 0 {
             panic!("Amount must be positive");
         }
@@ -2215,6 +2318,10 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
+
+        // Issue #573: emergency payouts also debit the payer treasury, so the
+        // payer account must be in good standing.
+        Self::require_payer_account_active(&e);
 
         let request: EmergencyWithdrawalRequest = e
             .storage()
@@ -2296,6 +2403,7 @@ impl Payroll {
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
         Self::require_company_active(&e);
+        Self::require_payer_account_active(&e);
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "prepare_payroll_run");
 
@@ -2450,6 +2558,14 @@ impl Payroll {
         // run's preconditions (treasury balance, asset allowlist, roster)
         // cannot silently drift before settlement.
         Self::validate_run_not_expired(&e, run_id);
+
+        // Issue #571: enforce approval timestamp invariants when an approved
+        // review exists (future-skew, causality, freshness).
+        Self::validate_approval_timestamps(&e, run_id);
+
+        // Issue #573: finalization executes payments, so the payer account
+        // must be in good standing.
+        Self::require_payer_account_active(&e);
 
         // Issue #218: Check if run has already been finalized
         // Once a run is executed, it cannot be cancelled
@@ -2759,6 +2875,7 @@ impl Payroll {
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
         Self::require_company_active(&e);
+        Self::require_payer_account_active(&e);
 
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll");
@@ -3997,6 +4114,83 @@ impl Payroll {
             .unwrap_or(CompanyState::Active)
     }
 
+    // ---- Issue #573: Payer account status administration ----------------------
+
+    /// Set the payer account status (#573).
+    ///
+    /// Only the contract admin may call. A status change to any non-Active
+    /// value immediately blocks payment-executing operations
+    /// (`batch_process_payroll`, `prepare_payroll_run`,
+    /// `finalize_payroll_run`, emergency withdrawals). Transitions are
+    /// recorded in a privacy-safe counter record; no payroll values are
+    /// involved. A no-op transition (setting the same status) is accepted
+    /// and leaves the record untouched.
+    ///
+    /// # Panics
+    /// - If the caller is not the contract admin.
+    pub fn set_payer_account_status(e: Env, admin: Address, status: PayerAccountStatus) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let previous: PayerAccountStatus = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PayerAccountStatus)
+            .unwrap_or(PayerAccountStatus::Active);
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::PayerAccountStatus, &status);
+
+        if status != previous {
+            let mut record: PayerAccountStatusRecord = e
+                .storage()
+                .persistent()
+                .get(&DataKey::PayerStatusTransition)
+                .unwrap_or(PayerAccountStatusRecord {
+                    last_changed_at: 0,
+                    change_count: 0,
+                });
+            record.last_changed_at = e.ledger().timestamp();
+            record.change_count += 1;
+            e.storage()
+                .persistent()
+                .set(&DataKey::PayerStatusTransition, &record);
+        }
+
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "payer_status")),
+            status,
+        );
+    }
+
+    /// Read the current payer account status (#573). Returns `Active` when
+    /// no status has been explicitly set (backward-compatible default).
+    pub fn get_payer_account_status(e: Env) -> PayerAccountStatus {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PayerAccountStatus)
+            .unwrap_or(PayerAccountStatus::Active)
+    }
+
+    /// Read the privacy-safe payer status transition record (#573).
+    pub fn get_payer_account_status_record(e: Env) -> PayerAccountStatusRecord {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PayerStatusTransition)
+            .unwrap_or(PayerAccountStatusRecord {
+                last_changed_at: 0,
+                change_count: 0,
+            })
+    }
+
     // ?? Issue #146: archived payroll run queries ??????????????????????????????
 
     /// Mark a completed payroll run as archived for long-term reporting.
@@ -4165,6 +4359,12 @@ impl Payroll {
             panic!("Unauthorized: caller is not an authorized reviewer");
         }
         reviewer.require_auth();
+
+        // Issue #571: reject stale-approval attacks. An approval stamped too
+        // long after the run was prepared cannot be used to finalize a run
+        // whose preconditions may have drifted; approving also requires the
+        // run to actually exist in its pending state.
+        Self::validate_approval_prepared_at_window(&e, run_id);
 
         let review = RunReview {
             run_id,
@@ -4583,6 +4783,281 @@ impl Payroll {
         if Self::is_payroll_approval_expired(e.clone(), run_id, max_age_seconds) {
             panic!("Payroll approval expired: approval record exceeds maximum allowed age");
         }
+    }
+
+    // ---- Issue #571: Payroll approval timestamp validation -------------------
+
+    /// Read the approval timestamp validation window for a run (#571).
+    ///
+    /// Returns `None` when no approved review exists. Otherwise returns the
+    /// prepared-at timestamp of the backing run, the reviewer approval
+    /// timestamp, and the maximum lag in seconds the contract enforces.
+    /// Deliberately returns no salary values.
+    pub fn get_approval_timestamp_window(e: Env, run_id: u64) -> Option<ApprovalTimestampWindow> {
+        let review: RunReview = e.storage().persistent().get(&DataKey::RunReview(run_id))?;
+        if review.decision != ReviewDecision::Approved {
+            return None;
+        }
+        let pending: PendingPayrollRun =
+            e.storage().persistent().get(&DataKey::PendingRun(run_id))?;
+        Some(ApprovalTimestampWindow {
+            run_id,
+            prepared_at: pending.prepared_at,
+            approved_at: review.reviewed_at,
+            max_lag_seconds: MAX_APPROVAL_LAG_SECONDS,
+        })
+    }
+
+    /// Full approval timestamp validation (#571).
+    ///
+    /// When an approved review exists for `run_id`, this enforces three
+    /// timestamp invariants:
+    ///
+    /// 1. **Future-skew bound.** The approval must not be stamped more than
+    ///    `MAX_APPROVAL_CLOCK_SKEW_SECONDS` ahead of the current ledger clock.
+    /// 2. **Freshness (staleness) bound.** The approval must not be stamped
+    ///    more than `MAX_APPROVAL_LAG_SECONDS` after the run was prepared.
+    /// 3. **Causality.** The approval must not predate the run preparation;
+    ///    a reviewer can only approve an existing pending run.
+    ///
+    /// Runs without an approved review are unaffected, matching the optional
+    /// review workflow (#403).
+    ///
+    /// # Panics
+    /// - If the approval timestamp is too far in the future.
+    /// - If the approval was recorded more than `MAX_APPROVAL_LAG_SECONDS`
+    ///   after run preparation.
+    /// - If the approval predates the run preparation.
+    /// - If the approved run is no longer pending.
+    pub fn validate_approval_timestamps(e: &Env, run_id: u64) {
+        let review: RunReview = match e.storage().persistent().get(&DataKey::RunReview(run_id)) {
+            Some(review) => review,
+            None => return,
+        };
+        if review.decision != ReviewDecision::Approved {
+            return;
+        }
+        let pending: PendingPayrollRun = match e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRun(run_id))
+        {
+            Some(pending) => pending,
+            None => panic!(
+                "Approved payroll run is not pending: it must be finalized or resolved before payment"
+            ),
+        };
+
+        let now = e.ledger().timestamp();
+
+        if review.reviewed_at > now.saturating_add(MAX_APPROVAL_CLOCK_SKEW_SECONDS) {
+            panic!("Payroll approval timestamp is invalid: it is too far in the future");
+        }
+
+        if review.reviewed_at < pending.prepared_at {
+            panic!("Payroll approval timestamp is invalid: approval predates run preparation");
+        }
+
+        if review
+            .reviewed_at
+            .saturating_sub(pending.prepared_at)
+            .saturating_sub(MAX_APPROVAL_LAG_SECONDS)
+            > 0
+        {
+            panic!(
+                "Payroll approval timestamp is stale: it was recorded too long after run preparation"
+            );
+        }
+    }
+
+    /// Validate at approval time that the run being approved is a real,
+    /// currently-pending run whose preparation is not too far in the past
+    /// (#571). Called by `approve_payroll_run` before the review is stored.
+    fn validate_approval_prepared_at_window(e: &Env, run_id: u64) {
+        let pending: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRun(run_id))
+            .expect("Run not found: cannot approve a payroll run that is not pending");
+
+        let now = e.ledger().timestamp();
+
+        if pending.prepared_at > now.saturating_add(MAX_APPROVAL_CLOCK_SKEW_SECONDS) {
+            panic!("Run preparation timestamp is invalid: it is too far in the future");
+        }
+
+        if now.saturating_sub(pending.prepared_at) > MAX_APPROVAL_LAG_SECONDS {
+            panic!("Payroll approval window closed: run was prepared too long ago to approve");
+        }
+    }
+
+    // ---- Issue #573: Payer account status gate --------------------------------
+
+    /// Reject payment-executing operations while the payer account is not
+    /// `Active` (#573). Absent status defaults to `Active` for backward
+    /// compatibility with deployments created before this gate.
+    fn require_payer_account_active(e: &Env) {
+        if let Some(status) = e
+            .storage()
+            .persistent()
+            .get::<_, PayerAccountStatus>(&DataKey::PayerAccountStatus)
+        {
+            match status {
+                PayerAccountStatus::Active => {}
+                PayerAccountStatus::Paused => {
+                    panic!("Payer account is paused; payroll execution is not permitted")
+                }
+                PayerAccountStatus::Archived => {
+                    panic!("Payer account is archived; payroll execution is not permitted")
+                }
+                PayerAccountStatus::Incomplete => {
+                    panic!("Payer account setup is incomplete; payroll execution is not permitted")
+                }
+            }
+        }
+    }
+
+    // ---- Issue #572: Pending payroll obligations query ------------------------
+
+    /// Enumerate pending payroll obligations (#572).
+    ///
+    /// Returns at most `limit` obligations starting at 1-based offset `offset`
+    /// (run IDs are sequential starting at 1). Each entry contains only
+    /// privacy-safe metadata; amounts and employee addresses are omitted.
+    /// Returns the remaining count of pending runs beyond this page.
+    pub fn get_pending_payroll_obligations(
+        e: Env,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<PendingPayrollObligation>, u32) {
+        if limit == 0 {
+            panic!("Limit must be positive");
+        }
+
+        let mut out = Vec::new(&e);
+
+        let reservation_outstanding = e
+            .storage()
+            .persistent()
+            .get::<_, i128>(&DataKey::LockedPayrollFunds(
+                Self::get_addresses(e.clone()).token,
+            ))
+            .unwrap_or(0)
+            > 0;
+
+        let mut pending_seen: u32 = 0;
+        let max_run_id: u64 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunCounter)
+            .unwrap_or(0);
+
+        let mut run_id: u64 = 1;
+        while run_id <= max_run_id {
+            if let Some(pending) = e
+                .storage()
+                .persistent()
+                .get::<_, PendingPayrollRun>(&DataKey::PendingRun(run_id))
+            {
+                if pending_seen >= offset && out.len() < limit {
+                    out.push_back(PendingPayrollObligation {
+                        run_id,
+                        prepared_at: pending.prepared_at,
+                        employee_count: pending.employee_count,
+                        reservation_outstanding,
+                    });
+                }
+                pending_seen += 1;
+            }
+            run_id += 1;
+        }
+
+        // Pending obligations beyond this page (metadata only, never amounts).
+        let remaining = pending_seen
+            .saturating_sub(offset)
+            .saturating_sub(out.len());
+        (out, remaining)
+    }
+
+    // ---- Issue #574: Payroll receipt reference indexing -----------------------
+
+    /// Bind an opaque receipt reference to a finalized payroll run (#574).
+    ///
+    /// Only the contract admin (the payer of record) may index references.
+    /// The reference must be a non-zero 32-byte commitment and the run must
+    /// exist as a completed `PayrollRun`; pending runs cannot receive receipt
+    /// references. Duplicate references are rejected so that one reference
+    /// always resolves to exactly one run (deduplicated lookup index). The
+    /// reference is stored as an opaque hash — no salary values or employee
+    /// identifiers are written on-chain.
+    ///
+    /// # Panics
+    /// - If the caller is not the contract admin.
+    /// - If `receipt_reference` is all-zero bytes.
+    /// - If the run does not exist or is still pending.
+    /// - If the reference has already been bound to a run.
+    pub fn index_receipt_reference(
+        e: Env,
+        admin: Address,
+        run_id: u64,
+        receipt_reference: BytesN<32>,
+    ) {
+        Self::validate_run_id(run_id);
+        Self::validate_non_zero_digest(&e, &receipt_reference, "receipt_reference");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if e.storage().persistent().has(&DataKey::PendingRun(run_id)) {
+            panic!("Cannot index a receipt reference for a pending payroll run");
+        }
+        if !e.storage().persistent().has(&DataKey::PayrollRun(run_id)) {
+            panic!("Run not found");
+        }
+        let ref_key = DataKey::ReceiptReference(receipt_reference.clone());
+        if e.storage().persistent().get::<_, u64>(&ref_key).is_some() {
+            panic!("Duplicate receipt reference: already bound to a payroll run");
+        }
+
+        e.storage().persistent().set(&ref_key, &run_id);
+
+        let counter: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ReceiptReferenceCounter)
+            .unwrap_or(0u32);
+        e.storage()
+            .persistent()
+            .set(&DataKey::ReceiptReferenceCounter, &(counter + 1));
+    }
+
+    /// Resolve an opaque receipt reference to its payroll run ID (#574).
+    pub fn get_run_by_receipt_reference(e: Env, receipt_reference: BytesN<32>) -> Option<u64> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ReceiptReference(receipt_reference))
+    }
+
+    /// Return `true` if the opaque receipt reference has already been bound
+    /// to a payroll run (#574).
+    pub fn has_receipt_reference(e: Env, receipt_reference: BytesN<32>) -> bool {
+        e.storage()
+            .persistent()
+            .has(&DataKey::ReceiptReference(receipt_reference))
+    }
+
+    /// Number of receipt references indexed so far (#574).
+    pub fn get_receipt_reference_count(e: Env) -> u32 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ReceiptReferenceCounter)
+            .unwrap_or(0u32)
     }
 
     // ?? Issue #404: Cancelled Batch Read Status Helper ???????????????????????
