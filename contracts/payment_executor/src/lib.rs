@@ -16,6 +16,13 @@ use soroban_sdk::{
 /// Proofs must be submitted within this window to prevent replay attacks using stale proofs.
 const MAX_PROOF_AGE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+/// Hard upper cap on payout batch size (issue #510).
+///
+/// This is the absolute ceiling enforced by the contract regardless of any
+/// admin-configured limit. It prevents runaway resource consumption from
+/// oversized submissions even when no per-company policy has been set.
+const MAX_PAYOUT_BATCH_SIZE: u32 = 100;
+
 /// Payment record
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -87,6 +94,10 @@ pub enum PaymentError {
     /// A settlement receipt was already processed. Receipt IDs are globally
     /// unique across all companies and periods (issue #551).
     SettlementReceiptAlreadyUsed = 17,
+    /// The batch employee count exceeds the configured payout batch size limit
+    /// for this company, or the hard contract cap (issue #510).
+    /// Error paths never expose employee addresses or salary amounts.
+    BatchTooLarge = 18,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -180,6 +191,10 @@ pub enum DataKey {
     /// Settlement receipt presence marker (issue #551). A receipt ID may be
     /// used at most once across the entire contract.
     SettlementReceipt(BytesN<32>),
+    /// Per-company payout batch size limit (issue #510).
+    /// Stores the maximum number of employees allowed in a single
+    /// execute_batch_payroll call for this company.
+    MaxBatchSize(u64),
 }
 
 #[contract]
@@ -886,6 +901,18 @@ impl PaymentExecutor {
             return Err(PaymentError::EmptyBatch);
         }
 
+        // Issue #510: enforce payout batch size limit.
+        // Check the company-specific limit first (if set), then fall back to
+        // the hard contract cap. The error carries no employee data.
+        let effective_limit = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::MaxBatchSize(company_id))
+            .unwrap_or(MAX_PAYOUT_BATCH_SIZE);
+        if count > effective_limit {
+            return Err(PaymentError::BatchTooLarge);
+        }
+
         let mut records = soroban_sdk::Vec::new(&env);
 
         for i in 0..count {
@@ -965,6 +992,60 @@ impl PaymentExecutor {
             .persistent()
             .has(&DataKey::SettlementReceipt(receipt_id))
     }
+
+    // ── Issue #510: payout batch size configuration ───────────────────────────
+
+    /// Set the maximum number of employees allowed per `execute_batch_payroll`
+    /// call for a given company.
+    ///
+    /// Only the executor admin may call this. `max_size` must be at least 1 and
+    /// may not exceed the hard contract cap (`MAX_PAYOUT_BATCH_SIZE = 100`).
+    /// Setting it to 0 is rejected with an actionable panic so callers get a
+    /// clear error rather than a silent no-op.
+    ///
+    /// The configured value is stored as non-sensitive operational metadata;
+    /// no employee addresses or salary amounts are involved.
+    pub fn set_max_batch_size(env: Env, company_id: u64, max_size: u32) {
+        // Only the executor admin may change batch-size policy.
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+
+        if max_size == 0 {
+            panic!("Payout batch size limit must be at least 1 (issue #510)");
+        }
+        if max_size > MAX_PAYOUT_BATCH_SIZE {
+            panic!(
+                "Payout batch size limit exceeds the hard contract cap of {} (issue #510)",
+                MAX_PAYOUT_BATCH_SIZE
+            );
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxBatchSize(company_id), &max_size);
+
+        env.events().publish(
+            (Symbol::new(&env, "PayoutBatchSizeLimitSet"), company_id),
+            max_size,
+        );
+    }
+
+    /// Return the effective payout batch size limit for a company.
+    ///
+    /// Returns the company-specific limit when one has been configured, or the
+    /// hard contract cap (`MAX_PAYOUT_BATCH_SIZE`) when no policy has been set.
+    /// This value is the exact threshold enforced by `execute_batch_payroll`.
+    pub fn get_max_batch_size(env: Env, company_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::MaxBatchSize(company_id))
+            .unwrap_or(MAX_PAYOUT_BATCH_SIZE)
+    }
+
     /// Get payment record
     pub fn get_payment(env: Env, employee: Address, period: u32) -> PaymentRecord {
         let key = DataKey::Payment(employee, period);

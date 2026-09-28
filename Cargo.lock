@@ -2202,6 +2202,7 @@ dependencies = [
 name = "payroll"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "pause_manager",
  "payroll_events",
  "payroll_registry",

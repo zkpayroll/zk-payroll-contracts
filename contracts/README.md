@@ -259,6 +259,69 @@ Three token transfers are issued from the company treasury:
 
 ---
 
+## Payout batch size limits (issue #510)
+
+`execute_batch_payroll` enforces a configurable per-company ceiling on the
+number of employees in a single batch. This prevents oversized payroll
+submissions from exhausting on-chain resources and causing unintended
+cost spikes.
+
+### Hard cap
+
+The contract always enforces a hard ceiling of **100 employees per batch**
+(`MAX_PAYOUT_BATCH_SIZE`). This cap applies even when no per-company policy
+has been configured. It cannot be raised via any admin call.
+
+### Per-company policy
+
+The executor admin can set a tighter limit per company:
+
+```bash
+stellar contract invoke \
+  --id "$EXECUTOR_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- set_max_batch_size \
+    --company_id 0 \
+    --max_size 25
+```
+
+Read the current effective limit back:
+
+```bash
+stellar contract invoke \
+  --id "$EXECUTOR_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- get_max_batch_size \
+    --company_id 0
+```
+
+| Field | Description |
+|-------|-------------|
+| `company_id` | Numeric company ID (returned by `register_company`). |
+| `max_size` | Maximum employees per batch (1–100 inclusive). |
+
+### Behaviour
+
+- When no policy is configured the effective limit is the hard cap (100).
+- `max_size = 0` is rejected; `max_size > 100` is rejected.
+- Limits are scoped per company; changing one company's limit does not
+  affect another.
+- Batches that exceed the limit are rejected immediately with
+  `PaymentError::BatchTooLarge` (error code 18). The error carries no
+  employee addresses or salary amounts, keeping failure paths privacy-safe.
+- `execute_batch_payroll_with_receipt` enforces the same limit as
+  `execute_batch_payroll`.
+
+### Error reference
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `BatchTooLarge` | 18 | Employee count exceeds the configured or default batch size limit. |
+
+---
+
 ## Related guides
 
 | Guide | When to use it |
