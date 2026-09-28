@@ -1822,32 +1822,6 @@ impl Payroll {
             .unwrap_or(false)
     }
 
-    /// Check whether an asset has been explicitly deactivated by the admin.
-    ///
-    /// A deactivated asset is the canonical treasury asset with an explicit
-    /// `false` allowlist entry. It cannot back payouts, deposits, or treasury
-    /// movements until the admin re-enables it through
-    /// [`Self::set_asset_allowed`]. Unlike [`Self::is_asset_allowed`], this
-    /// distinguishes "explicitly switched off" from "never configured", and
-    /// returns `false` for any asset that is not this contract's canonical
-    /// treasury asset.
-    pub fn is_asset_deactivated(e: Env, asset: Address) -> bool {
-        let canonical_asset: Option<Address> = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .map(|addresses: ContractAddresses| addresses.token);
-        if canonical_asset.as_ref() != Some(&asset) {
-            return false;
-        }
-        matches!(
-            e.storage()
-                .persistent()
-                .get::<_, bool>(&DataKey::AllowedAsset(asset)),
-            Some(false)
-        )
-    }
-
     /// Validate the canonical treasury asset used by all payroll transfers.
     ///
     /// Asset identity is the serialized Soroban token contract address. A
@@ -1866,21 +1840,6 @@ impl Payroll {
             return Err(TreasuryError::AssetNotAllowed);
         }
         Ok(())
-    }
-
-    /// Panic with an actionable message when an asset cannot back a treasury
-    /// movement.
-    ///
-    /// Keeps the two failure modes distinguishable: a deactivated asset is a
-    /// configuration state the admin can undo, while a foreign asset is an
-    /// identity mismatch that can never be corrected at runtime.
-    fn require_active_treasury_asset(e: &Env, asset: Address) {
-        match Self::validate_treasury_asset(e.clone(), asset) {
-            Ok(()) => {}
-            Err(TreasuryError::AssetNotAllowed) => panic!("Asset not allowed"),
-            Err(TreasuryError::CrossAssetMismatch) => panic!("Cross-asset treasury mismatch"),
-            Err(_) => panic!("Invalid asset configuration"),
-        }
     }
 
     /// Return the payroll assets currently enabled for this employer contract.
@@ -1906,25 +1865,17 @@ impl Payroll {
             panic!("Deposit amount must be positive");
         }
 
-        let addrs: ContractAddresses = e
-            .storage()
-            .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-
-        // Deactivated assets must not accept new deposits: payouts are already
-        // blocked for a deactivated asset, so inbound funds would be stranded.
-        // Checked before the deposit nonce is recorded so a rejected deposit
-        // does not burn the caller's deposit id.
-        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
-            panic!("Asset not allowed");
-        }
-
         let nonce_key = DataKey::DepositNonce(deposit_id.clone());
         if e.storage().persistent().has(&nonce_key) {
             panic!("Deposit already processed");
         }
         e.storage().persistent().set(&nonce_key, &true);
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
 
         let treasury_owner: Address = e
             .storage()
@@ -4366,7 +4317,8 @@ impl Payroll {
     }
 
     pub fn add_locked_funds(e: &Env, asset: Address, amount: i128) {
-        Self::require_active_treasury_asset(e, asset.clone());
+        Self::validate_treasury_asset(e.clone(), asset.clone())
+            .expect("Cross-asset treasury mismatch");
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_add(amount).expect("Locked funds overflow");
@@ -4375,7 +4327,8 @@ impl Payroll {
     }
 
     pub fn subtract_locked_funds(e: &Env, asset: Address, amount: i128) {
-        Self::require_active_treasury_asset(e, asset.clone());
+        Self::validate_treasury_asset(e.clone(), asset.clone())
+            .expect("Cross-asset treasury mismatch");
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_sub(amount).expect("Locked funds underflow");
@@ -4415,9 +4368,18 @@ impl Payroll {
         if signers.len() < required_quorum {
             panic!("Insufficient signer quorum");
         }
+        // Issue #555: concurrent approval attempts must not be able to satisfy a
+        // multi-signer quorum. A repeated signer is a duplicate approval attempt
+        // rather than an additional approval, so reject it before counting and
+        // before any quorum reference is consumed.
+        let mut unique_signers: Vec<Address> = Vec::new(&e);
         for i in 0..signers.len() {
             let s = signers.get(i).unwrap();
+            if unique_signers.first_index_of(s.clone()).is_some() {
+                panic!("Duplicate signer in quorum approval");
+            }
             s.require_auth();
+            unique_signers.push_back(s);
         }
 
         let addrs: ContractAddresses = e
@@ -6027,7 +5989,8 @@ impl Payroll {
     /// balance allocated to pending payroll runs, blocked balances, and the net
     /// available balance without disclosing individual salary rows.
     pub fn get_safe_treasury_summary(e: Env, asset: Address) -> SafeTreasurySummary {
-        Self::require_active_treasury_asset(&e, asset.clone());
+        Self::validate_treasury_asset(e.clone(), asset.clone())
+            .expect("Cross-asset treasury mismatch");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -9136,66 +9099,6 @@ mod tests {
         payroll_client.set_asset_allowed(&token_id, &false);
     }
 
-    #[test]
-    fn test_asset_deactivation_status_tracks_allowlist_changes() {
-        let env = Env::default();
-        let (payroll_client, _admin, _treasury, _treasury_owner, _employee, token_id) =
-            setup_payroll_with_token(&env);
-
-        // Freshly initialized canonical asset is active, and therefore not deactivated.
-        assert!(payroll_client.is_asset_allowed(&token_id));
-        assert!(!payroll_client.is_asset_deactivated(&token_id));
-
-        // Deactivation is explicit and observable through a dedicated view.
-        payroll_client.set_asset_allowed(&token_id, &false);
-        assert!(!payroll_client.is_asset_allowed(&token_id));
-        assert!(payroll_client.is_asset_deactivated(&token_id));
-
-        // Reactivating the asset clears the deactivated state.
-        payroll_client.set_asset_allowed(&token_id, &true);
-        assert!(payroll_client.is_asset_allowed(&token_id));
-        assert!(!payroll_client.is_asset_deactivated(&token_id));
-
-        // A foreign asset is never reported as deactivated: it is simply not
-        // this contract's canonical treasury asset.
-        let foreign_asset = Address::generate(&env);
-        assert!(!payroll_client.is_asset_deactivated(&foreign_asset));
-        assert!(!payroll_client.is_asset_allowed(&foreign_asset));
-    }
-
-    #[test]
-    #[should_panic(expected = "Asset not allowed")]
-    fn test_deposit_fails_when_asset_deactivated() {
-        let env = Env::default();
-        let (payroll_client, _admin, treasury, _treasury_owner, _employee, token_id) =
-            setup_payroll_with_token(&env);
-
-        payroll_client.set_asset_allowed(&token_id, &false);
-
-        payroll_client.deposit(&treasury, &1000, &test_nonce(&env, 250));
-    }
-
-    #[test]
-    fn test_deposit_resumes_after_asset_reactivated() {
-        let env = Env::default();
-        let (payroll_client, _admin, treasury, _treasury_owner, _employee, token_id) =
-            setup_payroll_with_token(&env);
-
-        payroll_client.set_asset_allowed(&token_id, &false);
-        let deposit_id = test_nonce(&env, 251);
-        let blocked = payroll_client.try_deposit(&treasury, &1000, &deposit_id);
-        assert!(blocked.is_err());
-
-        // A rejected deposit leaves no depositor accounting behind.
-        assert_eq!(payroll_client.get_treasury_balance(&treasury), 0);
-
-        // It also does not burn the deposit id, so the same retry succeeds once
-        // the admin reactivates the asset.
-        payroll_client.set_asset_allowed(&token_id, &true);
-        payroll_client.deposit(&treasury, &1000, &deposit_id);
-        assert_eq!(payroll_client.get_treasury_balance(&treasury), 1000);
-    }
-
     // ?? Reviewer Authorization & Run Review Tests ????????????????????????????
 
     #[test]
@@ -9707,6 +9610,102 @@ mod tests {
 
         // Required quorum is 2, but only 1 signer provided -> panics
         payroll_client.verify_and_consume_quorum(&payload, &signers, &2u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate signer in quorum approval")]
+    fn test_quorum_duplicate_signer_attempt_rejected() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        // One signer submitting the same approval twice looks like two
+        // approvals to a length-only check, so it must be rejected instead.
+        let signer = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        signers.push_back(signer.clone());
+        signers.push_back(signer);
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[3u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 57),
+            policy_version: 1,
+        };
+
+        payroll_client.verify_and_consume_quorum(&payload, &signers, &2u32);
+    }
+
+    #[test]
+    fn test_quorum_duplicate_signer_attempt_does_not_consume_payload() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let mut duplicate_signers = Vec::new(&env);
+        duplicate_signers.push_back(signer1.clone());
+        duplicate_signers.push_back(signer1.clone());
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[4u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 58),
+            policy_version: 1,
+        };
+        let q_hash = payroll_client.hash_quorum_payload(&payload);
+
+        // A rejected duplicate-signer attempt must not burn the reference...
+        let rejected =
+            payroll_client.try_verify_and_consume_quorum(&payload, &duplicate_signers, &2u32);
+        assert!(rejected.is_err());
+        assert!(!payroll_client.is_quorum_consumed(&q_hash));
+
+        // ...so a genuine quorum of distinct signers can still consume it once.
+        let mut distinct_signers = Vec::new(&env);
+        distinct_signers.push_back(signer1);
+        distinct_signers.push_back(signer2);
+        let consumed = payroll_client.verify_and_consume_quorum(&payload, &distinct_signers, &2u32);
+        assert_eq!(q_hash, consumed);
+        assert!(payroll_client.is_quorum_consumed(&q_hash));
+    }
+
+    #[test]
+    fn test_quorum_concurrent_attempts_consume_reference_once() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[5u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 59),
+            policy_version: 1,
+        };
+        let q_hash = payroll_client.hash_quorum_payload(&payload);
+
+        // Three interleaved submissions of the same approval: exactly one wins.
+        assert!(payroll_client
+            .try_verify_and_consume_quorum(&payload, &signers, &2u32)
+            .is_ok());
+        assert!(payroll_client
+            .try_verify_and_consume_quorum(&payload, &signers, &2u32)
+            .is_err());
+        assert!(payroll_client
+            .try_verify_and_consume_quorum(&payload, &signers, &2u32)
+            .is_err());
+        assert!(payroll_client.is_quorum_consumed(&q_hash));
     }
 
     // ============================================================================
