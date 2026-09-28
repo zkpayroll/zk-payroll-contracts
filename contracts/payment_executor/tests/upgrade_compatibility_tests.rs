@@ -135,6 +135,19 @@ fn open_company(env: &Env, ctx: &Executor, treasury_balance: i128) -> u64 {
     let company_id = ctx.registry.register_company(&admin, &treasury);
     let _ = ctx.executor.create_period(&company_id);
     ctx.token.mint(&treasury, &treasury_balance);
+
+    // Issue #538: set zero-rate withholding config so execute_payment is unblocked
+    let tax_addr = Address::generate(env);
+    ctx.executor.set_withholding_config(
+        &company_id,
+        &0u32,
+        &0u32,
+        &tax_addr,
+        &tax_addr,
+        &0i128,
+        &0i128,
+    );
+
     company_id
 }
 
@@ -143,7 +156,8 @@ fn register_employee(ctx: &Executor, env: &Env, company_id: u64, seed: u8) -> Ad
     let employee = Address::generate(env);
     let commitment = BytesN::from_array(env, &[seed; 32]);
     ctx.commitment.store_commitment(&employee, &commitment);
-    ctx.registry.add_employee(&company_id, &employee, &commitment);
+    ctx.registry
+        .add_employee(&company_id, &employee, &commitment);
     employee
 }
 
@@ -256,8 +270,16 @@ fn test_check_upgrade_compatibility_is_read_only() {
     // The payroll workflow continues normally after the check.
     let employee_2 = register_employee(&ctx, &env, company_id, 22);
     let (pa2, pb2, pc2, null2) = make_proof(&env, 22);
-    ctx.executor
-        .execute_payment(&company_id, &employee_2, &20_000, &pa2, &pb2, &pc2, &null2, &1);
+    ctx.executor.execute_payment(
+        &company_id,
+        &employee_2,
+        &20_000,
+        &pa2,
+        &pb2,
+        &pc2,
+        &null2,
+        &1,
+    );
 
     assert_eq!(ctx.executor.get_total_paid(&company_id), 50_000);
     assert!(ctx.executor.is_paid(&employee_2, &1));

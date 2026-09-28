@@ -12,7 +12,7 @@ testnet/mainnet deployment.
 | `payroll_registry` | Company registration and employee roster |
 | `salary_commitment` | Poseidon salary commitments and nullifiers |
 | `proof_verifier` | On-chain Groth16 verification |
-| `payment_executor` | Private payment execution |
+| `payment_executor` | Private payment execution with withholding validation |
 | `payroll` | Payroll run lifecycle and treasury |
 | `pause_manager` | Global pause / unpause control |
 | `audit_module` | Compliance and selective disclosure |
@@ -189,6 +189,73 @@ test suite.
 1. Ensure `node` is **not** on `PATH` (or rename temporarily)
 2. Run integration proof helper tests
 3. **Expected:** tests skip with a warning about Node.js; other tests still pass
+
+---
+
+## Withholding configuration (`payment_executor` — issue #538)
+
+Every company must have a `WithholdingConfig` set before payments can be executed.
+This ensures clear operational states and prevents silent no-op payroll flows.
+
+### Overview
+
+`WithholdingConfig` stores per-company tax deduction rates and recipient addresses.
+Rates are expressed in **basis points** (bps): `10 000 bps = 100 %`.
+Sensitive salary values are never stored in the config — only rate parameters and
+recipient wallet addresses.
+
+### Setting up withholding (executor admin only)
+
+```bash
+stellar contract invoke \
+  --id "$EXECUTOR_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- set_withholding_config \
+    --company_id 0 \
+    --income_tax_bps 1000 \
+    --social_tax_bps 500 \
+    --income_tax_recipient "$TAX_AUTHORITY_ADDR" \
+    --social_tax_recipient "$SOCIAL_FUND_ADDR" \
+    --max_gross_per_payment 0 \
+    --min_net_per_payment 0
+```
+
+| Field | Description |
+|-------|-------------|
+| `income_tax_bps` | Income-tax rate in bps (e.g. `1000` = 10 %). |
+| `social_tax_bps` | Social/statutory-tax rate in bps (e.g. `500` = 5 %). |
+| `income_tax_recipient` | Wallet address that receives withheld income tax. |
+| `social_tax_recipient` | Wallet address that receives withheld social tax. |
+| `max_gross_per_payment` | Per-payment gross cap (0 = no cap). |
+| `min_net_per_payment` | Per-payment net floor; rejected if net falls below this (0 = no floor). |
+
+The combined `income_tax_bps + social_tax_bps` must not exceed `10 000`; an
+`InvalidWithholdingRate` error is returned otherwise.
+
+### How payments are split
+
+When `execute_payment` runs, the gross `amount` from the ZK proof is split on-chain:
+
+```
+net_amount   = gross_amount - income_tax - social_tax
+income_tax   = gross_amount × income_tax_bps / 10 000
+social_tax   = gross_amount × social_tax_bps / 10 000
+```
+
+Three token transfers are issued from the company treasury:
+1. `net_amount` → employee
+2. `income_tax` → `income_tax_recipient` (skipped when zero)
+3. `social_tax` → `social_tax_recipient` (skipped when zero)
+
+### Error reference
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `WithholdingConfigMissing` | 13 | No config set for this company. |
+| `InvalidWithholdingRate` | 14 | Combined bps > 10 000 or negative cap/floor. |
+| `NetAmountBelowMinimum` | 15 | Net after deductions < `min_net_per_payment`. |
+| `GrossAmountExceedsCap` | 16 | Gross amount > `max_gross_per_payment`. |
 
 ---
 

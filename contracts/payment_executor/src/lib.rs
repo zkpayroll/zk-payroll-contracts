@@ -76,6 +76,14 @@ pub enum PaymentError {
     CrossAssetMismatch = 11,
     /// The supplied asset uses a different issuer/token contract.
     AssetIssuerMismatch = 12,
+    /// Withholding configuration is missing for this company (issue #538).
+    WithholdingConfigMissing = 13,
+    /// The total withholding rate exceeds 100% (sum of all basis points > 10 000) (issue #538).
+    InvalidWithholdingRate = 14,
+    /// The net amount after withholding would fall below the configured per-payment minimum (issue #538).
+    NetAmountBelowMinimum = 15,
+    /// The gross amount exceeds the per-payment cap configured for this company (issue #538).
+    GrossAmountExceedsCap = 16,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -114,6 +122,39 @@ pub struct ContractAddresses {
     pub token: Address,
 }
 
+// ── Issue #538: Payroll withholding configuration ──────────────────────────
+
+/// Per-company withholding configuration for payroll deductions (issue #538).
+///
+/// Rates are expressed as basis points (bps), where 10 000 bps = 100%.
+/// The sum of all rate fields must not exceed 10 000.
+///
+/// Sensitive salary values are **never** stored here; the struct holds only
+/// rate parameters and recipient addresses, which are non-sensitive operational
+/// metadata.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WithholdingConfig {
+    /// Company this configuration applies to.
+    pub company_id: u64,
+    /// Income-tax withholding rate in basis points (0–10 000).
+    pub income_tax_bps: u32,
+    /// Statutory / social-tax withholding rate in basis points (0–10 000).
+    pub social_tax_bps: u32,
+    /// Destination address for withheld income tax (e.g. tax-authority wallet).
+    pub income_tax_recipient: Address,
+    /// Destination address for withheld social / statutory tax.
+    pub social_tax_recipient: Address,
+    /// Maximum gross amount allowed per individual payment (0 = no cap).
+    pub max_gross_per_payment: i128,
+    /// Minimum net amount that must reach the employee after deductions (0 = no floor).
+    pub min_net_per_payment: i128,
+    /// Ledger timestamp when this configuration was last set.
+    pub configured_at: u64,
+    /// Address that set this configuration (executor admin).
+    pub configured_by: Address,
+}
+
 /// Storage keys
 #[contracttype]
 pub enum DataKey {
@@ -131,6 +172,8 @@ pub enum DataKey {
     StorageVersion,
     /// Asset decimal configuration for proper amount normalization (issue #354)
     AssetDecimals(Address),
+    /// Per-company withholding configuration (issue #538)
+    WithholdingConfig(u64),
 }
 
 #[contract]
@@ -259,10 +302,7 @@ impl PaymentExecutor {
     /// Validate the canonical token contract used for every executor transfer.
     /// A token contract address is the canonical serialized asset identity;
     /// another address cannot consume this treasury's reserves.
-    pub fn validate_treasury_asset(
-        env: Env,
-        asset: Address,
-    ) -> Result<(), TreasuryError> {
+    pub fn validate_treasury_asset(env: Env, asset: Address) -> Result<(), TreasuryError> {
         let addresses: ContractAddresses = env
             .storage()
             .persistent()
@@ -342,15 +382,15 @@ impl PaymentExecutor {
             return Err(StorageError::StorageVersionMismatch);
         }
 
-        let treasury_asset_allowed =
-            env.storage()
-                .persistent()
-                .get(&DataKey::AllowedAsset(addresses.token.clone()))
-                .unwrap_or(false);
-        let treasury_asset_decimals_configured =
-            env.storage()
-                .persistent()
-                .has(&DataKey::AssetDecimals(addresses.token));
+        let treasury_asset_allowed = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllowedAsset(addresses.token.clone()))
+            .unwrap_or(false);
+        let treasury_asset_decimals_configured = env
+            .storage()
+            .persistent()
+            .has(&DataKey::AssetDecimals(addresses.token));
 
         if !treasury_asset_allowed || !treasury_asset_decimals_configured {
             return Err(StorageError::StorageCorruption);
@@ -398,6 +438,114 @@ impl PaymentExecutor {
             .persistent()
             .get(&DataKey::AssetDecimals(asset))
             .unwrap_or(0u32)
+    }
+
+    // ── Issue #538: Withholding configuration ───────────────────────────────
+
+    /// Set the withholding configuration for a company (only executor admin).
+    ///
+    /// Rates are supplied in basis points (bps); 10 000 bps = 100 %.
+    /// The combined income-tax and social-tax rates must not exceed 10 000 bps
+    /// (i.e. the system must always leave a non-negative gross-to-net delta).
+    ///
+    /// # Errors
+    /// - [`PaymentError::InvalidWithholdingRate`] — combined bps > 10 000, or
+    ///   `max_gross_per_payment` / `min_net_per_payment` are negative.
+    pub fn set_withholding_config(
+        env: Env,
+        company_id: u64,
+        income_tax_bps: u32,
+        social_tax_bps: u32,
+        income_tax_recipient: Address,
+        social_tax_recipient: Address,
+        max_gross_per_payment: i128,
+        min_net_per_payment: i128,
+    ) -> Result<WithholdingConfig, PaymentError> {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .expect("Executor admin not set");
+        admin.require_auth();
+
+        // Validate: combined rate must not exceed 100 %
+        let total_bps = income_tax_bps
+            .checked_add(social_tax_bps)
+            .ok_or(PaymentError::InvalidWithholdingRate)?;
+        if total_bps > 10_000 {
+            return Err(PaymentError::InvalidWithholdingRate);
+        }
+
+        // Validate non-negative cap / floor values
+        if max_gross_per_payment < 0 || min_net_per_payment < 0 {
+            return Err(PaymentError::InvalidWithholdingRate);
+        }
+
+        let config = WithholdingConfig {
+            company_id,
+            income_tax_bps,
+            social_tax_bps,
+            income_tax_recipient: income_tax_recipient.clone(),
+            social_tax_recipient: social_tax_recipient.clone(),
+            max_gross_per_payment,
+            min_net_per_payment,
+            configured_at: env.ledger().timestamp(),
+            configured_by: admin.clone(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::WithholdingConfig(company_id), &config);
+
+        payroll_events::emit_withholding_config_set(&env, company_id, admin);
+
+        Ok(config)
+    }
+
+    /// Get the withholding configuration for a company (issue #538).
+    /// Returns `None` if no configuration has been set for this company.
+    pub fn get_withholding_config(env: Env, company_id: u64) -> Option<WithholdingConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WithholdingConfig(company_id))
+    }
+
+    /// Validate the withholding config for a company and compute the net/withheld
+    /// amounts from the gross payment (issue #538).
+    ///
+    /// Returns `(net_amount, income_tax_amount, social_tax_amount)`.
+    ///
+    /// # Errors
+    /// - [`PaymentError::WithholdingConfigMissing`] — no config stored for this company.
+    /// - [`PaymentError::GrossAmountExceedsCap`]    — gross > `max_gross_per_payment`.
+    /// - [`PaymentError::NetAmountBelowMinimum`]    — net < `min_net_per_payment`.
+    fn validate_and_compute_withholding(
+        env: &Env,
+        company_id: u64,
+        gross_amount: i128,
+    ) -> Result<(i128, i128, i128, WithholdingConfig), PaymentError> {
+        let config: WithholdingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WithholdingConfig(company_id))
+            .ok_or(PaymentError::WithholdingConfigMissing)?;
+
+        // Per-payment gross cap
+        if config.max_gross_per_payment > 0 && gross_amount > config.max_gross_per_payment {
+            return Err(PaymentError::GrossAmountExceedsCap);
+        }
+
+        // Compute withholding amounts (truncating integer division — safe on-chain)
+        let income_tax = gross_amount * config.income_tax_bps as i128 / 10_000;
+        let social_tax = gross_amount * config.social_tax_bps as i128 / 10_000;
+        let net_amount = gross_amount - income_tax - social_tax;
+
+        // Per-payment net floor
+        if config.min_net_per_payment > 0 && net_amount < config.min_net_per_payment {
+            return Err(PaymentError::NetAmountBelowMinimum);
+        }
+
+        Ok((net_amount, income_tax, social_tax, config))
     }
 
     // -----------------------------------------------------------------------
@@ -640,9 +788,31 @@ impl PaymentExecutor {
             return Err(PaymentError::AssetDecimalsMismatch);
         }
 
-        // Execute token transfer from company treasury to employee.
+        // Issue #538: Validate withholding configuration and compute net/withheld amounts.
+        // Sensitive salary values are never exposed — only the computed split amounts
+        // are used for transfers, and no employee-identifiable salary data is logged.
+        let (net_amount, income_tax, social_tax, withholding_cfg) =
+            Self::validate_and_compute_withholding(&env, company_id, amount)?;
+
+        // Execute token transfers: net salary to employee, withheld amounts to
+        // their configured recipients.
         let token_client = token::Client::new(&env, &addresses.token);
-        token_client.transfer(&company.treasury, &employee, &amount);
+        token_client.transfer(&company.treasury, &employee, &net_amount);
+
+        if income_tax > 0 {
+            token_client.transfer(
+                &company.treasury,
+                &withholding_cfg.income_tax_recipient,
+                &income_tax,
+            );
+        }
+        if social_tax > 0 {
+            token_client.transfer(
+                &company.treasury,
+                &withholding_cfg.social_tax_recipient,
+                &social_tax,
+            );
+        }
 
         // Record payment
         let record = PaymentRecord {
@@ -833,6 +1003,22 @@ mod tests {
         }
     }
 
+    /// Set a zero-rate withholding config for a company so existing tests that
+    /// call `execute_payment` aren't blocked by the new config-missing guard.
+    /// Uses `mock_all_auths` so caller must have that already set.
+    fn setup_withholding_zero_rate(client: &PaymentExecutorClient, env: &Env, company_id: u64) {
+        let tax_addr = Address::generate(env);
+        client.set_withholding_config(
+            &company_id,
+            &0u32,
+            &0u32,
+            &tax_addr,
+            &tax_addr,
+            &0i128,
+            &0i128,
+        );
+    }
+
     #[test]
     fn test_initialize() {
         let env = Env::default();
@@ -885,6 +1071,9 @@ mod tests {
         // Create payroll period
         let _ = client.create_period(&company_id);
 
+        // Issue #538: withholding config required before execute_payment
+        setup_withholding_zero_rate(&client, &env, company_id);
+
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
         let valid_proof_c = BytesN::from_array(&env, &[3u8; 64]);
@@ -905,7 +1094,7 @@ mod tests {
         assert_eq!(token_client.balance(&employee), 1_000);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 7); // +1 for WithholdingCfgSet (issue #538)
         let event = events.get(events.len() - 1).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
@@ -939,6 +1128,9 @@ mod tests {
         token_client.mint(&treasury, &10_000);
 
         let _ = client.create_period(&company_id);
+
+        // Issue #538: withholding config required before execute_payment
+        setup_withholding_zero_rate(&client, &env, company_id);
 
         let valid_proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let valid_proof_b = BytesN::from_array(&env, &[2u8; 128]);
@@ -1195,6 +1387,9 @@ mod tests {
 
         let _ = client.create_period(&company_id);
 
+        // Issue #538: withholding config required before execute_payment
+        setup_withholding_zero_rate(&client, &env, company_id);
+
         let proof_a = BytesN::from_array(&env, &[5u8; 64]);
         let proof_b = BytesN::from_array(&env, &[6u8; 128]);
         let proof_c = BytesN::from_array(&env, &[7u8; 64]);
@@ -1217,7 +1412,7 @@ mod tests {
         assert_eq!(client.get_total_paid(&company_id), 2_500);
 
         let events = env.events().all();
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 7); // +1 for WithholdingCfgSet (issue #538)
         let event = events.get(events.len() - 1).unwrap();
         assert_eq!(event.1.len(), 2);
         let sym: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
@@ -1327,6 +1522,9 @@ mod tests {
 
         client.create_period(&company_id);
 
+        // Issue #538: withholding config required before execute_payment
+        setup_withholding_zero_rate(&client, &env, company_id);
+
         pm_client.pause();
 
         // Verify paused
@@ -1384,6 +1582,9 @@ mod tests {
         registry_client.add_employee(&company_id, &employee, &commitment);
         client.create_period(&company_id);
         token_client.mint(&treasury, &10_000);
+
+        // Issue #538: withholding config required before execute_payment
+        setup_withholding_zero_rate(&client, &env, company_id);
 
         let proof_a = BytesN::from_array(&env, &[1u8; 64]);
         let proof_b = BytesN::from_array(&env, &[2u8; 128]);
@@ -1909,5 +2110,251 @@ mod tests {
 
         let normalized = normalize_asset_symbol(&env, "usdc");
         assert_eq!(normalized, allowlisted);
+    }
+
+    // ── Issue #538: Withholding configuration tests ─────────────────────────
+
+    /// Helper: register a company + set up withholding config with zero rates so
+    /// tests that don't care about deductions still pass the withholding gate.
+    fn setup_zero_rate_withholding(
+        env: &Env,
+        client: &PaymentExecutorClient,
+        company_id: u64,
+        tax_recipient: &Address,
+    ) {
+        let executor_admin = Address::generate(env);
+        // set_executor_admin is a one-time call; ignore error if already set
+        let _ = client.try_set_executor_admin(&executor_admin);
+
+        client.set_withholding_config(
+            &company_id,
+            &0u32,         // income_tax_bps  — 0 % (no deductions)
+            &0u32,         // social_tax_bps  — 0 %
+            tax_recipient, // income_tax_recipient
+            tax_recipient, // social_tax_recipient
+            &0i128,        // max_gross_per_payment — no cap
+            &0i128,        // min_net_per_payment   — no floor
+        );
+    }
+
+    /// set_withholding_config stores config and is readable via get_withholding_config.
+    #[test]
+    fn test_set_and_get_withholding_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+        client.set_executor_admin(&Address::generate(&env));
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+
+        let tax_addr = Address::generate(&env);
+
+        let result = client.set_withholding_config(
+            &company_id,
+            &1_000u32, // 10 % income tax
+            &500u32,   // 5 % social tax
+            &tax_addr,
+            &tax_addr,
+            &0i128,
+            &0i128,
+        );
+
+        assert_eq!(result.income_tax_bps, 1_000);
+        assert_eq!(result.social_tax_bps, 500);
+        assert_eq!(result.company_id, company_id);
+
+        let stored = client.get_withholding_config(&company_id).unwrap();
+        assert_eq!(stored.income_tax_bps, 1_000);
+        assert_eq!(stored.social_tax_bps, 500);
+    }
+
+    /// Combined rate > 100 % must be rejected.
+    #[test]
+    fn test_withholding_rate_exceeds_100_percent_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+        client.set_executor_admin(&Address::generate(&env));
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+        let tax_addr = Address::generate(&env);
+
+        // 60 % + 60 % = 120 % → must fail
+        let result = client.try_set_withholding_config(
+            &company_id,
+            &6_000u32,
+            &6_000u32,
+            &tax_addr,
+            &tax_addr,
+            &0i128,
+            &0i128,
+        );
+
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::InvalidWithholdingRate
+        );
+    }
+
+    /// Exactly 100 % combined rate must be accepted (edge case).
+    #[test]
+    fn test_withholding_rate_exactly_100_percent_accepted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+        client.set_executor_admin(&Address::generate(&env));
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&admin, &treasury);
+        let tax_addr = Address::generate(&env);
+
+        // 5 000 + 5 000 = 10 000 bps = exactly 100 % — must succeed
+        let result = client.set_withholding_config(
+            &company_id,
+            &5_000u32,
+            &5_000u32,
+            &tax_addr,
+            &tax_addr,
+            &0i128,
+            &0i128,
+        );
+
+        assert_eq!(result.income_tax_bps + result.social_tax_bps, 10_000);
+    }
+
+    /// execute_payment must fail when no withholding config has been set.
+    #[test]
+    fn test_execute_payment_fails_without_withholding_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[1u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1_000,
+            &BytesN::from_array(&env, &[1u8; 64]),
+            &BytesN::from_array(&env, &[2u8; 128]),
+            &BytesN::from_array(&env, &[3u8; 64]),
+            &BytesN::from_array(&env, &[4u8; 32]),
+            &1,
+        );
+
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::WithholdingConfigMissing
+        );
+    }
+
+    /// get_withholding_config returns None when no config has been set.
+    #[test]
+    fn test_get_withholding_config_returns_none_when_not_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        assert!(client.get_withholding_config(&999u64).is_none());
+    }
+
+    /// Gross cap: payment exceeding max_gross_per_payment must be rejected.
+    #[test]
+    fn test_execute_payment_fails_when_gross_exceeds_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+        client.set_executor_admin(&Address::generate(&env));
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[5u8; 32]);
+        let tax_addr = Address::generate(&env);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &100_000);
+
+        // Cap: max 500 per payment
+        client.set_withholding_config(
+            &company_id,
+            &0u32,
+            &0u32,
+            &tax_addr,
+            &tax_addr,
+            &500i128, // max gross cap
+            &0i128,
+        );
+
+        let _ = client.create_period(&company_id);
+
+        // Amount 1 000 > cap 500 → must fail
+        let result = client.try_execute_payment(
+            &company_id,
+            &employee,
+            &1_000,
+            &BytesN::from_array(&env, &[1u8; 64]),
+            &BytesN::from_array(&env, &[2u8; 128]),
+            &BytesN::from_array(&env, &[3u8; 64]),
+            &BytesN::from_array(&env, &[10u8; 32]),
+            &1,
+        );
+
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::GrossAmountExceedsCap
+        );
     }
 }

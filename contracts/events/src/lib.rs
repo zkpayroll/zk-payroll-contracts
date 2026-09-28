@@ -538,6 +538,18 @@ pub fn emit_executor_payment_processed(
     );
 }
 
+/// Emitted when withholding configuration is set or updated for a company (issue #538).
+///
+/// No rate values or recipient addresses are included in the event payload to
+/// avoid exposing sensitive operational parameters on-chain. Off-chain indexers
+/// can query `get_withholding_config` if they need the full configuration.
+pub fn emit_withholding_config_set(e: &Env, company_id: u64, actor: Address) {
+    e.events().publish(
+        (Symbol::new(e, "WithholdingCfgSet"), company_id),
+        (actor, e.ledger().timestamp()),
+    );
+}
+
 /// Emitted when an asset token is allowed or disallowed for payments.
 pub fn emit_asset_allowed_changed(e: &Env, asset: Address, allowed: bool) {
     e.events()

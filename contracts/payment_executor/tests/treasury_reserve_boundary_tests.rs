@@ -74,15 +74,20 @@ fn setup_system<'a>(
     commitment.store_commitment(&employee, &employee_commitment);
     registry.add_employee(&company_id, &employee, &employee_commitment);
 
+    // Issue #538: set zero-rate withholding config so execute_payment is unblocked
+    let tax_addr = Address::generate(env);
+    executor.set_withholding_config(
+        &company_id,
+        &0u32,
+        &0u32,
+        &tax_addr,
+        &tax_addr,
+        &0i128,
+        &0i128,
+    );
+
     (
-        executor,
-        registry,
-        commitment,
-        token,
-        company_id,
-        treasury,
-        employee,
-        admin,
+        executor, registry, commitment, token, company_id, treasury, employee, admin,
     )
 }
 

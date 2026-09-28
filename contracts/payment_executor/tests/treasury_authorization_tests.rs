@@ -79,6 +79,18 @@ fn setup_system_no_auth<'a>(
     commitment_client.store_commitment(&employee, &commitment);
     registry.add_employee(&company_id, &employee, &commitment);
 
+    // Issue #538: set zero-rate withholding config so execute_payment is unblocked
+    let tax_addr = Address::generate(env);
+    executor.set_withholding_config(
+        &company_id,
+        &0u32,
+        &0u32,
+        &tax_addr,
+        &tax_addr,
+        &0i128,
+        &0i128,
+    );
+
     // Turn off mock_all_auths to test explicit auths
     // Actually mock_all_auths() applies globally, we can't un-mock it easily in Soroban tests,
     // unless we don't call it at all, or just use it but rely on should_panic for auth checks.

@@ -95,6 +95,18 @@ fn setup_system<'a>(
     executor.create_period(&company_id);
     token.mint(&treasury, &200_000);
 
+    // Issue #538: set zero-rate withholding config so execute_payment is unblocked
+    let tax_addr = Address::generate(env);
+    executor.set_withholding_config(
+        &company_id,
+        &0u32,
+        &0u32,
+        &tax_addr,
+        &tax_addr,
+        &0i128,
+        &0i128,
+    );
+
     (
         executor,
         registry,
