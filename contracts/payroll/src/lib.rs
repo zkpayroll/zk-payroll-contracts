@@ -2212,6 +2212,104 @@ impl Payroll {
             .expect("Batch execution checkpoint not found")
     }
 
+    /// Return whether a failed bounded payout batch can be resumed safely.
+    ///
+    /// Eligibility is limited to a failed, incomplete checkpoint with at
+    /// least one payment remaining. The caller supplies the expected payment
+    /// count from the original batch so the saved cursor can be checked against
+    /// the remaining batch length. This view returns only a boolean and
+    /// does not expose employee or salary data.
+    pub fn is_failed_payout_retry_eligible(
+        e: Env,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_payment_count: u32,
+    ) -> bool {
+        if expected_payment_count == 0 || expected_payment_count > MAX_BATCH {
+            return false;
+        }
+
+        let key = DataKey::BatchCheckpoint(employer, batch_root, asset, execution_nonce);
+        let Some(checkpoint) = e.storage().persistent().get::<_, BatchCheckpoint>(&key) else {
+            return false;
+        };
+
+        checkpoint.failed
+            && !checkpoint.completed
+            && checkpoint.state == BatchCheckpointState::Failed
+            && checkpoint.last_checkpoint_index < expected_payment_count
+    }
+
+    /// Explicitly resume a failed payout batch after checking its checkpoint.
+    ///
+    /// The same employer, batch root, asset, nonce, payment count, and
+    /// checkpoint index must be used for the subsequent bounded batch call.
+    /// Resumption starts at the persisted index to avoid repeating completed
+    /// payouts.
+    pub fn resume_failed_payout_retry(
+        e: Env,
+        admin: Address,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_payment_count: u32,
+        checkpoint_index: u32,
+    ) -> bool {
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_non_zero_digest(&e, &execution_nonce, "execution_nonce");
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::BatchCheckpoint(
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+        );
+        let mut checkpoint: BatchCheckpoint =
+            e.storage().persistent().get(&key).unwrap_or_else(|| {
+                panic!("Failed payout retry is not eligible: refresh the batch checkpoint")
+            });
+
+        if checkpoint.last_checkpoint_index != checkpoint_index
+            || !Self::is_failed_payout_retry_eligible(
+                e.clone(),
+                employer.clone(),
+                batch_root.clone(),
+                asset.clone(),
+                execution_nonce.clone(),
+                expected_payment_count,
+            )
+        {
+            panic!("Failed payout retry is not eligible: refresh the batch checkpoint");
+        }
+
+        checkpoint.state = BatchCheckpointState::Resumed;
+        checkpoint.failed = false;
+        e.storage().persistent().set(&key, &checkpoint);
+
+        payroll_events::emit_batch_checkpoint_resumed(
+            &e,
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+            checkpoint_index,
+        );
+        true
+    }
+
     pub fn resume_batch_execution(
         e: Env,
         admin: Address,
@@ -3295,6 +3393,9 @@ impl Payroll {
             let cp: BatchCheckpoint = e.storage().persistent().get(&checkpoint_key).unwrap();
             if cp.completed {
                 panic!("Payroll batch already completed");
+            }
+            if cp.failed {
+                panic!("Failed payout retry requires an eligibility check and explicit resume");
             }
             payroll_events::emit_batch_checkpoint_resumed(
                 &e,

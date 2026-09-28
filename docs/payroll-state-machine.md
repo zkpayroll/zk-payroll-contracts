@@ -100,6 +100,29 @@ stopped holding:
 See [Payroll Run Expiration](./run-expiration.md) for the full workflow,
 SDK guidance, and error recovery.
 
+### Failed Bounded Payout Retry
+
+Bounded payroll payout checkpoints can be inspected with
+`is_failed_payout_retry_eligible`, passing the original employer, batch root,
+asset, execution nonce, and expected payment count. The view returns only a
+boolean. It returns `true` only for a failed checkpoint that has remaining
+payments; completed checkpoints and checkpoints at or beyond the payment count
+are not retryable.
+
+When eligible, the admin calls `resume_failed_payout_retry` with the same
+checkpoint identity and the persisted checkpoint index. Then the operator
+retries `batch_process_payroll_bounded` with the original batch inputs and
+nonce. Execution resumes at the saved index so previously completed payouts
+are not repeated. A failed checkpoint cannot be resumed through the regular
+bounded payout call without this explicit eligibility and resume step. If the
+eligibility view returns `false`, refresh the checkpoint and reconcile the
+original payout outcome before creating any new payout attempt.
+
+The eligibility result, error text, and resume event contain no employee or
+salary values. Keep the original proofs and payout inputs in the authorized
+payroll workflow; do not include them in user-facing errors or operational
+logs.
+
 ## Future Additions
 
 When adding or renaming a state, update all of the following in the same pull

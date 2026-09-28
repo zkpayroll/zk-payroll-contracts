@@ -244,6 +244,15 @@ let processed_count = payroll.batch_process_payroll_bounded(
 - **Halt-on-Error**: Halts and rolls back state atomically if any single employee payment or proof fails.
 - **Authorization**: Requires operator/admin authorization (`admin.require_auth()`). Rejects empty batch parameters.
 
+For a failed bounded payout checkpoint, first call
+`is_failed_payout_retry_eligible` with the original batch identity and payment
+count. If it returns `true`, the admin can call `resume_failed_payout_retry`
+with the saved checkpoint index, then retry the same batch with the same nonce.
+Completed checkpoints and checkpoints with no remaining payments are rejected.
+The eligibility check returns only a boolean and does not reveal employee or
+salary values. See [Payroll Run State Machine](docs/payroll-state-machine.md)
+for the recovery steps.
+
 ### Compliance Audit
 
 ```rust

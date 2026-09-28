@@ -50,7 +50,7 @@ fn mock_proof(env: &Env) -> BytesN<256> {
     BytesN::from_array(env, &[0u8; 256])
 }
 
-ufn mock_proof_with_seed(env: &Env, seed: u8) -> BytesN<256> {
+fn mock_proof_with_seed(env: &Env, seed: u8) -> BytesN<256> {
     let mut arr = [0u8; 256];
     arr[32] = seed;
     BytesN::from_array(env, &arr)
