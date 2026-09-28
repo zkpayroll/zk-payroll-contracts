@@ -60,7 +60,7 @@ pub enum PaymentError {
     AlreadyPaid = 3,
     /// The payroll period does not exist.
     PeriodNotFound = 4,
-    /// The payroll period is closed — no new payments allowed.
+    /// The payroll period is closed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no new payments allowed.
     PeriodClosed = 5,
     /// Attempt to create a duplicate period for this company.
     PeriodAlreadyExists = 6,
@@ -84,6 +84,9 @@ pub enum PaymentError {
     NetAmountBelowMinimum = 15,
     /// The gross amount exceeds the per-payment cap configured for this company (issue #538).
     GrossAmountExceedsCap = 16,
+    /// A settlement receipt was already processed. Receipt IDs are globally
+    /// unique across all companies and periods (issue #551).
+    SettlementReceiptAlreadyUsed = 17,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -122,7 +125,7 @@ pub struct ContractAddresses {
     pub token: Address,
 }
 
-// ── Issue #538: Payroll withholding configuration ──────────────────────────
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #538: Payroll withholding configuration ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
 /// Per-company withholding configuration for payroll deductions (issue #538).
 ///
@@ -137,9 +140,9 @@ pub struct ContractAddresses {
 pub struct WithholdingConfig {
     /// Company this configuration applies to.
     pub company_id: u64,
-    /// Income-tax withholding rate in basis points (0–10 000).
+    /// Income-tax withholding rate in basis points (0ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“10 000).
     pub income_tax_bps: u32,
-    /// Statutory / social-tax withholding rate in basis points (0–10 000).
+    /// Statutory / social-tax withholding rate in basis points (0ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“10 000).
     pub social_tax_bps: u32,
     /// Destination address for withheld income tax (e.g. tax-authority wallet).
     pub income_tax_recipient: Address,
@@ -174,6 +177,9 @@ pub enum DataKey {
     AssetDecimals(Address),
     /// Per-company withholding configuration (issue #538)
     WithholdingConfig(u64),
+    /// Settlement receipt presence marker (issue #551). A receipt ID may be
+    /// used at most once across the entire contract.
+    SettlementReceipt(BytesN<32>),
 }
 
 #[contract]
@@ -352,10 +358,10 @@ impl PaymentExecutor {
     ///
     /// # Errors
     ///
-    /// - [`StorageError::NotInitialized`] — no dependency addresses stored.
-    /// - [`StorageError::StorageVersionMismatch`] — `target` is older than the
+    /// - [`StorageError::NotInitialized`] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no dependency addresses stored.
+    /// - [`StorageError::StorageVersionMismatch`] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â `target` is older than the
     ///   persisted schema version, or `target` is `0` (no valid schema).
-    /// - [`StorageError::StorageCorruption`] — executor admin missing, or the
+    /// - [`StorageError::StorageCorruption`] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â executor admin missing, or the
     ///   treasury asset is un-allowlisted / missing decimal configuration.
     pub fn check_upgrade_compatibility(
         env: Env,
@@ -440,7 +446,7 @@ impl PaymentExecutor {
             .unwrap_or(0u32)
     }
 
-    // ── Issue #538: Withholding configuration ───────────────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #538: Withholding configuration ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
     /// Set the withholding configuration for a company (only executor admin).
     ///
@@ -449,7 +455,7 @@ impl PaymentExecutor {
     /// (i.e. the system must always leave a non-negative gross-to-net delta).
     ///
     /// # Errors
-    /// - [`PaymentError::InvalidWithholdingRate`] — combined bps > 10 000, or
+    /// - [`PaymentError::InvalidWithholdingRate`] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â combined bps > 10 000, or
     ///   `max_gross_per_payment` / `min_net_per_payment` are negative.
     pub fn set_withholding_config(
         env: Env,
@@ -516,9 +522,9 @@ impl PaymentExecutor {
     /// Returns `(net_amount, income_tax_amount, social_tax_amount)`.
     ///
     /// # Errors
-    /// - [`PaymentError::WithholdingConfigMissing`] — no config stored for this company.
-    /// - [`PaymentError::GrossAmountExceedsCap`]    — gross > `max_gross_per_payment`.
-    /// - [`PaymentError::NetAmountBelowMinimum`]    — net < `min_net_per_payment`.
+    /// - [`PaymentError::WithholdingConfigMissing`] ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no config stored for this company.
+    /// - [`PaymentError::GrossAmountExceedsCap`]    ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â gross > `max_gross_per_payment`.
+    /// - [`PaymentError::NetAmountBelowMinimum`]    ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â net < `min_net_per_payment`.
     fn validate_and_compute_withholding(
         env: &Env,
         company_id: u64,
@@ -535,7 +541,7 @@ impl PaymentExecutor {
             return Err(PaymentError::GrossAmountExceedsCap);
         }
 
-        // Compute withholding amounts (truncating integer division — safe on-chain)
+        // Compute withholding amounts (truncating integer division ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â safe on-chain)
         let income_tax = gross_amount * config.income_tax_bps as i128 / 10_000;
         let social_tax = gross_amount * config.social_tax_bps as i128 / 10_000;
         let net_amount = gross_amount - income_tax - social_tax;
@@ -555,7 +561,7 @@ impl PaymentExecutor {
     /// Create a new payroll period for a company.
     ///
     /// Periods are numbered sequentially per company. Only one period can
-    /// be open at a time — a new period cannot be created until the previous
+    /// be open at a time ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a new period cannot be created until the previous
     /// one is closed (or no periods exist yet).
     pub fn create_period(env: Env, company_id: u64) -> Result<PayrollPeriod, PaymentError> {
         Self::require_not_paused(&env);
@@ -789,7 +795,7 @@ impl PaymentExecutor {
         }
 
         // Issue #538: Validate withholding configuration and compute net/withheld amounts.
-        // Sensitive salary values are never exposed — only the computed split amounts
+        // Sensitive salary values are never exposed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â only the computed split amounts
         // are used for transfers, and no employee-identifiable salary data is logged.
         let (net_amount, income_tax, social_tax, withholding_cfg) =
             Self::validate_and_compute_withholding(&env, company_id, amount)?;
@@ -900,6 +906,65 @@ impl PaymentExecutor {
         Ok(records)
     }
 
+    /// Execute a batch payroll run tied to a unique settlement receipt.
+    ///
+    /// Identical to `execute_batch_payroll` except that the supplied
+    /// `receipt_id` is recorded on-chain the first time it is used. Any
+    /// subsequent call with the same `receipt_id` — regardless of company,
+    /// period, or employee set — is rejected with
+    /// `PaymentError::SettlementReceiptAlreadyUsed`. This gives settlement
+    /// callers an idempotency handle that survives retries and RPC
+    /// replays. (issue #551)
+    ///
+    /// Receipt IDs are never emitted in events and carry no salary or
+    /// employee data — the contract treats them as opaque 32-byte
+    /// identifiers, so error paths stay privacy-safe.
+    pub fn execute_batch_payroll_with_receipt(
+        env: Env,
+        company_id: u64,
+        employees: soroban_sdk::Vec<Address>,
+        amounts: soroban_sdk::Vec<i128>,
+        proofs_a: soroban_sdk::Vec<BytesN<64>>,
+        proofs_b: soroban_sdk::Vec<BytesN<128>>,
+        proofs_c: soroban_sdk::Vec<BytesN<64>>,
+        nullifiers: soroban_sdk::Vec<BytesN<32>>,
+        period: u32,
+        receipt_id: BytesN<32>,
+    ) -> Result<soroban_sdk::Vec<PaymentRecord>, PaymentError> {
+        // Reject duplicate settlement receipts before touching any state so
+        // a rejected call leaves the contract unchanged.
+        let receipt_key = DataKey::SettlementReceipt(receipt_id.clone());
+        if env.storage().persistent().has(&receipt_key) {
+            return Err(PaymentError::SettlementReceiptAlreadyUsed);
+        }
+
+        let records = Self::execute_batch_payroll(
+            env.clone(),
+            company_id,
+            employees,
+            amounts,
+            proofs_a,
+            proofs_b,
+            proofs_c,
+            nullifiers,
+            period,
+        )?;
+
+        // Record the receipt only after the batch has fully succeeded. If
+        // any individual payment inside the batch fails, we never reach
+        // this line and the receipt is left unused, allowing a corrected
+        // retry with the same ID.
+        env.storage().persistent().set(&receipt_key, &true);
+
+        Ok(records)
+    }
+
+    /// Returns true when the supplied settlement receipt has been consumed.
+    pub fn is_settlement_receipt_used(env: Env, receipt_id: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::SettlementReceipt(receipt_id))
+    }
     /// Get payment record
     pub fn get_payment(env: Env, employee: Address, period: u32) -> PaymentRecord {
         let key = DataKey::Payment(employee, period);
@@ -1435,7 +1500,7 @@ mod tests {
         assert_eq!(client.get_total_paid(&company_id), 2_500);
     }
 
-    // ── Pause tests ──────────────────────────────────────────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Pause tests ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
     fn setup_executor_with_pause_manager(
         env: &Env,
@@ -1655,7 +1720,7 @@ mod tests {
         client.set_pause_manager(&pm_id);
     }
 
-    // ── Issue #77: proof expiration checks ────────────────────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #77: proof expiration checks ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
     #[test]
     fn test_fresh_proof_within_expiration_window() {
@@ -1869,12 +1934,12 @@ mod tests {
         assert_eq!(set_sym0, Symbol::new(&env, "TreasuryAssetAllowedUpdated"));
     }
 
-    // ── Issue #245: operator vs admin role separation ─────────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #245: operator vs admin role separation ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     //
     // `payment_executor` has two distinct privileged roles that must not be
     // conflated: the protocol-level `ExecutorAdmin` (gates contract-wide
     // config: `set_asset_allowed`, `set_pause_manager`) and each company's
-    // own `admin` (gates that company's periods and payments only — the
+    // own `admin` (gates that company's periods and payments only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the
     // "operator" of its own payroll). Neither role should be able to
     // exercise the other's capabilities.
 
@@ -1914,7 +1979,7 @@ mod tests {
     }
 
     /// The protocol-level `ExecutorAdmin` must not be able to trigger payroll
-    /// execution for a company it does not administer — that capability
+    /// execution for a company it does not administer ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â that capability
     /// belongs solely to the company's own admin.
     #[test]
     #[should_panic(expected = "authorized")]
@@ -2065,7 +2130,7 @@ mod tests {
         let _ = PaymentExecutor::amount_to_public_input(&env, i128::MIN);
     }
 
-    // ── Asset symbol normalization ─────────────────────────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Asset symbol normalization ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
     fn normalize_asset_symbol(env: &Env, symbol: &str) -> Symbol {
         let normalized = symbol.trim().to_ascii_uppercase();
@@ -2112,7 +2177,7 @@ mod tests {
         assert_eq!(normalized, allowlisted);
     }
 
-    // ── Issue #538: Withholding configuration tests ─────────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #538: Withholding configuration tests ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
     /// Helper: register a company + set up withholding config with zero rates so
     /// tests that don't care about deductions still pass the withholding gate.
@@ -2128,12 +2193,12 @@ mod tests {
 
         client.set_withholding_config(
             &company_id,
-            &0u32,         // income_tax_bps  — 0 % (no deductions)
-            &0u32,         // social_tax_bps  — 0 %
+            &0u32,         // income_tax_bps  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 0 % (no deductions)
+            &0u32,         // social_tax_bps  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 0 %
             tax_recipient, // income_tax_recipient
             tax_recipient, // social_tax_recipient
-            &0i128,        // max_gross_per_payment — no cap
-            &0i128,        // min_net_per_payment   — no floor
+            &0i128,        // max_gross_per_payment ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no cap
+            &0i128,        // min_net_per_payment   ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no floor
         );
     }
 
@@ -2193,7 +2258,7 @@ mod tests {
         let company_id = registry_client.register_company(&admin, &treasury);
         let tax_addr = Address::generate(&env);
 
-        // 60 % + 60 % = 120 % → must fail
+        // 60 % + 60 % = 120 % ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ must fail
         let result = client.try_set_withholding_config(
             &company_id,
             &6_000u32,
@@ -2228,7 +2293,7 @@ mod tests {
         let company_id = registry_client.register_company(&admin, &treasury);
         let tax_addr = Address::generate(&env);
 
-        // 5 000 + 5 000 = 10 000 bps = exactly 100 % — must succeed
+        // 5 000 + 5 000 = 10 000 bps = exactly 100 % ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â must succeed
         let result = client.set_withholding_config(
             &company_id,
             &5_000u32,
@@ -2340,7 +2405,7 @@ mod tests {
 
         let _ = client.create_period(&company_id);
 
-        // Amount 1 000 > cap 500 → must fail
+        // Amount 1 000 > cap 500 ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ must fail
         let result = client.try_execute_payment(
             &company_id,
             &employee,
