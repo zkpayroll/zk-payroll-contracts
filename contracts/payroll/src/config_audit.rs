@@ -57,6 +57,11 @@ pub mod config_keys {
     /// `add_reviewer` / `remove_reviewer` — subject: reviewer; value: `bool`
     /// (absent once removed).
     pub const REVIEWER: &str = "reviewer";
+    /// `set_max_reviewers` — value: `u32` (issue #539).
+    pub const MAX_REVIEWERS: &str = "max_reviewers";
+    /// `register_operator_key` / `revoke_operator_key` — value: operator
+    /// ed25519 public key (absent once revoked) (issue #519).
+    pub const OPERATOR_KEY: &str = "operator_key";
     /// `set_reservation_expiry_policy` — subject: asset; value:
     /// `ReservationExpiry`.
     pub const RESERVATION_EXPIRY: &str = "reservation_expiry";

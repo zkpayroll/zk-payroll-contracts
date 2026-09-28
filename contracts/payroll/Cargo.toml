@@ -21,3 +21,4 @@ doctest = false
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 pause_manager = { path = "../pause_manager", features = ["contract"] }
+ed25519-dalek = "2.2.0"

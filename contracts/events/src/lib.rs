@@ -1015,6 +1015,31 @@ pub fn emit_reviewer_removed(e: &Env, reviewer: Address) {
     );
 }
 
+/// Emitted when the maximum concurrently authorized reviewer count is set
+/// or replaced by admin (issue #539).
+pub fn emit_max_reviewers_set(e: &Env, max_reviewers: u32) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "max_reviewers_set")),
+        max_reviewers,
+    );
+}
+
+/// Emitted when the operator key for signed off-chain authorizations is
+/// registered or replaced by admin (issue #519). Never carries the key
+/// itself in the event; `get_operator_key` is the read path for that.
+pub fn emit_operator_key_registered(e: &Env) {
+    e.events()
+        .publish((payroll_topic(), Symbol::new(e, "operator_key_set")), ());
+}
+
+/// Emitted when the operator key is revoked by admin (issue #519).
+pub fn emit_operator_key_revoked(e: &Env) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "operator_key_revoked")),
+        (),
+    );
+}
+
 /// Emitted when an authorized reviewer approves a payroll run.
 pub fn emit_run_approved(e: &Env, run_id: u64, reviewer: Address) {
     e.events().publish(

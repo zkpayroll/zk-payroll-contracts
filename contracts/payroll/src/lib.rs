@@ -13,6 +13,14 @@ use shared_errors::{AuthError, PaymentError, TreasuryError};
 pub mod config_audit;
 use config_audit::{config_keys, no_value_ref, record_config_change, stored_ref, value_ref};
 
+pub mod failure_reasons;
+use failure_reasons::{DryRunArgs, PayrollDryRunReport, PayrollFailureReason};
+
+pub mod signed_operator_actions;
+use signed_operator_actions::{
+    consumed_key, require_not_expired, SignedOperatorAction, SignedOperatorPayload,
+};
+
 const MAX_BATCH: u32 = 50;
 
 #[contract]
@@ -863,6 +871,22 @@ pub enum DataKey {
     /// Contract-wide configuration revision, bumped once per audited
     /// configuration change (#490). Absent means `0`.
     ConfigRevision,
+    /// Employer-configured maximum number of concurrently authorized
+    /// reviewers (#539). Absent means unlimited, matching the pre-existing
+    /// behaviour of `add_reviewer`.
+    MaxReviewers,
+    /// Count of currently authorized reviewers, kept in sync with
+    /// `AuthorizedReviewer` additions/removals so the cap in `MaxReviewers`
+    /// can be enforced without an unbounded scan (#539). Absent means `0`.
+    ReviewerCount,
+    /// The admin-registered ed25519 public key that signs off-chain,
+    /// expiring operator authorizations (#519). Absent means no operator
+    /// key is registered and `signed_add_reviewer` is unusable.
+    OperatorKey,
+    /// Marks a signed operator authorization payload (keyed by its
+    /// SHA-256'd XDR encoding) as already consumed, preventing replay of
+    /// the exact same signed payload (#519).
+    ConsumedOperatorAuth(BytesN<32>),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -3352,6 +3376,238 @@ impl Payroll {
         run_id
     }
 
+    // ── Issue #509 / #521: failure reason codes + dry-run preflight ──────────
+
+    /// Read-only preflight for `batch_process_payroll`: reports every
+    /// blocking precondition it can find without moving funds, verifying
+    /// proofs, or writing any storage (issue #521).
+    ///
+    /// Runs the same checks `batch_process_payroll` performs, in the same
+    /// order, EXCEPT: it never calls `token_client.transfer`, never calls
+    /// `verifier.verify_payment_proof` (proof correctness cannot be checked
+    /// without either duplicating verifier internals or accepting a
+    /// dependency this preflight does not want; a `MissingProof` /
+    /// `ArrayLengthMismatch` shape check on `proof_count` is still
+    /// performed), and never writes `DataKey::RunNonce`,
+    /// `DataKey::PeriodUsage`, `DataKey::EmployerNonceSequence`, or any
+    /// other run/nonce/capacity state. A `draft_hash` pre-commitment is
+    /// checked for existence but never consumed.
+    ///
+    /// Unlike `batch_process_payroll`, which panics on the FIRST failing
+    /// check, this collects every blocker it finds into one report — the
+    /// main reason a dry-run is more useful than reading the panic message
+    /// from a real (reverted) call.
+    ///
+    /// Still gated the same way the real call effectively is: nothing here
+    /// discloses salary amounts, employee identities, or proof material
+    /// beyond what the caller already supplied as arguments.
+    pub fn dry_run_batch_process_payroll(e: Env, args: DryRunArgs) -> PayrollDryRunReport {
+        let mut report = PayrollDryRunReport::empty(&e);
+
+        if !Self::company_is_active(&e) {
+            report.push(PayrollFailureReason::CompanyNotActive);
+        }
+
+        let count = args.proof_count;
+        if count == 0 {
+            report.push(PayrollFailureReason::MissingProof);
+        }
+        if args.amounts.len() != count || args.employees.len() != count {
+            report.push(PayrollFailureReason::ArrayLengthMismatch);
+        }
+        if count > MAX_BATCH {
+            report.push(PayrollFailureReason::BatchTooLarge);
+        }
+
+        let nonce_key = DataKey::RunNonce(args.nonce.clone());
+        if e.storage().persistent().has(&nonce_key) {
+            report.push(PayrollFailureReason::DuplicateRunNonce);
+        }
+
+        if let Some(ref dh) = args.draft_hash {
+            let commit_key = DataKey::DraftCommitment(dh.clone());
+            if !e.storage().persistent().has(&commit_key) {
+                report.push(PayrollFailureReason::DraftNotPreCommitted);
+            }
+        }
+
+        if Self::has_duplicate_employees(&args.employees) {
+            report.push(PayrollFailureReason::DuplicateEmployee);
+        }
+
+        let mut total: i128 = 0;
+        let mut any_non_positive = false;
+        for i in 0..args.amounts.len() {
+            let amt = args.amounts.get(i).unwrap();
+            if amt <= 0 {
+                any_non_positive = true;
+            } else {
+                total += amt;
+            }
+        }
+        if any_non_positive {
+            report.push(PayrollFailureReason::NonPositiveAmount);
+        }
+        if total != args.expected_total_spend {
+            report.push(PayrollFailureReason::ExpectedSpendMismatch);
+        }
+
+        if let Some(addrs) = e
+            .storage()
+            .persistent()
+            .get::<_, ContractAddresses>(&DataKey::Addresses)
+        {
+            if Self::nonce_is_stale(&e, &addrs.admin, &args.nonce) {
+                report.push(PayrollFailureReason::NonceNotMonotonic);
+            }
+
+            if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+                report.push(PayrollFailureReason::AssetNotAllowed);
+            }
+
+            if e.storage().persistent().has(&DataKey::PauseManager) {
+                let pm_addr: Address = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PauseManager)
+                    .unwrap();
+                let pm_client = PauseManagerClient::new(&e, &pm_addr);
+                if pm_client.is_paused() {
+                    report.push(PayrollFailureReason::SystemPaused);
+                }
+            }
+
+            for detail in Self::would_exceed_capacity(&e, count, args.expected_total_spend) {
+                report.push_capacity(detail);
+            }
+
+            if Self::settlement_window_would_reject(&e) {
+                report.push(PayrollFailureReason::SettlementWindowNotOpen);
+            }
+
+            let token_client = soroban_token::Client::new(&e, &addrs.token);
+            let treasury_balance = token_client.balance(&addrs.treasury);
+            if treasury_balance < args.expected_total_spend {
+                report.push(PayrollFailureReason::InsufficientTreasuryBalance);
+            }
+        }
+
+        report
+    }
+
+    /// Read-only equivalent of `require_company_active`: returns `false`
+    /// instead of panicking. Absent state defaults to `Active`, matching
+    /// `require_company_active`'s own default.
+    fn company_is_active(e: &Env) -> bool {
+        match e
+            .storage()
+            .persistent()
+            .get::<_, CompanyState>(&DataKey::CompanyState)
+        {
+            Some(CompanyState::Active) | None => true,
+            Some(_) => false,
+        }
+    }
+
+    /// Read-only equivalent of the duplicate-employee check inside
+    /// `validate_no_duplicate_employees`, without panicking.
+    fn has_duplicate_employees(employees: &Vec<Address>) -> bool {
+        let count = employees.len();
+        for i in 0..count {
+            let current = employees.get(i).unwrap();
+            for j in (i + 1)..count {
+                if current == employees.get(j).unwrap() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Read-only equivalent of `validate_nonce_monotonicity`: returns
+    /// `true` if the given nonce would be rejected (a replay or a
+    /// non-strictly-increasing value), without panicking or writing state.
+    fn nonce_is_stale(env: &Env, employer: &Address, nonce: &BytesN<32>) -> bool {
+        let sequence_key = DataKey::EmployerNonceSequence(employer.clone());
+        if let Some(sequence_state) = env
+            .storage()
+            .persistent()
+            .get::<_, EmployerNonceSequenceState>(&sequence_key)
+        {
+            if nonce == &sequence_state.last_nonce {
+                return true;
+            }
+            let new_nonce_value = Self::nonce_to_u256(env, nonce);
+            let last_nonce_value = Self::nonce_to_u256(env, &sequence_state.last_nonce);
+            if new_nonce_value <= last_nonce_value {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Read-only equivalent of `enforce_and_record_capacity`: returns which
+    /// capacity dimensions (if any) executing this batch would exceed,
+    /// without writing `DataKey::PeriodUsage` or emitting the enforcement
+    /// events `enforce_and_record_capacity` emits on success.
+    fn would_exceed_capacity(
+        e: &Env,
+        employee_count: u32,
+        batch_value: i128,
+    ) -> Vec<CapacityLimitKind> {
+        let mut exceeded = Vec::new(e);
+        let limits: CapacityLimits = match e.storage().persistent().get(&DataKey::CapacityLimits) {
+            Some(limits) => limits,
+            None => return exceeded,
+        };
+        let period: Symbol = match e.storage().persistent().get(&DataKey::CurrentPeriod) {
+            Some(period) => period,
+            None => return exceeded,
+        };
+
+        let usage: PeriodUsage = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PeriodUsage(period))
+            .unwrap_or(PeriodUsage {
+                batch_count: 0,
+                employee_count: 0,
+                total_value: 0,
+            });
+
+        if usage.batch_count + 1 > limits.max_batches {
+            exceeded.push_back(CapacityLimitKind::BatchCount);
+        }
+        if usage.employee_count + employee_count > limits.max_employees {
+            exceeded.push_back(CapacityLimitKind::EmployeeCount);
+        }
+        if usage.total_value + batch_value > limits.max_total_value {
+            exceeded.push_back(CapacityLimitKind::TotalValue);
+        }
+        exceeded
+    }
+
+    /// Read-only equivalent of `enforce_settlement_window_for_current_period`:
+    /// returns `true` if the current period's settlement window (if any) is
+    /// not open for execution right now, without emitting the rejection
+    /// event the real enforcement path emits.
+    fn settlement_window_would_reject(e: &Env) -> bool {
+        let period: Symbol = match e.storage().persistent().get(&DataKey::CurrentPeriod) {
+            Some(period) => period,
+            None => return false,
+        };
+        let window: SettlementWindow = match e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period))
+        {
+            Some(window) => window,
+            None => return true,
+        };
+        let now = e.ledger().timestamp();
+        Self::classify_settlement_window(&window, now) != SettlementWindowStatus::Executable
+    }
+
     // ── Issue #475: Bounded batch processing for employee payments ────────────
 
     /// Bounded batch processing for large payroll runs (#475).
@@ -5508,6 +5764,13 @@ impl Payroll {
     // ?? Reviewer Authorization & Run Review Entrypoints ?????????????????????
 
     /// Grant reviewer authorization to an address. Only the admin may call.
+    ///
+    /// Rejected once the number of currently authorized reviewers would
+    /// exceed the employer's configured `MaxReviewers` policy, if any has
+    /// been set via `set_max_reviewers` (#539). Re-adding an address that is
+    /// already authorized is a no-op with respect to the cap: it does not
+    /// increment the reviewer count and is never rejected for being "over
+    /// the limit" on its own.
     pub fn add_reviewer(e: Env, admin: Address, reviewer: Address) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
@@ -5520,18 +5783,49 @@ impl Payroll {
         }
         admin.require_auth();
 
+        Self::grant_reviewer_internal(&e, &admin, &reviewer);
+    }
+
+    /// Shared core of `add_reviewer` / `signed_add_reviewer`: enforce the
+    /// `MaxReviewers` cap (#539), grant the reviewer role, and publish the
+    /// usual `reviewer_added` event + config-audit record. Callers are
+    /// responsible for their own authorization check before calling this —
+    /// it performs none itself.
+    fn grant_reviewer_internal(e: &Env, actor: &Address, reviewer: &Address) {
         let reviewer_key = DataKey::AuthorizedReviewer(reviewer.clone());
-        let previous_ref = stored_ref(&e, &reviewer_key);
+        let previous_ref = stored_ref(e, &reviewer_key);
+        let already_authorized = e.storage().persistent().has(&reviewer_key);
+
+        if !already_authorized {
+            let current_count: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::ReviewerCount)
+                .unwrap_or(0);
+            if let Some(max_reviewers) = e
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::MaxReviewers)
+            {
+                if current_count >= max_reviewers {
+                    panic!("Reviewer limit reached");
+                }
+            }
+            e.storage()
+                .persistent()
+                .set(&DataKey::ReviewerCount, &(current_count + 1));
+        }
+
         e.storage().persistent().set(&reviewer_key, &true);
 
-        payroll_events::emit_reviewer_added(&e, reviewer.clone());
+        payroll_events::emit_reviewer_added(e, reviewer.clone());
         record_config_change(
-            &e,
-            &admin,
+            e,
+            actor,
             config_keys::REVIEWER,
-            value_ref(&e, &reviewer),
+            value_ref(e, reviewer),
             previous_ref,
-            stored_ref(&e, &reviewer_key),
+            stored_ref(e, &reviewer_key),
         );
     }
 
@@ -5550,7 +5844,19 @@ impl Payroll {
 
         let reviewer_key = DataKey::AuthorizedReviewer(reviewer.clone());
         let previous_ref = stored_ref(&e, &reviewer_key);
+        let was_authorized = e.storage().persistent().has(&reviewer_key);
         e.storage().persistent().remove(&reviewer_key);
+
+        if was_authorized {
+            let current_count: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::ReviewerCount)
+                .unwrap_or(0);
+            e.storage()
+                .persistent()
+                .set(&DataKey::ReviewerCount, &current_count.saturating_sub(1));
+        }
 
         payroll_events::emit_reviewer_removed(&e, reviewer.clone());
         record_config_change(
@@ -5569,6 +5875,187 @@ impl Payroll {
             .persistent()
             .get(&DataKey::AuthorizedReviewer(reviewer))
             .unwrap_or(false)
+    }
+
+    // ── Issue #539: delegated approver (reviewer) assignment limits ─────────
+
+    /// Set (or replace) the maximum number of concurrently authorized
+    /// reviewers. Only the admin may call. Opt-in, mirroring
+    /// `set_capacity_limits`: absent a policy, `add_reviewer` is unlimited,
+    /// exactly as before this feature existed. Lowering the cap below the
+    /// current reviewer count is allowed (it only blocks further additions;
+    /// it never revokes existing reviewers).
+    pub fn set_max_reviewers(e: Env, admin: Address, max_reviewers: u32) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if max_reviewers == 0 {
+            panic!("Reviewer limit must be positive");
+        }
+
+        let previous_ref = stored_ref(&e, &DataKey::MaxReviewers);
+        e.storage()
+            .persistent()
+            .set(&DataKey::MaxReviewers, &max_reviewers);
+
+        payroll_events::emit_max_reviewers_set(&e, max_reviewers);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::MAX_REVIEWERS,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::MaxReviewers),
+        );
+    }
+
+    /// Return the currently configured reviewer cap, if any.
+    pub fn get_max_reviewers(e: Env) -> Option<u32> {
+        e.storage().persistent().get(&DataKey::MaxReviewers)
+    }
+
+    /// Return the number of currently authorized reviewers.
+    pub fn get_reviewer_count(e: Env) -> u32 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ReviewerCount)
+            .unwrap_or(0)
+    }
+
+    // ── Issue #519: signed, expiring operator authorizations ────────────────
+
+    /// Register (or replace) the ed25519 public key that signs off-chain
+    /// operator authorizations. Only the admin may call. There is at most
+    /// one operator key at a time; registering a new one immediately
+    /// invalidates the ability to submit authorizations signed by the old
+    /// key (already-consumed authorizations remain consumed either way).
+    pub fn register_operator_key(e: Env, admin: Address, operator_key: BytesN<32>) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let previous_ref = stored_ref(&e, &DataKey::OperatorKey);
+        e.storage()
+            .persistent()
+            .set(&DataKey::OperatorKey, &operator_key);
+
+        payroll_events::emit_operator_key_registered(&e);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::OPERATOR_KEY,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::OperatorKey),
+        );
+    }
+
+    /// Revoke the currently registered operator key. Only the admin may
+    /// call. After revocation, `signed_add_reviewer` is unusable until a new
+    /// key is registered.
+    pub fn revoke_operator_key(e: Env, admin: Address) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let previous_ref = stored_ref(&e, &DataKey::OperatorKey);
+        e.storage().persistent().remove(&DataKey::OperatorKey);
+
+        payroll_events::emit_operator_key_revoked(&e);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::OPERATOR_KEY,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::OperatorKey),
+        );
+    }
+
+    /// Return the currently registered operator public key, if any.
+    pub fn get_operator_key(e: Env) -> Option<BytesN<32>> {
+        e.storage().persistent().get(&DataKey::OperatorKey)
+    }
+
+    /// Grant reviewer authorization using a signed, expiring off-chain
+    /// operator authorization instead of the admin's own `require_auth()`
+    /// (issue #519). Callable by ANYONE holding a validly signed payload —
+    /// the ed25519 signature over `payload` by the registered operator key
+    /// IS the authorization; the submitter needs no role of their own.
+    ///
+    /// Rejected when:
+    /// - No operator key is registered (`register_operator_key` first).
+    /// - `payload.action` is not `AddReviewer(reviewer)` for the given
+    ///   `reviewer` argument (prevents submitting a payload signed for a
+    ///   different action/target against this entrypoint).
+    /// - `signature` does not verify against the registered operator key
+    ///   for `payload`'s exact XDR-encoded bytes.
+    /// - `payload.expires_at_ledger` is at or before the current ledger
+    ///   (`ReplayError::AuthorizationExpired`), or its lifetime at signing
+    ///   time exceeded `MAX_AUTHORIZATION_TTL_LEDGERS`.
+    /// - This exact payload (by its hashed XDR encoding) has already been
+    ///   consumed by a prior call — the same protection `commit_draft`/
+    ///   `RunNonce` give against replay elsewhere in this contract.
+    ///
+    /// Otherwise behaves exactly like `add_reviewer`, including the
+    /// `MaxReviewers` cap (#539) and the `reviewer_added` +
+    /// `config_changed` events.
+    pub fn signed_add_reviewer(
+        e: Env,
+        reviewer: Address,
+        payload: SignedOperatorPayload,
+        signature: BytesN<64>,
+    ) {
+        Self::require_not_paused(&e);
+
+        match &payload.action {
+            SignedOperatorAction::AddReviewer(authorized_reviewer) => {
+                if authorized_reviewer != &reviewer {
+                    panic!("Signed payload action does not match the supplied reviewer");
+                }
+            }
+        }
+
+        let operator_key: BytesN<32> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::OperatorKey)
+            .expect("No operator key registered");
+
+        let message = require_not_expired(&e, &payload);
+        e.crypto().ed25519_verify(&operator_key, &message, &signature);
+
+        let consume_key = DataKey::ConsumedOperatorAuth(consumed_key(&e, &payload));
+        if e.storage().persistent().has(&consume_key) {
+            panic!("Signed operator authorization already consumed");
+        }
+        e.storage().persistent().set(&consume_key, &true);
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        Self::grant_reviewer_internal(&e, &addrs.admin, &reviewer);
     }
 
     /// Approve a payroll run as an authorized reviewer.
