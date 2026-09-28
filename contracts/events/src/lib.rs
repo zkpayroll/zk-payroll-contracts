@@ -101,6 +101,37 @@ pub fn emit_deposit(e: &Env, from: Address, amount: i128, deposit_id: BytesN<32>
     );
 }
 
+/// Emit an aggregate treasury balance snapshot after a funding or payroll
+/// lifecycle transition. The payload contains no employee, salary-row, or
+/// proof data; consumers can update treasury health dashboards without
+/// polling token and reservation storage.
+pub fn emit_treasury_balance_snapshot(
+    e: &Env,
+    asset: Address,
+    total_balance: i128,
+    available_balance: i128,
+    reserved_balance: i128,
+    blocked_balance: i128,
+    observed_at: u64,
+    trigger: Symbol,
+) {
+    e.events().publish(
+        (
+            payroll_topic(),
+            Symbol::new(e, "treasury_balance_snapshot"),
+            asset,
+        ),
+        (
+            total_balance,
+            available_balance,
+            reserved_balance,
+            blocked_balance,
+            observed_at,
+            trigger,
+        ),
+    );
+}
+
 /// Emitted when a metadata hash is pre-committed.
 pub fn emit_metadata_committed(e: &Env, metadata_hash: BytesN<32>) {
     e.events().publish(

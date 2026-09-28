@@ -1150,6 +1150,22 @@ pub struct ComplianceEvidencePointer {
 #[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl Payroll {
+    /// Publish the same aggregate treasury view exposed by the read-only API.
+    /// No employee rows, salary values, or proof material are included.
+    fn emit_treasury_balance_snapshot(e: &Env, asset: Address, trigger: Symbol) {
+        let summary = Self::get_safe_treasury_summary(e.clone(), asset);
+        payroll_events::emit_treasury_balance_snapshot(
+            e,
+            summary.asset,
+            summary.total_balance,
+            summary.available_balance,
+            summary.reserved_balance,
+            summary.blocked_balance,
+            e.ledger().timestamp(),
+            trigger,
+        );
+    }
+
     pub fn initialize(
         e: Env,
         admin: Address,
@@ -2267,6 +2283,7 @@ impl Payroll {
             (symbol_short!("payroll"), Symbol::new(&e, "deposit")),
             (from, amount, deposit_id, new_balance),
         );
+        Self::emit_treasury_balance_snapshot(&e, addrs.token, Symbol::new(&e, "deposit"));
     }
 
     /// Return the accumulated deposit balance for a given depositor address (#62).
@@ -3119,6 +3136,11 @@ impl Payroll {
         token_client.transfer(&addrs.treasury, &request.recipient, &request.amount);
 
         payroll_events::emit_emergency_approved(&e, request.amount, request.recipient);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "emergency_withdrawal"),
+        );
     }
 
     /// Cancel a pending emergency withdrawal request.
@@ -3306,6 +3328,11 @@ impl Payroll {
         Self::add_locked_funds(&e, addrs.token.clone(), expected_total_spend);
 
         payroll_events::emit_run_prepared(&e, run_id, expected_total_spend);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_prepared"),
+        );
 
         run_id
     }
@@ -3433,6 +3460,11 @@ impl Payroll {
             (symbol_short!("payroll"), Symbol::new(&e, "run_finalized")),
             (run_id, pending_run.total_amount),
         );
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_finalized"),
+        );
     }
 
     /// Cancel a pending payroll run without executing any payments (issue #198).
@@ -3507,6 +3539,11 @@ impl Payroll {
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_cancelled")),
             (run_id, reason),
+        );
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_cancelled"),
         );
     }
 
@@ -3833,6 +3870,11 @@ impl Payroll {
         Self::set_metadata_version(&e, run_id, 1u32, BytesN::from_array(&e, &[0u8; 32]));
 
         payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_executed"),
+        );
 
         run_id
     }
@@ -6319,6 +6361,11 @@ impl Payroll {
         );
 
         payroll_events::emit_settlement_window_expired(&e, run_id, period, now);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_expired"),
+        );
     }
 
     // ?? Issue #146: archived payroll run queries ??????????????????????????????

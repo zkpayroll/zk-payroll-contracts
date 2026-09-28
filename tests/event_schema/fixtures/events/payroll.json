@@ -382,5 +382,21 @@
       { "name": "reserved_amount", "type": "i128" },
       { "name": "expires_at", "type": "u64" }
     ]
+  },
+  "payroll.treasury_balance_snapshot": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll"},
+      { "type": "Symbol", "value": "treasury_balance_snapshot"},
+      { "type": "Address" }
+    ],
+    "data": [
+      { "name": "total_balance", "type": "i128"},
+      { "name": "available_balance", "type": "i128"},
+      { "name": "reserved_balance", "type": "i128"},
+      { "name": "blocked_balance", "type": "i128"},
+      { "name": "observed_at", "type": "u64"},
+      { "name": "trigger", "type": "Symbol" }
+    ]
   }
 }
