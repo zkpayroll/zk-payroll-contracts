@@ -47,6 +47,7 @@ Executes a batch payroll payment.
     "GA2C5QQZAOWTJJFFAQ44XQR5A2RIV5C2P4XQ..."
   ],
   "amounts": [5000, 6500],
+  "allocation_total": 11500,
   "proofs_a": ["0x...", "0x..."],
   "proofs_b": ["0x...", "0x..."],
   "proofs_c": ["0x...", "0x..."],

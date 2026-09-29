@@ -365,6 +365,7 @@ fn test_batch_total_equals_sum_of_amounts() {
         &company_id,
         &employees,
         &amounts,
+        &10_000,
         &proofs_a,
         &proofs_b,
         &proofs_c,

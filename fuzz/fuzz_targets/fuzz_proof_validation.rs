@@ -407,11 +407,16 @@ fuzz_target!(|input: FuzzInput| {
             for emp in &test_employees {
                 initial_balances.push(sys.token.balance(emp));
             }
+            let allocation_total = test_amounts
+                .iter()
+                .try_fold(0i128, |total, amount| total.checked_add(*amount))
+                .unwrap_or(i128::MAX);
 
             let res = sys.executor.try_execute_batch_payroll(
                 &sys.company_id,
                 &sdk_employees,
                 &sdk_amounts,
+                &allocation_total,
                 &sdk_proofs_a,
                 &sdk_proofs_b,
                 &sdk_proofs_c,

@@ -635,6 +635,7 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 | `company_id` | `u64`                 | Target company                           |
 | `employees`  | `Vec<Address>`        | Employee addresses                       |
 | `amounts`    | `Vec<i128>`           | Payment amounts (same length)            |
+| `allocation_total` | `i128`           | Declared pool total; must equal the checked sum of `amounts` |
 | `proofs_a`   | `Vec<BytesN<64>>`     | G1 proof A components                    |
 | `proofs_b`   | `Vec<BytesN<128>>`    | G2 proof B components                    |
 | `proofs_c`   | `Vec<BytesN<64>>`     | G1 proof C components                    |
@@ -644,6 +645,7 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 
 **Behavior**:
 - All input vectors must have identical length; returns `Err(ArrayLengthMismatch)` otherwise.
+- Non-empty batch amounts must be non-negative and sum exactly to `allocation_total`; mismatch, negative values, and arithmetic overflow return `AllocationTotalMismatch`, `InvalidAllocationAmount`, and `AllocationOverflow`.
 - Iterates sequentially, calling `execute_payment` for each employee.
 - First failure aborts the entire batch.
 

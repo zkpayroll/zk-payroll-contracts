@@ -71,6 +71,38 @@ pub enum PaymentError {
     AssetDecimalsMissing = 9,
     /// Asset decimal mismatch between payment and contract assumptions (issue #354).
     AssetDecimalsMismatch = 10,
+    /// Employee payouts do not match the declared batch allocation pool.
+    AllocationTotalMismatch = 11,
+    /// Summing employee allocations exceeded the supported amount range.
+    AllocationOverflow = 12,
+    /// Allocation totals and employee payout amounts must be non-negative.
+    InvalidAllocationAmount = 13,
+}
+
+fn reconcile_allocation(
+    amounts: &soroban_sdk::Vec<i128>,
+    expected_total: i128,
+) -> Result<(), PaymentError> {
+    if expected_total < 0 {
+        return Err(PaymentError::InvalidAllocationAmount);
+    }
+
+    let mut actual_total = 0i128;
+    for index in 0..amounts.len() {
+        let amount = amounts.get(index).unwrap();
+        if amount < 0 {
+            return Err(PaymentError::InvalidAllocationAmount);
+        }
+        actual_total = actual_total
+            .checked_add(amount)
+            .ok_or(PaymentError::AllocationOverflow)?;
+    }
+
+    if actual_total != expected_total {
+        return Err(PaymentError::AllocationTotalMismatch);
+    }
+
+    Ok(())
 }
 
 /// Contract addresses for dependencies
@@ -531,6 +563,7 @@ impl PaymentExecutor {
         company_id: u64,
         employees: soroban_sdk::Vec<Address>,
         amounts: soroban_sdk::Vec<i128>,
+        allocation_total: i128,
         proofs_a: soroban_sdk::Vec<BytesN<64>>,
         proofs_b: soroban_sdk::Vec<BytesN<128>>,
         proofs_c: soroban_sdk::Vec<BytesN<64>>,
@@ -551,6 +584,8 @@ impl PaymentExecutor {
         if count == 0 {
             return Err(PaymentError::EmptyBatch);
         }
+
+        reconcile_allocation(&amounts, allocation_total)?;
 
         let mut records = soroban_sdk::Vec::new(&env);
 
@@ -840,6 +875,7 @@ mod tests {
             &company_id,
             &employees,
             &amounts,
+            &1000,
             &proofs_a,
             &proofs_b,
             &proofs_c,
@@ -851,6 +887,97 @@ mod tests {
             result.unwrap_err().unwrap(),
             PaymentError::ArrayLengthMismatch
         );
+    }
+
+    #[test]
+    fn test_allocation_reconciliation_boundaries() {
+        let env = Env::default();
+        let exact = soroban_sdk::Vec::from_array(&env, [100i128, 200i128]);
+        assert_eq!(reconcile_allocation(&exact, 300), Ok(()));
+        assert_eq!(
+            reconcile_allocation(&exact, 299),
+            Err(PaymentError::AllocationTotalMismatch)
+        );
+
+        let overflow = soroban_sdk::Vec::from_array(&env, [i128::MAX, 1i128]);
+        assert_eq!(
+            reconcile_allocation(&overflow, i128::MAX),
+            Err(PaymentError::AllocationOverflow)
+        );
+
+        let negative = soroban_sdk::Vec::from_array(&env, [-1i128]);
+        assert_eq!(
+            reconcile_allocation(&negative, 0),
+            Err(PaymentError::InvalidAllocationAmount)
+        );
+
+        let empty: soroban_sdk::Vec<i128> = soroban_sdk::Vec::new(&env);
+        assert_eq!(reconcile_allocation(&empty, 0), Ok(()));
+    }
+
+    #[test]
+    fn test_batch_reconciliation_rejects_mismatch_before_payment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+        client.initialize(&setup_addresses(&env));
+
+        let company_id = 0u64;
+        let employees = soroban_sdk::Vec::from_array(&env, [Address::generate(&env)]);
+        let amounts = soroban_sdk::Vec::from_array(&env, [100i128]);
+        let proofs_a = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let proofs_b = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 128])]);
+        let proofs_c = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 64])]);
+        let nullifiers = soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[0u8; 32])]);
+
+        let result = client.try_execute_batch_payroll(
+            &company_id,
+            &employees,
+            &amounts,
+            &99,
+            &proofs_a,
+            &proofs_b,
+            &proofs_c,
+            &nullifiers,
+            &1,
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PaymentError::AllocationTotalMismatch
+        );
+        assert!(!client.is_paid(&employees.get(0).unwrap(), &1));
+        assert_eq!(client.get_total_paid(&company_id), 0);
+    }
+
+    #[test]
+    fn test_empty_batch_rejects_zero_allocation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+        client.initialize(&setup_addresses(&env));
+
+        let company_id = 0u64;
+        let empty_addresses: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        let empty_amounts: soroban_sdk::Vec<i128> = soroban_sdk::Vec::new(&env);
+        let empty_proofs_a: soroban_sdk::Vec<BytesN<64>> = soroban_sdk::Vec::new(&env);
+        let empty_proofs_b: soroban_sdk::Vec<BytesN<128>> = soroban_sdk::Vec::new(&env);
+        let empty_proofs_c: soroban_sdk::Vec<BytesN<64>> = soroban_sdk::Vec::new(&env);
+        let empty_nullifiers: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env);
+
+        let result = client.try_execute_batch_payroll(
+            &company_id,
+            &empty_addresses,
+            &empty_amounts,
+            &0,
+            &empty_proofs_a,
+            &empty_proofs_b,
+            &empty_proofs_c,
+            &empty_nullifiers,
+            &1,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), PaymentError::EmptyBatch);
     }
 
     // -----------------------------------------------------------------------

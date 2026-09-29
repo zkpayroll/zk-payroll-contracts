@@ -651,6 +651,7 @@ fn test_failed_batch_execution_rolls_back_partial_state() {
         &company_id,
         &employees,
         &amounts,
+        &900,
         &proofs_a,
         &proofs_b,
         &proofs_c,

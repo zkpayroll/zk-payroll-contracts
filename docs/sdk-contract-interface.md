@@ -385,6 +385,7 @@ Same as `execute_payment` but accepts arrays. All arrays must have equal length.
   "company_id": 0,
   "employees": ["GA2C5...", "GB7TA..."],
   "amounts": [5000, 6500],
+  "allocation_total": 11500,
   "proofs_a": ["0x...", "0x..."],
   "proofs_b": ["0x...", "0x..."],
   "proofs_c": ["0x...", "0x..."],
