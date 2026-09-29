@@ -27,20 +27,20 @@ Register a company and configure its treasury so payroll can be funded.
 
 ### Contracts involved
 
-| Contract | Role |
-|----------|------|
-| `payroll_registry` | Stores company metadata (admin, treasury) |
-| `payroll` | High-level batch facade; holds deposited tokens |
+| Contract           | Role                                            |
+| ------------------ | ----------------------------------------------- |
+| `payroll_registry` | Stores company metadata (admin, treasury)       |
+| `payroll`          | High-level batch facade; holds deposited tokens |
 
 ### Step 1 — Register the company
 
 **Entrypoint:** `PayrollRegistry::register_company`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `admin` | `Address` | Company admin (must sign the transaction) |
-| `treasury` | `Address` | Address that holds payroll funds (SEP-41 token) |
-| **Returns** | `u64` | Auto-assigned company ID |
+| Input       | Type      | Description                                     |
+| ----------- | --------- | ----------------------------------------------- |
+| `admin`     | `Address` | Company admin (must sign the transaction)       |
+| `treasury`  | `Address` | Address that holds payroll funds (SEP-41 token) |
+| **Returns** | `u64`     | Auto-assigned company ID                        |
 
 **Sample payload:**
 
@@ -57,14 +57,14 @@ Register a company and configure its treasury so payroll can be funded.
 
 Links the payroll facade to the deployed contracts.
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `admin` | `Address` | Payroll admin (typically same as company admin) |
-| `token` | `Address` | SEP-41 token contract address |
-| `verifier` | `Address` | `proof_verifier` contract address |
-| `commitment` | `Address` | `salary_commitment` contract address |
-| `treasury` | `Address` | Treasury contract address holding funds |
-| `treasury_owner` | `Address` | Authorized treasury owner |
+| Input            | Type      | Description                                     |
+| ---------------- | --------- | ----------------------------------------------- |
+| `admin`          | `Address` | Payroll admin (typically same as company admin) |
+| `token`          | `Address` | SEP-41 token contract address                   |
+| `verifier`       | `Address` | `proof_verifier` contract address               |
+| `commitment`     | `Address` | `salary_commitment` contract address            |
+| `treasury`       | `Address` | Treasury contract address holding funds         |
+| `treasury_owner` | `Address` | Authorized treasury owner                       |
 
 **Sample payload:**
 
@@ -83,10 +83,10 @@ Links the payroll facade to the deployed contracts.
 
 **Entrypoint:** `Payroll::deposit`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `from` | `Address` | Token holder (must sign) |
-| `amount` | `i128` | Deposit amount (must be positive) |
+| Input    | Type      | Description                       |
+| -------- | --------- | --------------------------------- |
+| `from`   | `Address` | Token holder (must sign)          |
+| `amount` | `i128`    | Deposit amount (must be positive) |
 
 **Sample payload:**
 
@@ -99,12 +99,22 @@ Links the payroll facade to the deployed contracts.
 
 **Events emitted:** `Deposit` (topics: `admin`, `amount`)
 
+Before preparing a payroll run, clients can call
+`Payroll::check_funding_source_readiness(required_amount)` as a read-only
+preflight. It checks that the payroll is initialized, the canonical payout
+asset is enabled, the token contract responds to a balance query, and the
+treasury's balance after pending-run reservations covers the positive requested
+amount. The response includes `ready`, an optional stable `blocker` code, and
+the aggregate available balance when it could be queried. A successful check
+does not reserve funds; another transaction may change availability before a
+later payroll submission.
+
 ### Step 4 (optional) — Set a pause manager
 
 **Entrypoint:** `Payroll::set_pause_manager`
 
-| Input | Type | Description |
-|-------|------|-------------|
+| Input           | Type      | Description                                             |
+| --------------- | --------- | ------------------------------------------------------- |
 | `pause_manager` | `Address` | Contract or address authorized to pause/unpause payroll |
 
 ---
@@ -115,9 +125,9 @@ Register an employee with a private salary commitment.
 
 ### Contracts involved
 
-| Contract | Role |
-|----------|------|
-| `payroll_registry` | Stores employee record and commitment reference |
+| Contract            | Role                                                             |
+| ------------------- | ---------------------------------------------------------------- |
+| `payroll_registry`  | Stores employee record and commitment reference                  |
 | `salary_commitment` | Stores the on-chain ZK commitment (`Poseidon(salary, blinding)`) |
 
 ### Prerequisites
@@ -130,11 +140,11 @@ Register an employee with a private salary commitment.
 
 **Entrypoint:** `SalaryCommitmentContract::store_commitment`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `employee` | `Address` | Employee Ed25519 public key |
-| `commitment` | `BytesN<32>` | Poseidon hash commitment |
-| **Returns** | `SalaryCommitment` | Created commitment record |
+| Input        | Type               | Description                 |
+| ------------ | ------------------ | --------------------------- |
+| `employee`   | `Address`          | Employee Ed25519 public key |
+| `commitment` | `BytesN<32>`       | Poseidon hash commitment    |
+| **Returns**  | `SalaryCommitment` | Created commitment record   |
 
 **Sample payload:**
 
@@ -149,10 +159,10 @@ Register an employee with a private salary commitment.
 
 **Entrypoint:** `PayrollRegistry::add_employee`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `company_id` | `u64` | Company ID from registration |
-| `employee` | `Address` | Employee address (must match Step 1) |
+| Input        | Type         | Description                           |
+| ------------ | ------------ | ------------------------------------- |
+| `company_id` | `u64`        | Company ID from registration          |
+| `employee`   | `Address`    | Employee address (must match Step 1)  |
 | `commitment` | `BytesN<32>` | Same commitment hash stored in Step 1 |
 
 **Sample payload:**
@@ -169,18 +179,18 @@ Register an employee with a private salary commitment.
 
 **Entrypoint:** `PayrollRegistry::set_employee_status`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `company_id` | `u64` | Company ID |
-| `employee` | `Address` | Employee address |
-| `status` | `EmployeeStatus` | Set to `Active` |
+| Input        | Type             | Description      |
+| ------------ | ---------------- | ---------------- |
+| `company_id` | `u64`            | Company ID       |
+| `employee`   | `Address`        | Employee address |
+| `status`     | `EmployeeStatus` | Set to `Active`  |
 
 **Employee statuses:**
 
-| Value | Meaning |
-|-------|---------|
-| `Active` (0) | Eligible for payroll payments |
-| `Inactive` (1) | Temporarily ineligible |
+| Value            | Meaning                          |
+| ---------------- | -------------------------------- |
+| `Active` (0)     | Eligible for payroll payments    |
+| `Inactive` (1)   | Temporarily ineligible           |
 | `Incomplete` (2) | Default; onboarding not finished |
 
 ### Employee Reference Identifiers & Normalization Rules (#544)
@@ -195,6 +205,7 @@ All employee reference IDs are canonically normalized according to strict valida
 4. **Character Set Validation**: Only printable ASCII characters (`0x20` space through `0x7E` `~`) are permitted; control codes are rejected.
 
 **Key Entrypoints:**
+
 - `SalaryCommitmentContract::set_employee_reference_id(employee, reference_id)` — Sets or updates an employee's external reference ID. Enforces uniqueness across the employer scope using the normalized form.
 - `SalaryCommitmentContract::get_employee_by_reference_id(reference_id)` — Returns the `Option<Address>` for a given reference ID, normalizing the query input for case- and whitespace-insensitive lookups.
 - `SalaryCommitmentContract::normalize_employee_identifier(identifier)` / `Payroll::normalize_employee_identifier(identifier)` — Pure helper returning the canonical normalized `soroban_sdk::String`.
@@ -203,12 +214,12 @@ All employee reference IDs are canonically normalized according to strict valida
 
 When salary changes, use one of:
 
-| Entrypoint | When to use |
-|------------|-------------|
-| `SalaryCommitmentContract::update_commitment` | Routine salary change; archives old version |
-| `SalaryCommitmentContract::rotate_commitment` | Security rotation of an unlocked commitment; archives the old value |
+| Entrypoint                                             | When to use                                                                                                                 |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `SalaryCommitmentContract::update_commitment`          | Routine salary change; archives old version                                                                                 |
+| `SalaryCommitmentContract::rotate_commitment`          | Security rotation of an unlocked commitment; archives the old value                                                         |
 | `SalaryCommitmentContract::rotate_approved_commitment` | Rotation of a commitment locked by an approved/settled payroll run; keeps the lock so the settled record stays valid (#520) |
-| `PayrollRegistry::update_commitment` | Convenience wrapper that updates both registry and commitment contracts |
+| `PayrollRegistry::update_commitment`                   | Convenience wrapper that updates both registry and commitment contracts                                                     |
 
 ---
 
@@ -218,19 +229,19 @@ Process payments for employees in a payroll run.
 
 ### Contracts involved
 
-| Contract | Role |
-|----------|------|
-| `payroll` | High-level batch facade (recommended for SDK consumers) |
-| `payment_executor` | Low-level single/batch payment execution |
-| `proof_verifier` | Verifies Groth16 proofs |
-| `salary_commitment` | Records nullifiers to prevent double-spend |
+| Contract            | Role                                                    |
+| ------------------- | ------------------------------------------------------- |
+| `payroll`           | High-level batch facade (recommended for SDK consumers) |
+| `payment_executor`  | Low-level single/batch payment execution                |
+| `proof_verifier`    | Verifies Groth16 proofs                                 |
+| `salary_commitment` | Records nullifiers to prevent double-spend              |
 
 ### Two execution paths
 
-| Path | Contract | Best for |
-|------|----------|----------|
-| **Batch** (recommended) | `Payroll` | Multi-employee runs in a single transaction |
-| **Single** | `PaymentExecutor` | One-off payments or custom orchestration |
+| Path                    | Contract          | Best for                                    |
+| ----------------------- | ----------------- | ------------------------------------------- |
+| **Batch** (recommended) | `Payroll`         | Multi-employee runs in a single transaction |
+| **Single**              | `PaymentExecutor` | One-off payments or custom orchestration    |
 
 ### Path A — Batch execution via Payroll facade
 
@@ -238,13 +249,13 @@ Process payments for employees in a payroll run.
 
 Drafts let you correct totals before committing on-chain.
 
-| Entrypoint | Description |
-|------------|-------------|
-| `Payroll::create_run_draft` | Create a `Pending` draft with expected totals |
-| `Payroll::amend_run_draft` | Correct amounts/employee count before finalizing |
-| `Payroll::finalize_run_draft` | Lock the draft (immutable) |
+| Entrypoint                      | Description                                                     |
+| ------------------------------- | --------------------------------------------------------------- |
+| `Payroll::create_run_draft`     | Create a `Pending` draft with expected totals                   |
+| `Payroll::amend_run_draft`      | Correct amounts/employee count before finalizing                |
+| `Payroll::finalize_run_draft`   | Lock the draft (immutable)                                      |
 | `Payroll::get_draft_lock_owner` | Query the lock owner address of a finalized/locked draft (#556) |
-| `Payroll::get_draft_updated_at` | Query draft last-updated timestamp metadata |
+| `Payroll::get_draft_updated_at` | Query draft last-updated timestamp metadata                     |
 
 **Sample: `create_run_draft`**
 
@@ -263,15 +274,15 @@ Drafts let you correct totals before committing on-chain.
 
 **Entrypoint:** `Payroll::batch_process_payroll`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `proofs` | `Vec<BytesN<256>>` | Packed Groth16 proofs (one per employee) |
-| `amounts` | `Vec<i128>` | Payment amounts (private; for total validation) |
-| `employees` | `Vec<Address>` | Employee addresses |
-| `expected_total_spend` | `i128` | Sum of amounts; must match actual treasury outflow |
-| `nonce` | `BytesN<32>` | Unique nonce for this run (prevents replay) |
-| `draft_hash` | `Option<BytesN<32>>` | Optional pre-committed draft hash |
-| **Returns** | `u64` | Run ID for tracking |
+| Input                  | Type                 | Description                                        |
+| ---------------------- | -------------------- | -------------------------------------------------- |
+| `proofs`               | `Vec<BytesN<256>>`   | Packed Groth16 proofs (one per employee)           |
+| `amounts`              | `Vec<i128>`          | Payment amounts (private; for total validation)    |
+| `employees`            | `Vec<Address>`       | Employee addresses                                 |
+| `expected_total_spend` | `i128`               | Sum of amounts; must match actual treasury outflow |
+| `nonce`                | `BytesN<32>`         | Unique nonce for this run (prevents replay)        |
+| `draft_hash`           | `Option<BytesN<32>>` | Optional pre-committed draft hash                  |
+| **Returns**            | `u64`                | Run ID for tracking                                |
 
 **Sample payload:**
 
@@ -302,10 +313,10 @@ Drafts let you correct totals before committing on-chain.
 
 **Entrypoint:** `Payroll::update_reconciliation_status`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `admin` | `Address` | Company admin |
-| `run_id` | `u64` | Completed run ID |
+| Input    | Type                   | Description                               |
+| -------- | ---------------------- | ----------------------------------------- |
+| `admin`  | `Address`              | Company admin                             |
+| `run_id` | `u64`                  | Completed run ID                          |
 | `status` | `ReconciliationStatus` | `Reconciled`, `Unreconciled`, or `Failed` |
 
 #### Stale prepared runs: expiration (#474)
@@ -315,13 +326,13 @@ pending) reserves treasury funds until it is resolved. When the admin has
 enabled a pending-run expiry policy, a run that is not finalized within the
 configured window can no longer be finalized and anyone may retire it:
 
-| Entrypoint | Who | Purpose |
-|------------|-----|---------|
-| `set_run_expiration_policy(admin, max_age_seconds)` | Admin | Enable/update the window (`0` disables, only while no runs are pending). |
-| `get_run_expiration_policy()` | Anyone | Returns the active policy, if any. |
-| `is_payroll_run_expired(run_id)` | Anyone | Check whether a pending run is past its window before offering Finalize. |
-| `expire_payroll_run(caller, run_id)` | Anyone | Retire an aged run: releases reserved funds, stores a redacted record, emits `run_expired`. |
-| `get_expired_run_record(run_id)` | Anyone | Redacted audit record for an expired run (no amounts or employees). |
+| Entrypoint                                          | Who    | Purpose                                                                                     |
+| --------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------- |
+| `set_run_expiration_policy(admin, max_age_seconds)` | Admin  | Enable/update the window (`0` disables, only while no runs are pending).                    |
+| `get_run_expiration_policy()`                       | Anyone | Returns the active policy, if any.                                                          |
+| `is_payroll_run_expired(run_id)`                    | Anyone | Check whether a pending run is past its window before offering Finalize.                    |
+| `expire_payroll_run(caller, run_id)`                | Anyone | Retire an aged run: releases reserved funds, stores a redacted record, emits `run_expired`. |
+| `get_expired_run_record(run_id)`                    | Anyone | Redacted audit record for an expired run (no amounts or employees).                         |
 
 Finalizing an expired run fails with
 `"Run has expired: it was not finalized within the configured window; call expire_payroll_run"`.
@@ -333,10 +344,10 @@ See [Payroll Run Expiration](./run-expiration.md).
 
 **Entrypoint:** `PaymentExecutor::create_period`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `company_id` | `u64` | Company ID |
-| **Returns** | `PayrollPeriod` | Period record with sequential `period_id` |
+| Input        | Type            | Description                               |
+| ------------ | --------------- | ----------------------------------------- |
+| `company_id` | `u64`           | Company ID                                |
+| **Returns**  | `PayrollPeriod` | Period record with sequential `period_id` |
 
 Only one open period per company at a time.
 
@@ -344,17 +355,17 @@ Only one open period per company at a time.
 
 **Entrypoint:** `PaymentExecutor::execute_payment`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `company_id` | `u64` | Company ID |
-| `employee` | `Address` | Employee address |
-| `amount` | `i128` | Payment amount |
-| `proof_a` | `BytesN<64>` | Groth16 proof component A |
-| `proof_b` | `BytesN<128>` | Groth16 proof component B |
-| `proof_c` | `BytesN<64>` | Groth16 proof component C |
-| `nullifier` | `BytesN<32>` | Unique nullifier for this proof |
-| `period` | `u32` | Period ID |
-| **Returns** | `PaymentRecord` | Payment record |
+| Input        | Type            | Description                     |
+| ------------ | --------------- | ------------------------------- |
+| `company_id` | `u64`           | Company ID                      |
+| `employee`   | `Address`       | Employee address                |
+| `amount`     | `i128`          | Payment amount                  |
+| `proof_a`    | `BytesN<64>`    | Groth16 proof component A       |
+| `proof_b`    | `BytesN<128>`   | Groth16 proof component B       |
+| `proof_c`    | `BytesN<64>`    | Groth16 proof component C       |
+| `nullifier`  | `BytesN<32>`    | Unique nullifier for this proof |
+| `period`     | `u32`           | Period ID                       |
+| **Returns**  | `PaymentRecord` | Payment record                  |
 
 **Sample payload:**
 
@@ -373,23 +384,23 @@ Only one open period per company at a time.
 
 **Safety checks enforced:**
 
-| Check | Error |
-|-------|-------|
-| System not paused | Panics if pause manager reports paused |
-| Period exists and is open | `PeriodNotFound` / `PeriodClosed` |
-| Proof not expired (max 7 days) | `ProofExpired` |
-| Nullifier not previously used | `ProofAlreadyUsed` |
-| No duplicate payment for this period | `AlreadyPaid` |
-| Proof verified by `proof_verifier` | Panics on invalid proof |
+| Check                                | Error                                  |
+| ------------------------------------ | -------------------------------------- |
+| System not paused                    | Panics if pause manager reports paused |
+| Period exists and is open            | `PeriodNotFound` / `PeriodClosed`      |
+| Proof not expired (max 7 days)       | `ProofExpired`                         |
+| Nullifier not previously used        | `ProofAlreadyUsed`                     |
+| No duplicate payment for this period | `AlreadyPaid`                          |
+| Proof verified by `proof_verifier`   | Panics on invalid proof                |
 
 #### Step 3 — Close the period
 
 **Entrypoint:** `PaymentExecutor::close_period`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `company_id` | `u64` | Company ID |
-| `period_id` | `u32` | Period to close |
+| Input        | Type  | Description     |
+| ------------ | ----- | --------------- |
+| `company_id` | `u64` | Company ID      |
+| `period_id`  | `u32` | Period to close |
 
 No further payments are allowed in a closed period.
 
@@ -420,19 +431,19 @@ Grant an auditor time-bounded access to verify salary commitments.
 
 ### Contract involved
 
-| Contract | Role |
-|----------|------|
+| Contract       | Role                                                       |
+| -------------- | ---------------------------------------------------------- |
 | `audit_module` | Manages view keys, commitment verification, and audit logs |
 
 ### Step 1 — Grant a view key
 
 **Entrypoint:** `AuditModule::generate_view_key`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `auditor` | `Address` | Auditor's public key |
-| `expiration_ledger` | `u32` | Ledger sequence at which access expires |
-| **Returns** | `BytesN<32>` | The view key |
+| Input               | Type         | Description                             |
+| ------------------- | ------------ | --------------------------------------- |
+| `auditor`           | `Address`    | Auditor's public key                    |
+| `expiration_ledger` | `u32`        | Ledger sequence at which access expires |
+| **Returns**         | `BytesN<32>` | The view key                            |
 
 **Sample payload:**
 
@@ -447,21 +458,21 @@ Grant an auditor time-bounded access to verify salary commitments.
 
 Two entrypoints are available depending on whether the auditor supplies the key explicitly:
 
-| Entrypoint | Description |
-|------------|-------------|
-| `AuditModule::verify_commitment_with_key` | Key derived internally from stored record |
-| `AuditModule::verify_commitment_with_view_key` | Auditor supplies the key explicitly |
+| Entrypoint                                     | Description                               |
+| ---------------------------------------------- | ----------------------------------------- |
+| `AuditModule::verify_commitment_with_key`      | Key derived internally from stored record |
+| `AuditModule::verify_commitment_with_view_key` | Auditor supplies the key explicitly       |
 
 **`verify_commitment_with_key` inputs:**
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `auditor` | `Address` | Auditor address |
-| `stored_commitment` | `BytesN<32>` | The commitment to verify |
-| `claimed_amount` | `i128` | Claimed salary amount |
-| `blinding_factor` | `BytesN<32>` | Blinding factor used in commitment |
-| `scope` | `AuditScope` | `FullCompany`, `TimeRange`, `EmployeeList`, or `AggregateOnly` |
-| **Returns** | `Result<bool, AuditError>` | `Ok(true)` if commitment matches |
+| Input               | Type                       | Description                                                    |
+| ------------------- | -------------------------- | -------------------------------------------------------------- |
+| `auditor`           | `Address`                  | Auditor address                                                |
+| `stored_commitment` | `BytesN<32>`               | The commitment to verify                                       |
+| `claimed_amount`    | `i128`                     | Claimed salary amount                                          |
+| `blinding_factor`   | `BytesN<32>`               | Blinding factor used in commitment                             |
+| `scope`             | `AuditScope`               | `FullCompany`, `TimeRange`, `EmployeeList`, or `AggregateOnly` |
+| **Returns**         | `Result<bool, AuditError>` | `Ok(true)` if commitment matches                               |
 
 **Sample payload:**
 
@@ -477,24 +488,24 @@ Two entrypoints are available depending on whether the auditor supplies the key 
 
 **Audit scopes:**
 
-| Value | Meaning |
-|-------|---------|
-| `FullCompany` (0) | Full company audit |
-| `TimeRange` (1) | Audit within a specific time window |
-| `EmployeeList` (2) | Audit specific employees |
+| Value               | Meaning                                                |
+| ------------------- | ------------------------------------------------------ |
+| `FullCompany` (0)   | Full company audit                                     |
+| `TimeRange` (1)     | Audit within a specific time window                    |
+| `EmployeeList` (2)  | Audit specific employees                               |
 | `AggregateOnly` (3) | Aggregated stats only (no per-commitment verification) |
 
 ### Step 3 — Generate an aggregate report
 
 **Entrypoint:** `AuditModule::generate_aggregate_report`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `auditor` | `Address` | Auditor address (must have valid key) |
-| `company_id` | `Symbol` | Company identifier |
-| `period_start` | `u64` | Period start timestamp |
-| `period_end` | `u64` | Period end timestamp |
-| **Returns** | `AuditReport` | Aggregate report |
+| Input          | Type          | Description                           |
+| -------------- | ------------- | ------------------------------------- |
+| `auditor`      | `Address`     | Auditor address (must have valid key) |
+| `company_id`   | `Symbol`      | Company identifier                    |
+| `period_start` | `u64`         | Period start timestamp                |
+| `period_end`   | `u64`         | Period end timestamp                  |
+| **Returns**    | `AuditReport` | Aggregate report                      |
 
 **Returns:**
 
@@ -516,13 +527,13 @@ Two entrypoints are available depending on whether the auditor supplies the key 
 
 **Entrypoint:** `AuditModule::export_audit_summary`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `auditor` | `Address` | Auditor address |
-| `company_id` | `Symbol` | Company identifier |
-| `period_start` | `u64` | Period start |
-| `period_end` | `u64` | Period end |
-| **Returns** | `AuditMetadataSummary` | Compliance-ready summary |
+| Input          | Type                   | Description              |
+| -------------- | ---------------------- | ------------------------ |
+| `auditor`      | `Address`              | Auditor address          |
+| `company_id`   | `Symbol`               | Company identifier       |
+| `period_start` | `u64`                  | Period start             |
+| `period_end`   | `u64`                  | Period end               |
+| **Returns**    | `AuditMetadataSummary` | Compliance-ready summary |
 
 **Returns:**
 
@@ -545,18 +556,18 @@ This never includes salary values — only counts and pass/fail status.
 
 **Entrypoint:** `AuditModule::revoke_view_key`
 
-| Input | Type | Description |
-|-------|------|-------------|
-| `admin` | `Address` | Admin who originally granted the key |
-| `auditor` | `Address` | Auditor to revoke |
+| Input     | Type      | Description                          |
+| --------- | --------- | ------------------------------------ |
+| `admin`   | `Address` | Admin who originally granted the key |
+| `auditor` | `Address` | Auditor to revoke                    |
 
 ### Querying audit logs
 
-| Entrypoint | Description |
-|------------|-------------|
-| `AuditModule::query_by_company` | All entries for a company |
-| `AuditModule::query_by_employee` | Entries for a specific employee |
-| `AuditModule::query_by_period` | Entries within a time range |
+| Entrypoint                         | Description                     |
+| ---------------------------------- | ------------------------------- |
+| `AuditModule::query_by_company`    | All entries for a company       |
+| `AuditModule::query_by_employee`   | Entries for a specific employee |
+| `AuditModule::query_by_period`     | Entries within a time range     |
 | `AuditModule::get_audit_log_count` | Total entry count for a company |
 
 ---
@@ -567,36 +578,36 @@ This never includes salary values — only counts and pass/fail status.
 
 Both `PayrollRegistry` and `Payroll` support admin rotation via a propose/accept pattern:
 
-| Step | PayrollRegistry | Payroll |
-|------|----------------|---------|
+| Step    | PayrollRegistry                                                | Payroll                                            |
+| ------- | -------------------------------------------------------------- | -------------------------------------------------- |
 | Propose | `propose_admin_rotation(company_id, current_admin, new_admin)` | `propose_admin_rotation(current_admin, new_admin)` |
-| Accept | `accept_admin_rotation(company_id, new_admin)` | `accept_admin_rotation(new_admin)` |
-| Cancel | `cancel_admin_rotation(company_id, current_admin)` | `cancel_admin_rotation(current_admin)` |
+| Accept  | `accept_admin_rotation(company_id, new_admin)`                 | `accept_admin_rotation(new_admin)`                 |
+| Cancel  | `cancel_admin_rotation(company_id, current_admin)`             | `cancel_admin_rotation(current_admin)`             |
 
 ### Treasury owner rotation (two-step)
 
-| Step | Payroll |
-|------|---------|
+| Step    | Payroll                                               |
+| ------- | ----------------------------------------------------- |
 | Propose | `propose_treasury_rotation(current_owner, new_owner)` |
-| Accept | `accept_treasury_rotation(new_owner)` |
-| Cancel | `cancel_treasury_rotation(current_owner)` |
+| Accept  | `accept_treasury_rotation(new_owner)`                 |
+| Cancel  | `cancel_treasury_rotation(current_owner)`             |
 
 ### Emergency withdrawal (two-step, admin + treasury owner)
 
-| Step | Entrypoint | Description |
-|------|------------|-------------|
-| 1 | `Payroll::request_emergency_withdrawal` | Treasury owner requests withdrawal |
-| 2 | `Payroll::approve_emergency_withdrawal` | Admin approves and executes |
-| Cancel | `Payroll::cancel_emergency_withdrawal` | Either party cancels |
+| Step   | Entrypoint                              | Description                        |
+| ------ | --------------------------------------- | ---------------------------------- |
+| 1      | `Payroll::request_emergency_withdrawal` | Treasury owner requests withdrawal |
+| 2      | `Payroll::approve_emergency_withdrawal` | Admin approves and executes        |
+| Cancel | `Payroll::cancel_emergency_withdrawal`  | Either party cancels               |
 
 ### Commitment utilities
 
-| Entrypoint | Description |
-|------------|-------------|
-| `SalaryCommitmentContract::compute_commitment` | Compute `SHA-256(salary, blinding_factor)` off-chain |
-| `SalaryCommitmentContract::verify_commitment` | Verify a claimed salary against stored commitment |
-| `SalaryCommitmentContract::is_commitment_active` | Check if commitment is valid (not revoked) |
-| `SalaryCommitmentContract::has_commitment` | Check if employee has any commitment |
+| Entrypoint                                       | Description                                          |
+| ------------------------------------------------ | ---------------------------------------------------- |
+| `SalaryCommitmentContract::compute_commitment`   | Compute `SHA-256(salary, blinding_factor)` off-chain |
+| `SalaryCommitmentContract::verify_commitment`    | Verify a claimed salary against stored commitment    |
+| `SalaryCommitmentContract::is_commitment_active` | Check if commitment is valid (not revoked)           |
+| `SalaryCommitmentContract::has_commitment`       | Check if employee has any commitment                 |
 
 ---
 
@@ -631,10 +642,10 @@ SDK
 
 ## Further Reference
 
-| Document | Contents |
-|----------|----------|
+| Document                                    | Contents                                                                                      |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | [SDK Interface Spec](sdk-interface-spec.md) | Complete entrypoint signatures, data structures, serialization rules, events, and error codes |
-| [Payload Examples](payload-examples.md) | Concrete JSON payload and event shapes |
-| [Glossary](glossary.md) | Definitions of all domain terms |
-| [Events](events.md) | Event schema reference |
-| [Deployment Guide](deployment.md) | Step-by-step contract deployment |
+| [Payload Examples](payload-examples.md)     | Concrete JSON payload and event shapes                                                        |
+| [Glossary](glossary.md)                     | Definitions of all domain terms                                                               |
+| [Events](events.md)                         | Event schema reference                                                                        |
+| [Deployment Guide](deployment.md)           | Step-by-step contract deployment                                                              |

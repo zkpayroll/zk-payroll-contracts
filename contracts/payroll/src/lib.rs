@@ -726,6 +726,37 @@ pub struct SafeTreasurySummary {
     pub blocked_balance: i128,
 }
 
+/// A stable reason a payroll funding source is not ready for a requested spend.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FundingSourceBlocker {
+    /// Payroll has not been initialized with funding-source addresses.
+    NotInitialized = 0,
+    /// A funding readiness request must use a positive amount.
+    InvalidRequiredAmount = 1,
+    /// The canonical payout asset is not enabled for payroll.
+    AssetNotAllowed = 2,
+    /// The configured address did not respond as a SEP-41 token contract.
+    TokenUnavailable = 3,
+    /// Unreserved treasury funds do not cover the requested amount.
+    InsufficientFunds = 4,
+}
+
+/// Read-only readiness result for the configured payroll funding source.
+///
+/// The result exposes only aggregate treasury availability and a stable
+/// blocker code; it contains no employee, salary-row, or proof data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundingSourceReadiness {
+    pub ready: bool,
+    pub blocker: Option<FundingSourceBlocker>,
+    pub required_amount: i128,
+    /// `None` when the source is not initialized, allowlisted, or queryable.
+    pub available_balance: Option<i128>,
+}
+
 // ?? Issue #404: Cancelled Batch Read Status ????????????????????????????????????
 
 /// Safe metadata for a cancelled payroll batch (#404).
@@ -7757,6 +7788,63 @@ impl Payroll {
             available_balance,
             reserved_balance,
             blocked_balance,
+        }
+    }
+
+    /// Check whether the configured contract funding source can cover a spend
+    /// without executing a transfer or changing payroll state (#605).
+    ///
+    /// Readiness requires a positive `required_amount`, an initialized and
+    /// allowlisted canonical token, a responding SEP-41 balance query, and
+    /// enough unreserved treasury balance. The returned blocker gives SDKs an
+    /// actionable reason when any prerequisite is missing.
+    pub fn check_funding_source_readiness(
+        e: Env,
+        required_amount: i128,
+    ) -> FundingSourceReadiness {
+        let blocked = |blocker, available_balance| FundingSourceReadiness {
+            ready: false,
+            blocker: Some(blocker),
+            required_amount,
+            available_balance,
+        };
+
+        if required_amount <= 0 {
+            return blocked(FundingSourceBlocker::InvalidRequiredAmount, None);
+        }
+
+        let Some(addrs) = e
+            .storage()
+            .persistent()
+            .get::<_, ContractAddresses>(&DataKey::Addresses)
+        else {
+            return blocked(FundingSourceBlocker::NotInitialized, None);
+        };
+
+        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+            return blocked(FundingSourceBlocker::AssetNotAllowed, None);
+        }
+
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+        let total_balance = match token_client.try_balance(&addrs.treasury) {
+            Ok(balance) => balance,
+            Err(_) => return blocked(FundingSourceBlocker::TokenUnavailable, None),
+        };
+        let reserved_balance = Self::get_locked_funds(e, addrs.token);
+        let available_balance = total_balance.saturating_sub(reserved_balance);
+
+        if available_balance < required_amount {
+            return blocked(
+                FundingSourceBlocker::InsufficientFunds,
+                Some(available_balance),
+            );
+        }
+
+        FundingSourceReadiness {
+            ready: true,
+            blocker: None,
+            required_amount,
+            available_balance: Some(available_balance),
         }
     }
 
