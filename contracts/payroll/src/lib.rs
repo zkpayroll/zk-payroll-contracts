@@ -1234,6 +1234,16 @@ impl Payroll {
         if e.storage().persistent().has(&key) {
             panic!("Already initialized")
         }
+        // Validate the configured asset before writing any payroll state. A
+        // token address that does not implement the SEP-41 balance interface
+        // would otherwise produce an initialized contract that cannot safely
+        // report treasury availability or execute payroll.
+        if soroban_token::Client::new(&e, &token)
+            .try_balance(&treasury)
+            .is_err()
+        {
+            panic!("Configured payroll asset is unavailable or does not implement the token balance interface");
+        }
         let addrs = ContractAddresses {
             admin,
             token,

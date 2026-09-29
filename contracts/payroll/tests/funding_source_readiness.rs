@@ -114,3 +114,42 @@ fn unavailable_token_contract_is_reported_cleanly() {
     assert_eq!(result.blocker, Some(FundingSourceBlocker::TokenUnavailable));
     assert_eq!(result.available_balance, None);
 }
+
+#[test]
+#[should_panic(expected = "Configured payroll asset is unavailable or does not implement the token balance interface")]
+fn initialization_rejects_unavailable_asset_contract() {
+    let env = Env::default();
+    let (existing, _token, _employee) = common::setup(&env);
+    let addresses = existing.get_addresses();
+    let unavailable_asset = Address::generate(&env);
+    let payroll_id = env.register_contract(None, Payroll);
+    let client = PayrollClient::new(&env, &payroll_id);
+
+    client.initialize(
+        &addresses.admin,
+        &unavailable_asset,
+        &addresses.verifier,
+        &addresses.commitment,
+        &addresses.treasury,
+        &addresses.treasury_owner,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Configured payroll asset is unavailable or does not implement the token balance interface")]
+fn initialization_rejects_contract_without_token_balance_interface() {
+    let env = Env::default();
+    let (existing, _token, _employee) = common::setup(&env);
+    let addresses = existing.get_addresses();
+    let payroll_id = env.register_contract(None, Payroll);
+    let client = PayrollClient::new(&env, &payroll_id);
+
+    client.initialize(
+        &addresses.admin,
+        &payroll_id,
+        &addresses.verifier,
+        &addresses.commitment,
+        &addresses.treasury,
+        &addresses.treasury_owner,
+    );
+}
