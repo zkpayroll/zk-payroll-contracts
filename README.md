@@ -179,6 +179,19 @@ An authorized company admin may revoke the company's employer/admin authorizatio
 
 Existing payroll history remains intact; only the employer authorization is lifted. A revoked employer cannot call employer-only entrypoints until the canonical role state is restored through the repository's existing admin/rotation flows.
 
+### Approval Withdrawal and Supersession
+
+Payroll run approvals recorded by authorized reviewers are fully auditable
+through their full lifecycle (#522). A reviewer who granted the active
+approval may withdraw it with a mandatory, non-empty reason; the stored review
+transitions to a `Withdrawn` decision so expiry validation (#403) and approval
+consumers no longer treat the run as approved. A different authorized reviewer
+can supersede an existing approval, re-pointing the approval at themselves and
+restarting the #403 expiry window. Every withdrawal and supersession emits a
+privacy-safe `payroll` event (`run_approval_withdrawn` /
+`run_approval_superseded`) carrying only the run id, reviewer addresses, and a
+short reason symbol — never salary values or employee data.
+
 ### Process Private Payroll
 
 ```rust

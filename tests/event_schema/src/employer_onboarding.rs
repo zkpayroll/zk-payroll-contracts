@@ -5,8 +5,11 @@
 //! broader registry/salary_commitment domain fixtures so onboarding parsers
 //! can depend on a single, stable contract.
 
-use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, TryIntoVal, Val, Vec as SVec};
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::{
+    xdr::ContractEventBody, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val,
+    Vec as SVec,
+};
 
 use crate::support::{
     assert_matches_fixture, dynamic, field, last_event, new_env, sym, EventSchema, SchemaMap,
@@ -152,8 +155,12 @@ fn employer_onboarding_event_order_is_stable() {
         payroll_events::emit_employee_added(&env, company_id, employee, commitment);
     });
 
-    let events = env.events().all();
-    assert_eq!(events.len(), 3, "onboarding flow must emit exactly three events");
+    let events = env.events().all().events().to_vec();
+    assert_eq!(
+        events.len(),
+        3,
+        "onboarding flow must emit exactly three events"
+    );
 
     let expected = [
         Symbol::new(&env, "CompanyRegistered"),
@@ -161,8 +168,15 @@ fn employer_onboarding_event_order_is_stable() {
         Symbol::new(&env, "EmployeeAdded"),
     ];
     for (index, expected_name) in expected.iter().enumerate() {
-        let topics = events.get(index as u32).unwrap().1;
-        let name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let body = &events[index].body;
+        let v0 = match body {
+            soroban_sdk::xdr::ContractEventBody::V0(v0) => v0,
+        };
+        let name_scval = v0
+            .topics
+            .first()
+            .expect("event must carry at least one topic");
+        let name: Symbol = Symbol::try_from_val(&env, name_scval).unwrap();
         assert_eq!(
             name, *expected_name,
             "onboarding event order changed at index {index}"

@@ -347,6 +347,30 @@
       { "name": "reviewer", "type": "Address" }
     ]
   },
+  "payroll.run_approval_withdrawn": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_approval_withdrawn" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "reviewer", "type": "Address" },
+      { "name": "reason", "type": "Symbol" }
+    ]
+  },
+  "payroll.run_approval_superseded": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "run_approval_superseded" }
+    ],
+    "data": [
+      { "name": "run_id", "type": "u64" },
+      { "name": "previous_reviewer", "type": "Address" },
+      { "name": "new_reviewer", "type": "Address" }
+    ]
+  },
   "payroll.run_rejected": {
     "schema_version": 1,
     "topics": [

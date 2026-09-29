@@ -450,6 +450,44 @@ assert topics only; they do not log or export payroll amounts, commitments, or
 employee addresses. A failed or unauthorized approval reverts and emits no
 `run_approved` event.
 
+#### `payroll / run_approval_withdrawn`
+
+Emitted when the reviewer that recorded a run's active approval withdraws it
+(#522). The stored review transitions to a `Withdrawn` decision, so downstream
+consumers treating the run as approved must stop doing so when this event is
+observed.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_approval_withdrawn")
+data       (u64 run_id, Address reviewer, Symbol reason)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Approval-workflow indexers, compliance dashboards |
+
+#### `payroll / run_approval_superseded`
+
+Emitted when a different authorized reviewer takes over an existing approval
+(#522). The active approval is re-pointed at the new reviewer and its #403
+expiry window restarts from the supersession time.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_approval_superseded")
+data       (u64 run_id, Address previous_reviewer, Address new_reviewer)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Approval-workflow indexers, compliance dashboards |
+
+Both withdrawal and supersession events are privacy-safe: they carry only the
+opaque run id, reviewer addresses, and a short reason symbol (withdrawal
+only). A failed or unauthorized withdrawal or supersession reverts and emits
+no event.
+
 
 #### `payroll / draft_updated`
 

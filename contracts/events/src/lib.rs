@@ -815,6 +815,30 @@ pub fn emit_draft_submitted(e: &Env, draft_id: u64, admin: Address) {
     );
 }
 
+/// Emitted when a payroll period's configuration is frozen (#471).
+pub fn emit_period_frozen(e: &Env, period: Symbol, frozen_by: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "period_frozen")),
+        (period, frozen_by, reason),
+    );
+}
+
+/// Emitted when a payroll period's configuration freeze is lifted.
+pub fn emit_period_unfrozen(e: &Env, period: Symbol, unfrozen_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "period_unfrozen")),
+        (period, unfrozen_by),
+    );
+}
+
+/// Emitted when a pending payroll run expires before finalization.
+pub fn emit_run_expired(e: &Env, run_id: u64, expired_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_expired")),
+        (run_id, expired_by),
+    );
+}
+
 /// Emitted when a payroll run draft is cancelled.
 pub fn emit_draft_cancelled(e: &Env, draft_id: u64, admin: Address) {
     e.events().publish(
@@ -1036,6 +1060,35 @@ pub fn emit_run_changes_requested(e: &Env, run_id: u64, reviewer: Address, reaso
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "changes_requested")),
         (run_id, reviewer, reason),
+    );
+}
+
+/// Emitted when an authorized reviewer withdraws a pending payroll approval (#522).
+///
+/// Privacy-safe: carries only the opaque run id, the withdrawing reviewer's
+/// address, and a short reason symbol. No amounts, employee data, or
+/// commitment/proof material is included.
+pub fn emit_run_approval_withdrawn(e: &Env, run_id: u64, reviewer: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_approval_withdrawn")),
+        (run_id, reviewer, reason),
+    );
+}
+
+/// Emitted when an existing payroll approval is superseded by a different
+/// authorized reviewer (#522).
+///
+/// Privacy-safe: carries only the opaque run id and the previous and new
+/// reviewer addresses. No amounts or employee data is included.
+pub fn emit_run_approval_superseded(
+    e: &Env,
+    run_id: u64,
+    previous_reviewer: Address,
+    new_reviewer: Address,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_approval_superseded")),
+        (run_id, previous_reviewer, new_reviewer),
     );
 }
 

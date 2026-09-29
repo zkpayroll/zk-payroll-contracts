@@ -971,6 +971,77 @@ fn case_run_approved(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_run_approval_withdrawn(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let run_id: u64 = 34;
+    let reviewer = Address::generate(env);
+    let reason = Symbol::new(env, "policy");
+    env.as_contract(cid, || {
+        payroll_events::emit_run_approval_withdrawn(env, run_id, reviewer.clone(), reason.clone());
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "run_approval_withdrawn"),
+        "payroll.run_approval_withdrawn topics changed"
+    );
+    let decoded: (u64, Address, Symbol) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (run_id, reviewer, reason),
+        "payroll.run_approval_withdrawn payload changed"
+    );
+    out.insert(
+        "payroll.run_approval_withdrawn".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("run_approval_withdrawn")],
+            data: vec![
+                field("run_id", "u64"),
+                field("reviewer", "Address"),
+                field("reason", "Symbol"),
+            ],
+        },
+    );
+}
+
+fn case_run_approval_superseded(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let run_id: u64 = 35;
+    let previous_reviewer = Address::generate(env);
+    let new_reviewer = Address::generate(env);
+    env.as_contract(cid, || {
+        payroll_events::emit_run_approval_superseded(
+            env,
+            run_id,
+            previous_reviewer.clone(),
+            new_reviewer.clone(),
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "run_approval_superseded"),
+        "payroll.run_approval_superseded topics changed"
+    );
+    let decoded: (u64, Address, Address) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (run_id, previous_reviewer, new_reviewer),
+        "payroll.run_approval_superseded payload changed"
+    );
+    out.insert(
+        "payroll.run_approval_superseded".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("run_approval_superseded")],
+            data: vec![
+                field("run_id", "u64"),
+                field("previous_reviewer", "Address"),
+                field("new_reviewer", "Address"),
+            ],
+        },
+    );
+}
+
 fn case_run_rejected(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let run_id: u64 = 32;
     let reviewer = Address::generate(env);
@@ -1110,6 +1181,8 @@ fn payroll_events_match_fixture() {
     case_run_approved(&env, &cid, &mut observed);
     case_run_rejected(&env, &cid, &mut observed);
     case_run_changes_requested(&env, &cid, &mut observed);
+    case_run_approval_withdrawn(&env, &cid, &mut observed);
+    case_run_approval_superseded(&env, &cid, &mut observed);
     case_reservation_created(&env, &cid, &mut observed);
 
     assert_matches_fixture(
