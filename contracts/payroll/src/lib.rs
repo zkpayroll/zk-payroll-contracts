@@ -261,6 +261,23 @@ pub struct PeriodFreeze {
     pub runs_count: u32,
 }
 
+/// Cooldown configuration for period reopen operations.
+///
+/// Prevents rapid reopening of finalized periods by enforcing a minimum
+/// time gap between successive reopens. This guards against accidental
+/// or malicious repeated unfreezes that could expose the period to
+/// uncontrolled edits.
+///
+/// Privacy-safe: contains only duration and timestamps, never payroll data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodReopenCooldown {
+    /// Minimum seconds required between period reopens (0 = disabled).
+    pub cooldown_seconds: u64,
+    /// Last timestamp when this period was reopened.
+    pub last_reopen_at: u64,
+}
+
 // ?? Reviewer Authorization & Run Review ?????????????????????????????????????
 
 /// Review decision outcome for a payroll run.
@@ -979,6 +996,8 @@ pub enum DataKey {
     PeriodConfigFrozen(Symbol),
     /// Explicit freeze record for a finalized payroll period (#471, #484).
     PeriodFreeze(Symbol),
+    /// Period reopen cooldown configuration and last reopen timestamp.
+    PeriodReopenCooldown(Symbol),
     /// Tracks paid employees per run to prevent duplicate payments (#482).
     EmployeePaidTracker(u64),
     /// Status view for a payroll run (#485).
@@ -1013,6 +1032,8 @@ pub enum DataKey {
     /// Stores the previous and new policy versions plus the migration
     /// timestamp so integrators can audit policy transitions.
     OrganizationPolicyMigration,
+    /// Registered import source for payroll batch authorization.
+    ImportSource(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1339,6 +1360,44 @@ impl Payroll {
     /// registered payroll admin.
     pub fn validate_execution_initiator(e: Env, initiator: Address) {
         execution_authorization::require_authorized(&e, &initiator);
+    }
+
+    // ── Import source authorization ───────────────────────────────────────────
+
+    /// Register an authorized import source for payroll batches.
+    ///
+    /// Only the payroll admin may register sources. Once registered, sources
+    /// can submit payroll batches. Duplicate registration updates the source
+    /// metadata.
+    pub fn register_import_source(
+        e: Env,
+        source_address: Address,
+        source_type: u32,
+    ) {
+        let source_type = match source_type {
+            0 => import_source::ImportSourceType::ExternalService,
+            1 => import_source::ImportSourceType::InternalSource,
+            2 => import_source::ImportSourceType::VerificationService,
+            _ => panic!("Invalid import source type"),
+        };
+        import_source::register_source(&e, source_address, source_type);
+    }
+
+    /// Deactivate an authorized import source.
+    ///
+    /// Only the payroll admin may deactivate sources. Deactivated sources
+    /// cannot submit new payroll batches but their historical records remain
+    /// for audit purposes.
+    pub fn deactivate_import_source(e: Env, source_address: Address) {
+        import_source::deactivate_source(&e, source_address);
+    }
+
+    /// Check if an import source is currently authorized.
+    ///
+    /// Returns true if the source is registered and active, false otherwise.
+    /// Privacy-safe: exposes only an authorization boolean.
+    pub fn is_import_source_authorized(e: Env, source_address: Address) -> bool {
+        import_source::is_source_authorized(&e, &source_address)
     }
 
     fn validate_run_id(run_id: u64) {
@@ -3637,10 +3696,14 @@ impl Payroll {
         expected_total_spend: i128,
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
+        source_address: Address,
     ) -> u64 {
         // Issue #620: authorize the execution initiator before any other work.
         Self::require_execution_initiator(&e);
         Self::require_company_active(&e);
+
+        // Validate import source authorization before any other work.
+        require_authorized_source(&e, &source_address);
 
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll");
@@ -4080,6 +4143,13 @@ impl Payroll {
 
         if !Self::company_is_active(&e) {
             report.push(PayrollFailureReason::CompanyNotActive);
+        }
+
+        // Validate import source
+        if let Some(ref source) = args.source_address {
+            if let Err(reason) = validate_source_for_report(&e, source) {
+                report.push(reason);
+            }
         }
 
         let count = args.proof_count;
@@ -5044,6 +5114,10 @@ impl Payroll {
     /// Only the `admin` may unfreeze/reopen (#484). This is the sole path back to editing
     /// after a period has been finalized; the unfreeze event preserves the full audit trail.
     ///
+    /// Enforces cooldown between successive reopens to prevent rapid unfreezes that could
+    /// expose the period to uncontrolled edits. If a cooldown is configured and insufficient
+    /// time has passed since the last reopen, this panics with a privacy-safe error.
+    ///
     /// Emits `period_unfrozen`.
     pub fn unfreeze_payroll_period(e: Env, admin: Address, period_label: Symbol) {
         Self::require_not_paused(&e);
@@ -5061,6 +5135,32 @@ impl Payroll {
         let freeze_key = DataKey::PeriodFreeze(period_label.clone());
         if !e.storage().persistent().has(&freeze_key) {
             panic!("Payroll period is not frozen");
+        }
+
+        // Validate cooldown before allowing reopen
+        let cooldown_key = DataKey::PeriodReopenCooldown(period_label.clone());
+        if let Some(cooldown) = e
+            .storage()
+            .persistent()
+            .get::<_, PeriodReopenCooldown>(&cooldown_key)
+        {
+            if cooldown.cooldown_seconds > 0 {
+                let now = e.ledger().timestamp();
+                let elapsed = now.saturating_sub(cooldown.last_reopen_at);
+                if elapsed < cooldown.cooldown_seconds {
+                    panic!(
+                        "Period reopen cooldown active: cannot reopen until {} seconds have elapsed",
+                        cooldown.cooldown_seconds.saturating_sub(elapsed)
+                    );
+                }
+            }
+
+            // Update last reopen timestamp
+            let updated = PeriodReopenCooldown {
+                cooldown_seconds: cooldown.cooldown_seconds,
+                last_reopen_at: e.ledger().timestamp(),
+            };
+            e.storage().persistent().set(&cooldown_key, &updated);
         }
 
         e.storage().persistent().remove(&freeze_key);
@@ -5087,6 +5187,45 @@ impl Payroll {
         e.storage()
             .persistent()
             .has(&DataKey::PeriodFreeze(period_label))
+    }
+
+    /// Set the cooldown duration for period reopens.
+    ///
+    /// Only the admin may configure the cooldown. Setting `cooldown_seconds` to 0
+    /// disables the cooldown entirely (no minimum reopen delay).
+    pub fn set_period_reopen_cooldown(
+        e: Env,
+        admin: Address,
+        period_label: Symbol,
+        cooldown_seconds: u64,
+    ) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let cooldown_key = DataKey::PeriodReopenCooldown(period_label.clone());
+        let cooldown = PeriodReopenCooldown {
+            cooldown_seconds,
+            last_reopen_at: 0,
+        };
+        e.storage().persistent().set(&cooldown_key, &cooldown);
+    }
+
+    /// Get the reopen cooldown configuration for a period.
+    pub fn get_period_reopen_cooldown(
+        e: Env,
+        period_label: Symbol,
+    ) -> Option<PeriodReopenCooldown> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PeriodReopenCooldown(period_label))
     }
 
     // ?? Issue #91: privileged-role rotation ??????????????????????????????????

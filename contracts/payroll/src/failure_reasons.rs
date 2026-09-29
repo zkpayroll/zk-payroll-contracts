@@ -77,6 +77,8 @@ pub enum PayrollFailureReason {
     DuplicateSequence = 16,
     /// One or more payout amounts is below the configured minimum threshold.
     AmountBelowMinimum = 17,
+    /// The import source for this payroll batch is not authorized.
+    UnauthorizedImportSource = 18,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.
@@ -142,4 +144,6 @@ pub struct DryRunArgs {
     /// sequence and reports `SequenceNotMonotonic` or `DuplicateSequence`
     /// as appropriate. When `NONE`, no sequence check is performed.
     pub sequence: Option<u32>,
+    /// Optional import source address for validation.
+    pub source_address: Option<Address>,
 }
