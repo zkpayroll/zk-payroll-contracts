@@ -1233,12 +1233,6 @@ impl Payroll {
         }
     }
 
-    fn require_period_not_frozen(e: &Env, period_label: &Symbol) {
-        if Self::is_period_config_frozen(e.clone(), period_label.clone()) {
-            panic!("Payroll period is frozen: it has been finalized and can no longer be edited");
-        }
-    }
-
     fn validate_draft_description(description: &String) {
         if description.is_empty() {
             panic!("Description cannot be blank");
@@ -3625,6 +3619,219 @@ impl Payroll {
         );
 
         // Issue #478: Record metadata version for this run
+        Self::set_metadata_version(&e, run_id, 1u32, BytesN::from_array(&e, &[0u8; 32]));
+
+        payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
+
+        run_id
+    }
+
+    // ── Issue #346: proof expiry enforcement ──────────────────────────────────
+
+    /// Same as [`batch_process_payroll`](Self::batch_process_payroll), except
+    /// each proof is verified through a registered, expiry-aware
+    /// `proof_verifier::ProofReference` (see `proof_verifier::verify_with_reference`)
+    /// instead of a bare `verify_payment_proof` call.
+    ///
+    /// `proof_refs[i]` must be the `ref_id` previously passed to
+    /// `proof_verifier::register_proof_reference` for `proofs[i]`. Execution
+    /// panics with an actionable message when a reference is missing,
+    /// revoked, expired, or was registered for different proof bytes -
+    /// stale payroll evidence can never be replayed through this entry point
+    /// after its verification window has passed, even if the raw proof
+    /// bytes would otherwise still satisfy `verify_payment_proof`.
+    ///
+    /// A caller who needs to replace a proof before settlement (e.g. the
+    /// original reference expired, or the wrong proof was registered) simply
+    /// registers a new reference for fresh proof bytes via
+    /// `proof_verifier::register_proof_reference` and passes its `ref_id`
+    /// here - there is no separate "replace" call, since registration itself
+    /// is the only way to create a currently-valid reference.
+    ///
+    /// This is intentionally a separate entry point rather than a change to
+    /// `batch_process_payroll`'s existing signature, so every current caller
+    /// of the unmodified function keeps working unchanged. It does not (yet)
+    /// have a bounded/idempotent counterpart the way `batch_process_payroll`
+    /// does - only the core batch path is covered here.
+    pub fn batch_process_with_expiry(
+        e: Env,
+        proofs: Vec<BytesN<256>>,
+        proof_refs: Vec<BytesN<32>>,
+        amounts: Vec<i128>,
+        employees: Vec<Address>,
+        expected_total_spend: i128,
+        nonce: BytesN<32>,
+        draft_hash: Option<BytesN<32>>,
+    ) -> u64 {
+        Self::require_company_active(&e);
+
+        Self::validate_storage_version_for_operation(&e, "batch_process_with_expiry");
+
+        Self::validate_non_zero_digest(&e, &nonce, "nonce");
+        if let Some(ref dh) = draft_hash {
+            Self::validate_non_zero_digest(&e, dh, "draft_hash");
+        }
+        let count = proofs.len();
+
+        if count == 0 {
+            panic!("Missing payroll proof: one proof is required per payment");
+        }
+
+        if amounts.len() != count || employees.len() != count || proof_refs.len() != count {
+            panic!("Array length mismatch");
+        }
+
+        assert!(count <= MAX_BATCH, "Batch too large");
+
+        let nonce_key = DataKey::RunNonce(nonce.clone());
+        if e.storage().persistent().has(&nonce_key) {
+            panic!("Duplicate run nonce: this payroll batch has already been submitted");
+        }
+
+        let resolved_draft_hash: BytesN<32> = if let Some(ref dh) = draft_hash {
+            let commit_key = DataKey::DraftCommitment(dh.clone());
+            if !e.storage().persistent().has(&commit_key) {
+                panic!("Draft hash not pre-committed: call commit_draft first");
+            }
+            e.storage().persistent().remove(&commit_key);
+            dh.clone()
+        } else {
+            BytesN::from_array(&e, &[0u8; 32])
+        };
+
+        Self::validate_no_duplicate_employees(&employees);
+
+        let mut total: i128 = 0;
+        for i in 0..count {
+            let amt = amounts.get(i).unwrap();
+            if amt <= 0 {
+                panic!("Amount must be positive");
+            }
+            total += amt;
+        }
+        if total != expected_total_spend {
+            panic!(
+                "Expected spend mismatch: authorised {} but batch totals {}",
+                expected_total_spend, total
+            );
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
+
+        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+            panic!("Asset not allowed");
+        }
+
+        if e.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = e
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(&e, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
+        }
+
+        addrs.admin.require_auth();
+
+        Self::enforce_and_record_capacity(&e, count, expected_total_spend);
+        Self::enforce_settlement_window_for_current_period(&e);
+
+        let run_id = Self::derive_run_id(&e);
+
+        e.storage().persistent().set(&nonce_key, &run_id);
+        Self::update_nonce_sequence(&e, &addrs.admin, &nonce);
+
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+
+        let treasury_balance = token_client.balance(&addrs.treasury);
+        if treasury_balance < expected_total_spend {
+            panic!(
+                "Insufficient treasury balance: available {} but batch requires {}",
+                treasury_balance, expected_total_spend
+            );
+        }
+
+        let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+
+        for i in 0..count {
+            let proof = proofs.get(i).unwrap();
+            let ref_id = proof_refs.get(i).unwrap();
+            let amount = amounts.get(i).unwrap();
+            let employee = employees.get(i).unwrap();
+
+            let commitment_struct = commitment_client.get_commitment(&employee);
+            let commitment = commitment_struct.commitment;
+
+            Self::validate_employee_not_already_paid(&e, run_id, &commitment);
+
+            let mut nullifier_arr = [0u8; 32];
+            nullifier_arr[0] = (i % 256) as u8;
+            nullifier_arr[1] = (i / 256) as u8;
+            let nullifier = BytesN::from_array(&e, &nullifier_arr);
+            let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
+
+            let mut public_inputs = Vec::new(&e);
+            public_inputs.push_back(commitment.clone());
+            public_inputs.push_back(nullifier.clone());
+            public_inputs.push_back(recipient_hash.clone());
+
+            // Issue #346: verify through the expiry-aware reference rather
+            // than a bare proof-bytes check, so a stale (expired or revoked)
+            // reference blocks settlement even when the underlying proof
+            // bytes would otherwise still pass `verify_payment_proof`.
+            let ok = verifier.verify_with_reference(&ref_id, &proof, &public_inputs);
+            if !ok {
+                panic!(
+                    "Invalid or expired payment proof reference for employee {}",
+                    i
+                );
+            }
+
+            commitment_client.record_nullifier(&nullifier);
+
+            token_client.transfer(&addrs.treasury, &employee, &amount);
+
+            commitment_client.lock_commitment_updates(&employee);
+
+            Self::record_employee_paid(&e, run_id, commitment);
+
+            payroll_events::emit_payment_executed(&e, employee.clone(), amount);
+        }
+
+        let run = PayrollRun {
+            run_id,
+            executed_at: e.ledger().timestamp(),
+            admin: addrs.admin.clone(),
+            total_amount: expected_total_spend,
+            employee_count: count,
+            draft_hash: resolved_draft_hash,
+            nonce: nonce.clone(),
+            reconciliation_status: ReconciliationStatus::Unreconciled,
+            metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::PayrollRun(run_id), &run);
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::ReconciliationRequired);
+
+        Self::record_payroll_run_status(
+            &e,
+            run_id,
+            PayrollRunStatusKind::Completed,
+            count,
+            expected_total_spend,
+        );
+
         Self::set_metadata_version(&e, run_id, 1u32, BytesN::from_array(&e, &[0u8; 32]));
 
         payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
@@ -7448,7 +7655,13 @@ impl Payroll {
     // ────────────────────────────────────────────────────────────────────────────
 
     /// Validate that a period is suitable for cloning/templating.
-    pub fn validate_period_for_cloning(e: Env, period: Symbol) -> Result<(), ()> {
+    ///
+    /// Panics (rather than returning `Result`) on every failure path, so the
+    /// return type is `()`: a `Result<(), ()>` here previously broke
+    /// `#[contractimpl]`'s cross-contract client generation, since `()`
+    /// cannot implement the conversions Soroban requires for a contract
+    /// error type - and no path ever actually returned `Err(())` anyway.
+    pub fn validate_period_for_cloning(e: Env, period: Symbol) {
         Self::validate_symbol_not_empty(&e, &period, "period");
 
         // Check if period is frozen
@@ -7464,8 +7677,6 @@ impl Payroll {
         {
             panic!("Source period has no settlement window configured");
         }
-
-        Ok(())
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -7473,11 +7684,10 @@ impl Payroll {
     // ────────────────────────────────────────────────────────────────────────────
 
     /// Verify draft checksum matches between preparation and finalization.
-    pub fn verify_draft_checksum(
-        e: &Env,
-        run_id: u64,
-        provided_hash: BytesN<32>,
-    ) -> Result<(), ()> {
+    ///
+    /// See [`validate_period_for_cloning`](Self::validate_period_for_cloning)
+    /// for why this returns `()` rather than `Result<(), ()>`.
+    pub fn verify_draft_checksum(e: &Env, run_id: u64, provided_hash: BytesN<32>) {
         let pending_run: PendingPayrollRun = e
             .storage()
             .persistent()
@@ -7487,8 +7697,6 @@ impl Payroll {
         if pending_run.draft_hash != provided_hash {
             panic!("Draft checksum mismatch: payroll data was modified after review");
         }
-
-        Ok(())
     }
 }
 

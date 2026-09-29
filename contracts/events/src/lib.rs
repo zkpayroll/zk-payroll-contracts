@@ -1363,3 +1363,62 @@ pub fn emit_interrupted_run_recovered(
         ),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cross-asset treasury isolation events (#317)
+// ---------------------------------------------------------------------------
+
+/// Emitted once when a `treasury_isolation` contract instance is initialized.
+pub fn emit_treasury_isolation_initialized(e: &Env, admin: Address) {
+    e.events()
+        .publish((payroll_topic(), Symbol::new(e, "treas_iso_init")), admin);
+}
+
+/// Emitted when a new asset is registered for a company's treasury.
+pub fn emit_treasury_asset_registered(
+    e: &Env,
+    company_id: u64,
+    asset: Address,
+    issuer: Address,
+    symbol: Symbol,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_asset_reg")),
+        (company_id, asset, issuer, symbol),
+    );
+}
+
+/// Emitted when a company's (company, asset) balance is credited.
+pub fn emit_treasury_credited(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_credited")),
+        (company_id, asset, amount),
+    );
+}
+
+/// Emitted when an amount is reserved against a (company, asset) balance for
+/// an in-flight payroll batch.
+pub fn emit_treasury_reserved(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_reserved")),
+        (company_id, asset, amount),
+    );
+}
+
+/// Emitted when a previously reserved amount is released back to available
+/// balance (e.g. batch cancellation).
+pub fn emit_treasury_reserve_released(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_reserve_rel")),
+        (company_id, asset, amount),
+    );
+}
+
+/// Emitted when a (company, asset) balance is debited on successful batch
+/// execution.
+pub fn emit_treasury_debited(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_debited")),
+        (company_id, asset, amount),
+    );
+}
