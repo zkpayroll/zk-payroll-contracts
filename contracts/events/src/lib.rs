@@ -1255,3 +1255,85 @@ pub fn emit_registry_admin_config_version_updated(
         (new_version, updated_by),
     );
 }
+
+// ── Issue #479: Employee Status Change Events ────────────────────────────────
+
+/// Emitted when an employee is activated or reactivated in the registry.
+pub fn emit_employee_activated(
+    e: &Env,
+    company_id: u64,
+    employee: Address,
+    previous_status: u32,
+    new_status: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "EmployeeActivated"), company_id, employee),
+        (
+            previous_status,
+            new_status,
+            e.ledger().sequence(),
+            e.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Emitted when an employee is suspended in the registry.
+pub fn emit_employee_suspended(
+    e: &Env,
+    company_id: u64,
+    employee: Address,
+    previous_status: u32,
+    new_status: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "EmployeeSuspended"), company_id, employee),
+        (
+            previous_status,
+            new_status,
+            e.ledger().sequence(),
+            e.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Emitted when an employee is offboarded in the registry.
+pub fn emit_employee_offboarded(
+    e: &Env,
+    company_id: u64,
+    employee: Address,
+    previous_status: u32,
+    new_status: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "EmployeeOffboarded"), company_id, employee),
+        (
+            previous_status,
+            new_status,
+            e.ledger().sequence(),
+            e.ledger().timestamp(),
+        ),
+    );
+}
+
+// ── Issue #481: Interrupted Payroll Run Recovery Events ───────────────────────
+
+/// Emitted when an interrupted payroll run is safely recovered for resumption.
+pub fn emit_interrupted_run_recovered(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+    resumed_checkpoint_index: u32,
+    total_checkpoints: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "InterruptedRunRecovered"), employer, asset),
+        (
+            batch_root,
+            execution_nonce,
+            resumed_checkpoint_index,
+            total_checkpoints,
+        ),
+    );
+}

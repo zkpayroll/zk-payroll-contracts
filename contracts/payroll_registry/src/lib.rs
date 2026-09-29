@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 
 extern crate alloc;
 
@@ -679,22 +679,77 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::EmpStatus(company_id, employee.clone()), &status);
 
-        let event_name = match status {
-            EmployeeStatus::Active => Symbol::new(&env, "EmployeeReactivated"),
-            EmployeeStatus::Suspended => Symbol::new(&env, "EmployeeSuspended"),
-            EmployeeStatus::Incomplete => Symbol::new(&env, "EmployeeStatusUpdated"),
-            EmployeeStatus::Offboarded => Symbol::new(&env, "EmployeeOffboarded"),
-        };
-        env.events().publish(
-            (event_name, company_id, employee),
-            (
-                previous_status,
-                status,
-                env.ledger().sequence(),
-                env.ledger().timestamp(),
-            ),
-        );
-        // topics : ("EmployeeDeactivated" | "EmployeeReactivated" | "EmployeeStatusUpdated", company_id, employee)
+        match status {
+            EmployeeStatus::Active => {
+                payroll_events::emit_employee_activated(
+                    &env,
+                    company_id,
+                    employee.clone(),
+                    previous_status as u32,
+                    status as u32,
+                );
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "EmployeeReactivated"),
+                        company_id,
+                        employee,
+                    ),
+                    (
+                        previous_status,
+                        status,
+                        env.ledger().sequence(),
+                        env.ledger().timestamp(),
+                    ),
+                );
+            }
+            EmployeeStatus::Suspended => {
+                payroll_events::emit_employee_suspended(
+                    &env,
+                    company_id,
+                    employee.clone(),
+                    previous_status as u32,
+                    status as u32,
+                );
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "EmployeeDeactivated"),
+                        company_id,
+                        employee,
+                    ),
+                    (
+                        previous_status,
+                        status,
+                        env.ledger().sequence(),
+                        env.ledger().timestamp(),
+                    ),
+                );
+            }
+            EmployeeStatus::Incomplete => {
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "EmployeeStatusUpdated"),
+                        company_id,
+                        employee,
+                    ),
+                    (
+                        previous_status,
+                        status,
+                        env.ledger().sequence(),
+                        env.ledger().timestamp(),
+                    ),
+                );
+            }
+            EmployeeStatus::Offboarded => {
+                payroll_events::emit_employee_offboarded(
+                    &env,
+                    company_id,
+                    employee.clone(),
+                    previous_status as u32,
+                    status as u32,
+                );
+            }
+        }
+        // topics : ("EmployeeActivated" | "EmployeeSuspended" | "EmployeeOffboarded" | "EmployeeStatusUpdated", company_id, employee)
         // data   : (previous_status, new_status, ledger_sequence, timestamp)
     }
 

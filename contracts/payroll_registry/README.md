@@ -50,6 +50,9 @@ The `CompanyInfo` struct definition in Rust:
 | `EmployeeAdded` | `add_employee` |
 | `EmployeeRemoved` | `remove_employee` |
 | `CommitmentUpdated` | `update_commitment` |
+| `EmployeeActivated` | `set_employee_status(..., EmployeeStatus::Active)` |
 | `EmployeeSuspended` | `set_employee_status(..., EmployeeStatus::Suspended)` |
+| `EmployeeOffboarded` | `set_employee_status(..., EmployeeStatus::Offboarded)` |
 | `EmployeeReactivated` | `set_employee_status(..., EmployeeStatus::Active)` |
 | `EmployeeStatusUpdated` | `set_employee_status(..., EmployeeStatus::Incomplete)` |
+

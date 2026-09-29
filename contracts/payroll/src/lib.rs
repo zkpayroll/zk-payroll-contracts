@@ -2558,6 +2558,107 @@ impl Payroll {
         );
     }
 
+    /// Return whether an interrupted multi-batch payroll run can be safely recovered (#481).
+    ///
+    /// Checks that a checkpoint exists in an interrupted state (partially executed
+    /// or failed before completion), with progress strictly less than `expected_payment_count`.
+    /// Returns a privacy-safe boolean indicator without disclosing employee addresses or salary amounts.
+    pub fn is_interrupted_run_recoverable(
+        e: Env,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_payment_count: u32,
+    ) -> bool {
+        if expected_payment_count == 0 || expected_payment_count > MAX_BATCH {
+            return false;
+        }
+
+        let key = DataKey::BatchCheckpoint(employer, batch_root, asset, execution_nonce);
+        let Some(checkpoint) = e.storage().persistent().get::<_, BatchCheckpoint>(&key) else {
+            return false;
+        };
+
+        !checkpoint.completed
+            && (checkpoint.state == BatchCheckpointState::PartiallyCheckpointed
+                || checkpoint.state == BatchCheckpointState::Failed
+                || checkpoint.state == BatchCheckpointState::Started)
+            && checkpoint.last_checkpoint_index < expected_payment_count
+    }
+
+    /// Provide an authorized recovery mechanism for a payroll run interrupted between batches (#481).
+    ///
+    /// Requires company admin authorization. Validates that the batch checkpoint exists
+    /// and represents an interrupted run. Transitions the checkpoint state to `Resumed` while
+    /// preserving `last_checkpoint_index`, allowing subsequent bounded batch execution to resume
+    /// processing from the exact index where execution stopped without double-paying completed employees.
+    pub fn recover_interrupted_payroll_run(
+        e: Env,
+        admin: Address,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_payment_count: u32,
+    ) -> BatchCheckpoint {
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_non_zero_digest(&e, &execution_nonce, "execution_nonce");
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::BatchCheckpoint(
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+        );
+        let mut checkpoint: BatchCheckpoint = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("Interrupted payroll run checkpoint not found"));
+
+        if checkpoint.completed {
+            panic!("Cannot recover a fully completed payroll run");
+        }
+
+        if !Self::is_interrupted_run_recoverable(
+            e.clone(),
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+            expected_payment_count,
+        ) {
+            panic!("Payroll run is not eligible for recovery");
+        }
+
+        checkpoint.state = BatchCheckpointState::Resumed;
+        checkpoint.failed = false;
+        e.storage().persistent().set(&key, &checkpoint);
+
+        payroll_events::emit_interrupted_run_recovered(
+            &e,
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+            checkpoint.last_checkpoint_index,
+            checkpoint.total_checkpoints,
+        );
+
+        checkpoint
+    }
+
     /// Return the canonical state for a payroll run ID.
     pub fn get_payroll_run_state(e: Env, run_id: u64) -> PayrollRunState {
         Self::get_payroll_run_state_internal(&e, run_id)

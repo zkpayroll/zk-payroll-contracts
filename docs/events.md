@@ -183,6 +183,48 @@ data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledge
 
 ---
 
+### `EmployeeActivated` — `payroll_registry`
+
+Emitted when a registered employee is marked `Active` via `set_employee_status`.
+Activated employees become eligible for payroll execution once other checks pass.
+
+```
+topics[0]  Symbol("EmployeeActivated")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (u32 previous_status, u32 new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+---
+
+### `EmployeeSuspended` — `payroll_registry`
+
+Emitted when an employee is temporarily suspended via `set_employee_status`.
+
+```
+topics[0]  Symbol("EmployeeSuspended")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (u32 previous_status, u32 new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+---
+
+### `EmployeeOffboarded` — `payroll_registry`
+
+Emitted when an employee is offboarded via `set_employee_status`. Offboarded
+records are terminal and cannot be reactivated.
+
+```
+topics[0]  Symbol("EmployeeOffboarded")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (u32 previous_status, u32 new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+---
+
+
 ### `CommitmentUpdated` ? `salary_commitment`
 
 Emitted when a new commitment is stored (`store_commitment`) or an existing
@@ -838,6 +880,8 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address ? single-value data)* |
 | `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address ? single-value data)* |
 | `payroll / config_changed` | `payroll` | `("payroll", "config_changed", key)` | `(actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp)` |
+| `InterruptedRunRecovered` | `payroll` | `("InterruptedRunRecovered", Address employer, Address asset)` | `(batch_root, execution_nonce, resumed_checkpoint_index, total_checkpoints)` |
+
 
 ---
 
