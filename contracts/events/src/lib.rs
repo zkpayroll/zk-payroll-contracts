@@ -562,6 +562,28 @@ pub fn emit_asset_allowed_changed(e: &Env, asset: Address, allowed: bool) {
         .publish((Symbol::new(e, "AssetAllowedChanged"),), (asset, allowed));
 }
 
+/// Emitted when the minimum payout amount threshold is set or updated (issue #514).
+///
+/// The event contains only the threshold value and timestamp; it does not expose
+/// individual payroll amounts or employee data.
+pub fn emit_minimum_payout_amount_set(e: &Env, minimum_amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "min_payout_set")),
+        (minimum_amount, e.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a payroll batch violates the minimum payout amount threshold (issue #514).
+///
+/// The event contains only the threshold value; it does not expose the actual
+/// payout amounts or employee data.
+pub fn emit_minimum_payout_amount_violation(e: &Env, minimum_amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "min_payout_violation")),
+        (minimum_amount,),
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Pause Manager Events
 // ═════════════════════════════════════════════════════════════════════════════

@@ -75,6 +75,8 @@ pub enum PayrollFailureReason {
     /// The submitted payroll run sequence number has already been
     /// consumed by a different run.
     DuplicateSequence = 16,
+    /// One or more payout amounts is below the configured minimum threshold.
+    AmountBelowMinimum = 17,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.

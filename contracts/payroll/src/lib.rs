@@ -932,7 +932,9 @@ pub enum DataKey {
     /// Contract storage version for migration checks (#360).
     StorageVersion,
     /// Migration readiness status for sensitive operations (#360).
-    MigrationReadiness,
+    MigrationReady,
+    /// Minimum payout amount threshold configuration (#514).
+    MinimumPayoutAmount,
     /// Cancelled payroll batch status record (#404).
     CancelledBatchRecord(u64),
     /// Batch split record linking parent and child batch runs (#352).
@@ -1705,7 +1707,7 @@ impl Payroll {
         };
         e.storage()
             .persistent()
-            .set(&DataKey::MigrationReadiness, &readiness);
+            .set(&DataKey::MigrationReady, &readiness);
 
         // Emit event for audit trail
         e.events().publish(
@@ -1875,7 +1877,7 @@ impl Payroll {
         };
         e.storage()
             .persistent()
-            .set(&DataKey::MigrationReadiness, &readiness);
+            .set(&DataKey::MigrationReady, &readiness);
     }
 
     pub fn set_pause_manager(e: Env, pause_manager: Address) {
@@ -3531,6 +3533,10 @@ impl Payroll {
             }
             total += amt;
         }
+
+        // #514 - validate minimum payout amount threshold
+        Self::validate_minimum_payout_amount(&e, &amounts);
+
         if total != expected_total_spend {
             panic!(
                 "Expected spend mismatch: authorised {} but batch totals {}",
@@ -3954,6 +3960,27 @@ impl Payroll {
         if any_non_positive {
             report.push(PayrollFailureReason::NonPositiveAmount);
         }
+
+        // #514 - validate minimum payout amount threshold in dry run
+        let minimum: i128 = match e.storage().persistent().get(&DataKey::MinimumPayoutAmount) {
+            Some(min) => min,
+            None => 0, // No threshold configured
+        };
+
+        if minimum > 0 {
+            let mut any_below_minimum = false;
+            for i in 0..args.amounts.len() {
+                let amt = args.amounts.get(i).unwrap();
+                if amt < minimum {
+                    any_below_minimum = true;
+                    break;
+                }
+            }
+            if any_below_minimum {
+                report.push(PayrollFailureReason::AmountBelowMinimum);
+            }
+        }
+
         if total != args.expected_total_spend {
             report.push(PayrollFailureReason::ExpectedSpendMismatch);
         }
@@ -5485,6 +5512,77 @@ impl Payroll {
     /// Return the currently configured capacity policy, if any.
     pub fn get_capacity_limits(e: Env) -> Option<CapacityLimits> {
         e.storage().persistent().get(&DataKey::CapacityLimits)
+    }
+
+    // ── Issue #514: Minimum payout amount threshold ─────────────────────────
+
+    /// Set the minimum payout amount threshold for payroll batches.
+    ///
+    /// Only the admin may call. Once set, any individual payout amount in a
+    /// payroll batch must be greater than or equal to this threshold.
+    /// Setting to 0 disables the threshold check (backward compatible default).
+    ///
+    /// # Errors
+    /// - Panics if called by non-admin
+    /// - Panics if threshold is negative
+    pub fn set_minimum_payout_amount(e: Env, admin: Address, minimum_amount: i128) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if minimum_amount < 0 {
+            panic!("Minimum payout amount cannot be negative");
+        }
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::MinimumPayoutAmount, &minimum_amount);
+
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "min_payout_set")),
+            (minimum_amount, e.ledger().timestamp()),
+        );
+    }
+
+    /// Return the currently configured minimum payout amount threshold.
+    /// Returns 0 if no threshold has been set (disabled).
+    pub fn get_minimum_payout_amount(e: Env) -> i128 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::MinimumPayoutAmount)
+            .unwrap_or(0i128)
+    }
+
+    /// Validate that all payout amounts meet the minimum threshold, if configured.
+    ///
+    /// A no-op when no threshold has been configured (threshold = 0), preserving
+    /// backward compatibility.
+    fn validate_minimum_payout_amount(e: &Env, amounts: &Vec<i128>) {
+        let minimum: i128 = match e.storage().persistent().get(&DataKey::MinimumPayoutAmount) {
+            Some(min) => min,
+            None => return, // No threshold configured
+        };
+
+        if minimum == 0 {
+            return; // Threshold disabled
+        }
+
+        for i in 0..amounts.len() {
+            let amt = amounts.get(i).unwrap();
+            if amt < minimum {
+                e.events().publish(
+                    (symbol_short!("payroll"), Symbol::new(e, "min_payout_violation")),
+                    (minimum,),
+                );
+                panic!("Payout amount below minimum threshold");
+            }
+        }
     }
 
     /// Open a new payroll period for capacity accounting. Only the admin may

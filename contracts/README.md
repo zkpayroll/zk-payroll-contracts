@@ -331,6 +331,69 @@ stellar contract invoke \
 
 ---
 
+## Minimum payout amount threshold (issue #514)
+
+The payroll contract enforces a configurable minimum payout amount threshold for individual payments in a payroll batch. This guardrail prevents accidental or malicious payments below a policy floor while preserving backward compatibility when no threshold is set.
+
+### Overview
+
+The minimum payout threshold is a per-company configuration that applies to each individual payout amount in a batch. The check runs before proof verification and treasury transfers, so violations are caught early without consuming gas for expensive operations.
+
+### Setting the threshold (payroll admin only)
+
+```bash
+stellar contract invoke \
+  --id "$PAYROLL_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- set_minimum_payout_amount \
+    --minimum_amount 1000000
+```
+
+Read the current threshold back:
+
+```bash
+stellar contract invoke \
+  --id "$PAYROLL_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- get_minimum_payout_amount
+```
+
+| Field | Description |
+|-------|-------------|
+| `minimum_amount` | Minimum allowed payout amount (in smallest token units). Set to `0` to disable enforcement. |
+
+### Behaviour
+
+- **Default**: When no threshold is configured, the effective minimum is `0` (disabled). Existing deployments and workflows continue unchanged.
+- **Inclusive boundary**: Payouts with `amount >= minimum_amount` succeed. Payouts with `amount < minimum_amount` are rejected.
+- **Scope**: The threshold applies to each individual payout in a batch, not to the batch total.
+- **Authorization**: Only the configured payroll admin may set or update the threshold.
+- **Negative values**: Setting a negative threshold is rejected with a panic.
+- **Disabling**: Set `minimum_amount = 0` to disable enforcement while keeping the getter available for inspection.
+
+### Privacy-safe failure handling
+
+When a batch contains an amount below the threshold:
+
+- The entire batch is rejected with the generic panic message: `Payout amount below minimum threshold`
+- The emitted `min_payout_violation` event contains only the configured threshold value
+- The actual payout amount, employee address, and proof contents are **not** exposed in errors or events
+- The dry-run preflight (`dry_run_batch_process_payroll`) returns `PayrollFailureReason::AmountBelowMinimum` (code 17) without revealing which specific payout violated the threshold
+
+### Dry-run preflight integration
+
+Off-chain clients can call `dry_run_batch_process_payroll` before submitting a real batch. If any payout is below the threshold, the returned `PayrollDryRunReport` includes `AmountBelowMinimum` in its `blockers` list, allowing dashboards to surface actionable feedback without displaying sensitive payroll values.
+
+### Error reference
+
+| Failure Reason | Code | Meaning |
+|----------------|------|---------|
+| `AmountBelowMinimum` | 17 | One or more payout amounts is below the configured minimum threshold. |
+
+---
+
 ## Related guides
 
 | Guide | When to use it |
