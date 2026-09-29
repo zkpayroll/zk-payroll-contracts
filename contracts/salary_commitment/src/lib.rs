@@ -1,7 +1,9 @@
 #![no_std]
 
 use pause_manager::PauseManagerClient;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Operational roles
@@ -57,6 +59,27 @@ pub struct PendingRotation {
     pub proposed_at: u64,
 }
 
+/// Pending payroll-operator handoff awaiting acceptance by the new holder.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingPayrollOperatorHandoff {
+    pub old_holder: Address,
+    pub new_holder: Address,
+    pub proposed_at: u64,
+}
+
+#[contracterror]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RoleHandoffError {
+    OperatorAlreadyAssigned = 1,
+    NoOperatorAssigned = 2,
+    PendingHandoffExists = 3,
+    NoPendingHandoff = 4,
+    UnauthorizedHandoff = 5,
+    DuplicateAssignment = 6,
+}
+
 /// Storage keys
 #[contracttype]
 pub enum DataKey {
@@ -87,6 +110,8 @@ pub enum DataKey {
     PauseManager,
     /// Pending admin rotation proposal (issue #192).
     PendingAdminRotation,
+    /// Pending payroll-operator handoff.
+    PendingPayrollOperatorHandoff,
 }
 
 #[contract]
@@ -104,31 +129,144 @@ impl SalaryCommitmentContract {
         env.storage().persistent().set(&DataKey::Admin, &admin);
     }
 
-    /// Set a delegated payroll operator that may record nullifiers
-    /// (required for batch payroll execution). Only the admin may call.
-    pub fn set_payroll_operator(env: Env, operator: Address) {
+    /// Set the initial delegated payroll operator. Subsequent changes require
+    /// an explicit old-holder proposal and new-holder acceptance.
+    pub fn set_payroll_operator(env: Env, operator: Address) -> Result<(), RoleHandoffError> {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
+        if env.storage().persistent().has(&DataKey::PayrollOperator) {
+            return Err(RoleHandoffError::OperatorAlreadyAssigned);
+        }
         env.storage()
             .persistent()
             .set(&DataKey::PayrollOperator, &operator);
         payroll_events::emit_payroll_operator_set(&env, operator);
+        Ok(())
     }
 
-    /// Remove the delegated payroll operator. Only the HR admin may call.
-    /// Emits a privacy-safe event indicating the operator address that was
-    /// removed. This does not disclose any payroll-sensitive values.
-    pub fn remove_payroll_operator(env: Env) {
+    /// Propose an operator handoff. Both the current operator and HR admin
+    /// authorize the proposal; the new holder must separately accept it.
+    pub fn propose_payroll_operator_handoff(
+        env: Env,
+        current_operator: Address,
+        new_operator: Address,
+    ) -> Result<(), RoleHandoffError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        let current: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollOperator)
+            .ok_or(RoleHandoffError::NoOperatorAssigned)?;
+        if current_operator != current {
+            return Err(RoleHandoffError::UnauthorizedHandoff);
+        }
+        if current_operator == new_operator {
+            return Err(RoleHandoffError::DuplicateAssignment);
+        }
+        let pending_key = DataKey::PendingPayrollOperatorHandoff;
+        if env.storage().persistent().has(&pending_key) {
+            return Err(RoleHandoffError::PendingHandoffExists);
+        }
+
+        current_operator.require_auth();
+        let handoff = PendingPayrollOperatorHandoff {
+            old_holder: current_operator,
+            new_holder: new_operator,
+            proposed_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&pending_key, &handoff);
+        Ok(())
+    }
+
+    /// Accept a pending payroll-operator handoff and update persistent state.
+    pub fn accept_payroll_operator_handoff(
+        env: Env,
+        new_operator: Address,
+    ) -> Result<(), RoleHandoffError> {
+        Self::require_not_paused(&env);
+        let pending_key = DataKey::PendingPayrollOperatorHandoff;
+        let handoff: PendingPayrollOperatorHandoff = env
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .ok_or(RoleHandoffError::NoPendingHandoff)?;
+        if new_operator != handoff.new_holder {
+            return Err(RoleHandoffError::UnauthorizedHandoff);
+        }
+        let current: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollOperator)
+            .ok_or(RoleHandoffError::NoOperatorAssigned)?;
+        if current != handoff.old_holder {
+            return Err(RoleHandoffError::UnauthorizedHandoff);
+        }
+
+        Self::require_admin(&env);
+        new_operator.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::PayrollOperator, &new_operator);
+        env.storage().persistent().remove(&pending_key);
+        payroll_events::emit_payroll_operator_set(&env, new_operator);
+        Ok(())
+    }
+
+    /// Cancel a proposed operator handoff with both current-role and admin
+    /// authorization.
+    pub fn cancel_payroll_operator_handoff(
+        env: Env,
+        current_operator: Address,
+    ) -> Result<(), RoleHandoffError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        let current: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollOperator)
+            .ok_or(RoleHandoffError::NoOperatorAssigned)?;
+        if current_operator != current {
+            return Err(RoleHandoffError::UnauthorizedHandoff);
+        }
+        let pending_key = DataKey::PendingPayrollOperatorHandoff;
+        if !env.storage().persistent().has(&pending_key) {
+            return Err(RoleHandoffError::NoPendingHandoff);
+        }
+        current_operator.require_auth();
+        env.storage().persistent().remove(&pending_key);
+        Ok(())
+    }
+
+    /// Revoke the delegated operator. Both the current operator and HR admin
+    /// must authorize the revocation.
+    pub fn remove_payroll_operator(env: Env) -> Result<(), RoleHandoffError> {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
         let key = DataKey::PayrollOperator;
-        let prev: Option<Address> = env.storage().persistent().get(&key);
-        if prev.is_none() {
-            panic!("No payroll operator set");
+        let operator: Address = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(RoleHandoffError::NoOperatorAssigned)?;
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingPayrollOperatorHandoff)
+        {
+            return Err(RoleHandoffError::PendingHandoffExists);
         }
-        let prev_op = prev.unwrap();
+        operator.require_auth();
         env.storage().persistent().remove(&key);
-        payroll_events::emit_payroll_operator_removed(&env, prev_op);
+        payroll_events::emit_payroll_operator_removed(&env, operator);
+        Ok(())
+    }
+
+    /// Read any pending delegated-operator handoff.
+    pub fn get_pending_operator_handoff(env: Env) -> Option<PendingPayrollOperatorHandoff> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingPayrollOperatorHandoff)
     }
 
     /// Lock an employee's commitment to prevent updates via `update_commitment`
@@ -779,20 +917,98 @@ mod tests {
         let mut found_operator = false;
         for ev in events.iter() {
             for i in 0..ev.1.len() {
-                if let Ok(s) = ev.1.get(i).unwrap().try_into_val::<Symbol>(&env.clone()) {
+                let topic = ev.1.get(i).unwrap();
+                let decoded_symbol: Result<Symbol, _> = topic.try_into_val(&env);
+                if let Ok(s) = decoded_symbol {
                     if s == Symbol::new(&env, "PayrollOperatorRemoved") {
                         found_symbol = true;
                     }
                 }
-                if let Ok(a) = ev.1.get(i).unwrap().try_into_val::<Address>(&env.clone()) {
-                    if a == operator {
-                        found_operator = true;
-                    }
+            }
+            let decoded_data: Result<(Address,), _> = ev.2.try_into_val(&env);
+            if let Ok((event_operator,)) = decoded_data {
+                if event_operator == operator {
+                    found_operator = true;
                 }
             }
         }
         assert!(found_symbol, "PayrollOperatorRemoved event not emitted");
-        assert!(found_operator, "Removed operator address not present in event data");
+        assert!(
+            found_operator,
+            "Removed operator address not present in event data"
+        );
+    }
+
+    #[test]
+    fn test_payroll_operator_handoff_requires_new_holder_acceptance() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let old_operator = Address::generate(&env);
+        let new_operator = Address::generate(&env);
+
+        client.set_payroll_operator(&old_operator);
+        client.propose_payroll_operator_handoff(&old_operator, &new_operator);
+
+        let pending = client.get_pending_operator_handoff().unwrap();
+        assert_eq!(pending.old_holder, old_operator);
+        assert_eq!(pending.new_holder, new_operator);
+        assert_eq!(client.get_payroll_operator(), Some(old_operator.clone()));
+
+        client.accept_payroll_operator_handoff(&new_operator);
+        assert_eq!(client.get_payroll_operator(), Some(new_operator));
+        assert!(client.get_pending_operator_handoff().is_none());
+    }
+
+    #[test]
+    fn test_unauthorized_handoff_recipient_cannot_change_operator() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let old_operator = Address::generate(&env);
+        let new_operator = Address::generate(&env);
+        let unauthorized_operator = Address::generate(&env);
+
+        client.set_payroll_operator(&old_operator);
+        client.propose_payroll_operator_handoff(&old_operator, &new_operator);
+
+        let result = client.try_accept_payroll_operator_handoff(&unauthorized_operator);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RoleHandoffError::UnauthorizedHandoff
+        );
+        assert_eq!(client.get_payroll_operator(), Some(old_operator));
+        assert!(client.get_pending_operator_handoff().is_some());
+    }
+
+    #[test]
+    fn test_duplicate_operator_assignment_and_self_handoff_are_rejected() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+        let operator = Address::generate(&env);
+
+        client.set_payroll_operator(&operator);
+        let duplicate = client.try_set_payroll_operator(&Address::generate(&env));
+        assert_eq!(
+            duplicate.unwrap_err().unwrap(),
+            RoleHandoffError::OperatorAlreadyAssigned
+        );
+
+        let self_handoff = client.try_propose_payroll_operator_handoff(&operator, &operator);
+        assert_eq!(
+            self_handoff.unwrap_err().unwrap(),
+            RoleHandoffError::DuplicateAssignment
+        );
+        assert_eq!(client.get_payroll_operator(), Some(operator));
+    }
+
+    #[test]
+    fn test_admin_operator_can_self_revoke_role() {
+        let (env, contract_id, admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        client.set_payroll_operator(&admin);
+        client.remove_payroll_operator();
+
+        assert!(client.get_payroll_operator().is_none());
     }
 
     /// A commitment value that was rotated out (archived) can never be

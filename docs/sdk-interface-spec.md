@@ -202,11 +202,21 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 | Field      | Type      | Description                           |
 |------------|-----------|---------------------------------------|
 | `operator` | `Address` | Address delegated to record nullifiers |
-| **Returns** | `()`     | void                                  |
+| **Returns** | `Result<(), RoleHandoffError>` | Initial assignment result |
 
-**Behavior**: Only callable by the HR admin. Allows a separate address (typically the Payroll contract) to call `record_nullifier`.
+**Behavior**: HR admin only. Sets the initial operator; an assigned operator cannot be overwritten through this entrypoint. Later transfers require an old-holder proposal, admin authorization, and acceptance by the new holder.
 
-**Errors**: `panic!("Not initialized")` — if admin not yet set.
+**Errors**: `OperatorAlreadyAssigned` if an operator is already set. Authorization and pause checks retain their existing panic behavior.
+
+#### Payroll operator handoff
+
+`propose_payroll_operator_handoff(current_operator, new_operator)` requires authorization from both the current operator and HR admin. It stores a `PendingPayrollOperatorHandoff` containing `old_holder`, `new_holder`, and `proposed_at`; it does not change the active operator.
+
+`accept_payroll_operator_handoff(new_operator)` requires the proposed new holder and HR admin to authorize. It updates the active operator and clears the pending handoff. `cancel_payroll_operator_handoff(current_operator)` requires the current operator and HR admin and clears a pending handoff. `get_pending_operator_handoff()` returns the pending handoff or `None`.
+
+`remove_payroll_operator()` requires both HR admin and current operator authorization and rejects removal while a handoff is pending.
+
+**Handoff errors**: `NoOperatorAssigned`, `PendingHandoffExists`, `NoPendingHandoff`, `UnauthorizedHandoff`, and `DuplicateAssignment` identify invalid transitions.
 
 ---
 
