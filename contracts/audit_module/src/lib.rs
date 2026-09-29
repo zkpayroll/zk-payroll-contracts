@@ -6,6 +6,8 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+pub mod challenge;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -39,6 +41,16 @@ pub enum AuditError {
     DelegationExceedsParentExpiry = 11,
     /// A delegated grant is no longer valid because its parent grant was revoked.
     DelegationRevoked = 12,
+    /// The proof reference hash is invalid (empty or all-zero sentinel).
+    InvalidProofReference = 13,
+    /// A challenge with this ID does not exist.
+    ChallengeNotFound = 14,
+    /// The challenge deadline has passed - no further responses accepted.
+    ChallengeExpired = 15,
+    /// The challenge has already been resolved.
+    ChallengeAlreadyResolved = 16,
+    /// An invalid challenge ID or out-of-scope challenge was submitted.
+    InvalidChallenge = 17,
 }
 
 // ---------------------------------------------------------------------------

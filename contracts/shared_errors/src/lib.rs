@@ -102,6 +102,8 @@ pub enum AuditError {
     InvalidChallenge = 208,
     /// The challenge response timestamp is outside the acceptance window.
     InvalidResponseTimestamp = 209,
+    /// The proof reference hash is invalid (empty or all-zero sentinel).
+    InvalidProofReference = 210,
 }
 
 /// Payment Execution Errors (300-399)

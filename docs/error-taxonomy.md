@@ -73,6 +73,8 @@ Audit errors relate to auditor permissions, view keys, and audit scope constrain
 | 207 | ChallengeAlreadyResolved | Challenge already has a response | No | Load existing response |
 | 208 | InvalidChallenge | Challenge is malformed or out of scope | No | Verify challenge data |
 | 209 | InvalidResponseTimestamp | Response outside acceptance window | No | Verify timestamp and retry |
+| 210 | InvalidProofReference | Proof reference hash is empty or all-zero | No | Provide valid proof reference hash |
+
 
 **SDK Guidance**: Most audit errors are non-retryable and indicate insufficient
 permissions or stale state. `ViewKeyExpired` (202) is retryable after requesting

@@ -1236,6 +1236,75 @@ fn test_authorize_auditor_after_expiry_commitment_verification_fails_and_rolls_b
     assert_eq!(event_count(&env), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Audit Reference Attachment Validation Tests (Issue #389)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_valid_proof_reference_rejects_zero_hash() {
+    let env = Env::default();
+    let zero_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    
+    // The validation function should reject zero hashes
+    assert!(!challenge::is_valid_proof_reference(&env, &zero_hash));
+}
+
+#[test]
+fn test_is_valid_proof_reference_accepts_non_zero_hash() {
+    let env = Env::default();
+    let valid_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    
+    // The validation function should accept non-zero hashes
+    assert!(challenge::is_valid_proof_reference(&env, &valid_hash));
+}
+
+#[test]
+fn test_validate_audit_reference_attachment_accepts_valid_hash() {
+    let env = Env::default();
+    let valid_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    
+    // The enhanced validation should accept valid hashes
+    let result = challenge::validate_audit_reference_attachment(&env, &valid_hash);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_validate_audit_reference_attachment_rejects_zero_hash() {
+    let env = Env::default();
+    let zero_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    
+    // The enhanced validation should reject zero hashes with proper error
+    let result = challenge::validate_audit_reference_attachment(&env, &zero_hash);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), AuditError::InvalidProofReference);
+}
+
+#[test]
+fn test_validate_audit_reference_attachment_rejects_all_zeros() {
+    let env = Env::default();
+    let all_zeros = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    
+    // The enhanced validation should reject all-zero hashes
+    let result = challenge::validate_audit_reference_attachment(&env, &all_zeros);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), AuditError::InvalidProofReference);
+}
+
+#[test]
+fn test_validate_audit_reference_accepts_various_valid_hashes() {
+    let env = Env::default();
+    
+    // Test with different valid hash patterns
+    let hash1 = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    let hash2 = soroban_sdk::BytesN::from_array(&env, &[0xFFu8; 32]);
+    let hash3 = soroban_sdk::BytesN::from_array(&env, &[0xABu8; 32]);
+    
+    // All valid hashes should pass validation
+    assert!(challenge::validate_audit_reference_attachment(&env, &hash1).is_ok());
+    assert!(challenge::validate_audit_reference_attachment(&env, &hash2).is_ok());
+    assert!(challenge::validate_audit_reference_attachment(&env, &hash3).is_ok());
+}
+
 #[test]
 fn test_prune_expired_view_key_before_grace_period_fails() {
     let (env, contract_id) = setup();
