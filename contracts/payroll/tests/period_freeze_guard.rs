@@ -240,3 +240,51 @@ fn non_admin_cannot_freeze_period() {
     let result = payroll.try_freeze_period_config(&stranger, &period);
     assert!(result.is_err());
 }
+
+#[test]
+fn non_overlapping_settlement_windows_are_accepted() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _owner, _employee) = setup_payroll(&env);
+    let first = Symbol::new(&env, "period_first");
+    let second = Symbol::new(&env, "period_second");
+
+    payroll.set_settlement_window(&admin, &first, &100, &200, &300, &400);
+    payroll.set_settlement_window(&admin, &second, &401, &500, &600, &700);
+
+    assert!(payroll.get_settlement_window(&first).is_some());
+    assert!(payroll.get_settlement_window(&second).is_some());
+}
+
+#[test]
+fn overlapping_and_endpoint_touching_windows_are_rejected() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _owner, _employee) = setup_payroll(&env);
+    let first = Symbol::new(&env, "period_first");
+    let partial_overlap = Symbol::new(&env, "period_partial");
+    let endpoint_touch = Symbol::new(&env, "period_endpoint");
+
+    payroll.set_settlement_window(&admin, &first, &100, &200, &300, &400);
+
+    assert!(payroll
+        .try_set_settlement_window(&admin, &partial_overlap, &350, &450, &500, &550)
+        .is_err());
+    assert!(payroll
+        .try_set_settlement_window(&admin, &endpoint_touch, &400, &500, &600, &700)
+        .is_err());
+    assert!(payroll.get_settlement_window(&partial_overlap).is_none());
+    assert!(payroll.get_settlement_window(&endpoint_touch).is_none());
+}
+
+#[test]
+fn replacing_a_period_window_does_not_overlap_itself() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _owner, _employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_replace");
+
+    payroll.set_settlement_window(&admin, &period, &100, &200, &300, &400);
+    payroll.set_settlement_window(&admin, &period, &400, &500, &600, &700);
+
+    let window = payroll.get_settlement_window(&period).unwrap();
+    assert_eq!(window.open_at, 400);
+    assert_eq!(window.close_at, 700);
+}

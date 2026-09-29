@@ -144,6 +144,9 @@ pub enum PaymentError {
     /// execution, grace, and close timestamps are not monotonically ordered
     /// (issue #316).
     InvalidSettlementWindowConfig = 312,
+    /// A settlement window overlaps the calendar range of another payroll
+    /// period (issue: payroll calendar overlap detection).
+    SettlementWindowOverlap = 313,
 }
 
 /// Treasury and Asset Errors (400-499)

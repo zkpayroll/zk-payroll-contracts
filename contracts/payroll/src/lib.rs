@@ -986,6 +986,9 @@ pub enum DataKey {
     BatchSplitTracker(u64),
     /// Settlement window configuration for a capacity-accounting period (#316).
     SettlementWindow(Symbol),
+    /// Enumerable labels with configured settlement windows, used to reject
+    /// overlapping payroll calendar ranges.
+    SettlementWindowPeriods,
     /// The capacity-accounting period a pending run was prepared under, if
     /// any was open at the time — used to locate its settlement window for
     /// later expiration (#316).
@@ -6048,6 +6051,41 @@ impl Payroll {
 
     // ── Issue #316: settlement window enforcement ─────────────────────────────
 
+    /// Reject a proposed inclusive calendar range that intersects another
+    /// configured period's range. Reconfiguration of the same label is allowed.
+    fn assert_no_settlement_window_overlap(
+        e: &Env,
+        period: &Symbol,
+        open_at: u64,
+        close_at: u64,
+    ) {
+        let periods: Vec<Symbol> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindowPeriods)
+            .unwrap_or(Vec::new(e));
+
+        for index in 0..periods.len() {
+            let existing_period = periods.get(index).unwrap();
+            if existing_period == *period {
+                continue;
+            }
+
+            let existing_window: Option<SettlementWindow> = e
+                .storage()
+                .persistent()
+                .get(&DataKey::SettlementWindow(existing_period));
+            if let Some(existing_window) = existing_window {
+                if open_at <= existing_window.close_at && existing_window.open_at <= close_at {
+                    panic!(
+                        "Settlement window overlaps another payroll period; choose a non-overlapping calendar range (error code {})",
+                        PaymentError::SettlementWindowOverlap as u32
+                    );
+                }
+            }
+        }
+    }
+
     /// Set (or replace) the settlement window for a payroll period. Only the
     /// admin may call, and the timestamps must be monotonically ordered:
     /// `open_at <= execution_start <= execution_end <= close_at`.
@@ -6092,6 +6130,8 @@ impl Payroll {
             );
         }
 
+        Self::assert_no_settlement_window_overlap(&e, &period, open_at, close_at);
+
         let window = SettlementWindow {
             open_at,
             execution_start,
@@ -6103,6 +6143,18 @@ impl Payroll {
         let window_key = DataKey::SettlementWindow(period.clone());
         let previous_ref = stored_ref(&e, &window_key);
         e.storage().persistent().set(&window_key, &window);
+
+        let mut periods: Vec<Symbol> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindowPeriods)
+            .unwrap_or(Vec::new(&e));
+        if periods.first_index_of(period.clone()).is_none() {
+            periods.push_back(period.clone());
+            e.storage()
+                .persistent()
+                .set(&DataKey::SettlementWindowPeriods, &periods);
+        }
 
         payroll_events::emit_settlement_window_set(
             &e,
