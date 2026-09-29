@@ -14,6 +14,7 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 - **Period Freeze Guard** — Finalized payroll periods are locked against further edits, with an admin-controlled unfreeze path for authorized corrections
 - **Run Expiration** — Prepared-but-unfinalized payroll runs can expire after a configurable window, releasing reserved funds and stopping stale submissions
 - **Operational Guardrails** — Payer account status gate on payment execution (#573), approval timestamp validation on approvals and finalization (#571), a privacy-safe pending obligations query (#572), and opaque receipt reference indexing with deduplicated run lookup (#574)
+- **Employer-Scoped Import References** — Employee external reference IDs are unique within each employer's salary commitment contract; duplicates are rejected without exposing employee or payroll data, while separate employers may use the same reference
 - **Compliance Ready** — Selective disclosure for audits via view keys
 - **On-Chain Verification** — Groth16 proof verification on Soroban
 

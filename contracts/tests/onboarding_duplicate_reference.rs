@@ -135,6 +135,38 @@ fn test_onboarding_rejects_duplicate_reference_for_same_employer() {
 }
 
 #[test]
+fn test_same_reference_is_allowed_for_different_employers() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Each employer uses its own salary commitment contract, so reference
+    // uniqueness is enforced within that employer's payroll scope.
+    let employer_a_id = env.register_contract(None, SalaryCommitmentContract);
+    let employer_a = SalaryCommitmentContractClient::new(&env, &employer_a_id);
+    employer_a.init_commitment_admin(&Address::generate(&env));
+
+    let employer_b_id = env.register_contract(None, SalaryCommitmentContract);
+    let employer_b = SalaryCommitmentContractClient::new(&env, &employer_b_id);
+    employer_b.init_commitment_admin(&Address::generate(&env));
+
+    let reference_id = String::from_str(&env, "HR-EMP-100");
+    let employee_a = Address::generate(&env);
+    let employee_b = Address::generate(&env);
+
+    employer_a.set_employee_reference_id(&employee_a, &reference_id);
+    employer_b.set_employee_reference_id(&employee_b, &reference_id);
+
+    assert_eq!(
+        employer_a.get_employee_by_reference_id(&reference_id),
+        Some(employee_a)
+    );
+    assert_eq!(
+        employer_b.get_employee_by_reference_id(&reference_id),
+        Some(employee_b)
+    );
+}
+
+#[test]
 fn test_duplicate_reference_rejection_preserves_original_mapping() {
     let env = Env::default();
     let fixture = setup_employer_onboarding(&env);
