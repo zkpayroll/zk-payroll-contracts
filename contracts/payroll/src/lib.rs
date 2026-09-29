@@ -24,6 +24,9 @@ use signed_operator_actions::{
 pub mod execution_authorization;
 use execution_authorization::ExecutionInitiatorAuthorization;
 
+pub mod correction_authorization;
+use correction_authorization::{CorrectionAuthorizationLimits, CorrectionUsage};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
@@ -1034,6 +1037,12 @@ pub enum DataKey {
     OrganizationPolicyMigration,
     /// Registered import source for payroll batch authorization.
     ImportSource(Address),
+    /// Employer-configured authorization limits for payroll corrections
+    /// (issue #577). Absent means no policy is configured and the amendment
+    /// flow performs no correction checks.
+    CorrectionAuthorizationLimits,
+    /// Accumulated correction usage counters for one payroll period (#577).
+    CorrectionUsage(Symbol),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -4696,6 +4705,73 @@ impl Payroll {
 
     /// Amend a `Pending` payroll run draft before finalization.
     ///
+    /// Configure the employer's correction authorization limits (issue #577).
+    ///
+    /// Only the payroll admin may set the policy. Passing all-zero limits
+    /// disables every correction check, restoring the pre-existing behaviour.
+    /// The change is recorded in the config audit trail like any other
+    /// configuration setter.
+    ///
+    /// # Panics
+    /// * The caller is not the registered payroll admin.
+    /// * `max_total_delta` is negative.
+    pub fn set_correction_limits(
+        e: Env,
+        admin: Address,
+        max_corrections_per_period: u32,
+        max_total_delta: i128,
+        max_employees_corrected: u32,
+    ) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if max_total_delta < 0 {
+            panic!("Correction delta limit cannot be negative");
+        }
+
+        let limits = CorrectionAuthorizationLimits {
+            max_corrections_per_period,
+            max_total_delta,
+            max_employees_corrected,
+        };
+        let previous_ref = stored_ref(&e, &DataKey::CorrectionAuthorizationLimits);
+        correction_authorization::write_limits(&e, &limits);
+        record_config_change(
+            &e,
+            &addrs.admin,
+            "correction_authorization_limits",
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::CorrectionAuthorizationLimits),
+        );
+    }
+
+    /// Read the employer's configured correction authorization limits (#577).
+    ///
+    /// Returns `None` when no policy has been configured, which means the
+    /// amendment flow performs no correction checks.
+    pub fn get_correction_limits(
+        e: Env,
+    ) -> Option<CorrectionAuthorizationLimits> {
+        correction_authorization::configured_limits(&e)
+    }
+
+    /// Read the accumulated correction usage for a payroll period (#577).
+    ///
+    /// Returns zeroed counters when the period has seen no corrections.
+    /// Privacy-safe: exposes only aggregate counts and totals.
+    pub fn get_correction_usage(e: Env, period_label: Symbol) -> CorrectionUsage {
+        correction_authorization::usage_for(&e, &period_label)
+    }
+
     /// Only the admin may amend. Finalized drafts are rejected so audit
     /// trails remain unambiguous.
     pub fn amend_run_draft(
@@ -4729,6 +4805,17 @@ impl Payroll {
         if new_total_amount <= 0 {
             panic!("total_amount must be positive");
         }
+        // Issue #577: enforce the employer's correction authorization limits
+        // before any state is written, so a rejected correction changes nothing.
+        // The delta is the absolute amount this correction moves, and the
+        // employees touched are those covered by the corrected draft.
+        let correction_delta = (new_total_amount - draft.total_amount).saturating_abs();
+        correction_authorization::require_within_limits(
+            &e,
+            &draft.period_label,
+            correction_delta,
+            new_employee_count,
+        );
         draft.total_amount = new_total_amount;
         draft.employee_count = new_employee_count;
         draft.amendment_count += 1;
@@ -4736,6 +4823,14 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
+        // Issue #577: advance the period's usage counters only after the
+        // correction has been applied.
+        correction_authorization::record(
+            &e,
+            &draft.period_label,
+            correction_delta,
+            new_employee_count,
+        );
         payroll_events::emit_draft_amended(&e, draft_id, new_total_amount, draft.amendment_count);
         payroll_events::emit_draft_updated(
             &e,
