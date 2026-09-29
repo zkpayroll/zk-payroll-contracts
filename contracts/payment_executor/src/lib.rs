@@ -98,6 +98,8 @@ pub enum PaymentError {
     /// for this company, or the hard contract cap (issue #510).
     /// Error paths never expose employee addresses or salary amounts.
     BatchTooLarge = 18,
+    /// The payroll period is already open (cannot reopen an open period) (issue #484).
+    PeriodAlreadyOpen = 19,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -669,6 +671,73 @@ impl PaymentExecutor {
         env.storage().persistent().set(&period_key, &period);
 
         payroll_events::emit_period_closed(&env, company_id, period_id);
+
+        Ok(period)
+    }
+
+    /// Reopen a closed/finalized payroll period so additional payments can be made (#484).
+    ///
+    /// Only the company admin can reopen a period. Reopening is only allowed if
+    /// the period is currently closed and no other period is currently active for
+    /// the company (preserving the single-active-period invariant).
+    ///
+    /// # Errors
+    /// - [`PaymentError::PeriodNotFound`]: The period does not exist.
+    /// - [`PaymentError::PeriodAlreadyOpen`]: The period is already open.
+    /// - [`PaymentError::PeriodAlreadyExists`]: Another period is currently open.
+    pub fn reopen_period(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+    ) -> Result<PayrollPeriod, PaymentError> {
+        Self::require_not_paused(&env);
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company: CompanyInfo = registry.get_company(&company_id);
+        if company.revoked {
+            panic!("Company admin is revoked");
+        }
+        company.admin.require_auth();
+
+        let period_key = DataKey::Period(company_id, period_id);
+        let mut period: PayrollPeriod = env
+            .storage()
+            .persistent()
+            .get(&period_key)
+            .ok_or(PaymentError::PeriodNotFound)?;
+
+        if !period.closed {
+            return Err(PaymentError::PeriodAlreadyOpen);
+        }
+
+        // Verify that no other period is currently open for this company
+        let seq_key = DataKey::PeriodSequence(company_id);
+        let next_id: u32 = env.storage().persistent().get(&seq_key).unwrap_or(1u32);
+        for id in 1..next_id {
+            if id != period_id {
+                let other_key = DataKey::Period(company_id, id);
+                if let Some(other_period) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, PayrollPeriod>(&other_key)
+                {
+                    if !other_period.closed {
+                        return Err(PaymentError::PeriodAlreadyExists);
+                    }
+                }
+            }
+        }
+
+        period.closed = false;
+        period.end_ledger = 0;
+        env.storage().persistent().set(&period_key, &period);
+
+        payroll_events::emit_period_reopened(&env, company_id, period_id);
 
         Ok(period)
     }

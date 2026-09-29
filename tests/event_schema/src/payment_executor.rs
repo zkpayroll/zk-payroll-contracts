@@ -147,6 +147,34 @@ fn case_period_closed(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_period_reopened(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let company_id: u64 = 43;
+    let period_id: u32 = 1;
+    env.as_contract(cid, || {
+        payroll_events::emit_period_reopened(env, company_id, period_id);
+    });
+    let (_, topics, data) = last_event(env);
+    let expected_topics: SVec<Val> = (Symbol::new(env, "PeriodReopened"), company_id).into_val(env);
+    assert_eq!(
+        topics, expected_topics,
+        "payment_executor.PeriodReopened topics changed"
+    );
+    let decoded: (u32,) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (period_id,),
+        "payment_executor.PeriodReopened payload changed"
+    );
+    out.insert(
+        "payment_executor.PeriodReopened".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("PeriodReopened"), dynamic("u64")],
+            data: vec![field("period_id", "u32")],
+        },
+    );
+}
+
 fn case_executor_payment_processed(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let company_id: u64 = 42;
     let employee = Address::generate(env);
@@ -226,6 +254,7 @@ fn payment_executor_events_match_fixture() {
     case_executor_pause_manager_set(&env, &cid, &mut observed);
     case_period_created(&env, &cid, &mut observed);
     case_period_closed(&env, &cid, &mut observed);
+    case_period_reopened(&env, &cid, &mut observed);
     case_executor_payment_processed(&env, &cid, &mut observed);
     case_asset_allowed_changed(&env, &cid, &mut observed);
 

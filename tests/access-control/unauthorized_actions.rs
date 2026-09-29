@@ -641,6 +641,61 @@ fn test_unauthorized_close_period_fails() {
     executor.close_period(&company_id, &1);
 }
 
+/// Test that unauthorized users cannot reopen closed/finalized payroll periods (#484).
+/// Only the company admin should be able to call reopen_period.
+#[test]
+#[should_panic(expected = "authorized")]
+fn test_unauthorized_reopen_period_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let executor_id = env.register_contract(None, PaymentExecutor);
+    let registry_id = env.register_contract(None, PayrollRegistry);
+    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let verifier_id = env.register_contract(None, ProofVerifier);
+    let token_id = env.register_contract(None, Token);
+
+    let executor = PaymentExecutorClient::new(&env, &executor_id);
+    let registry = PayrollRegistryClient::new(&env, &registry_id);
+    let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
+    let verifier = ProofVerifierClient::new(&env, &verifier_id);
+
+    let addresses = ContractAddresses {
+        registry: registry_id,
+        commitment: commitment_id,
+        verifier: verifier_id,
+        token: token_id,
+    };
+
+    executor.initialize(&addresses);
+    verifier.init_verifier_admin(&Address::generate(&env));
+    verifier.initialize_verifier(&mock_vk(&env));
+
+    let commitment_admin = Address::generate(&env);
+    commitment_client.init_commitment_admin(&commitment_admin);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = registry.register_company(&admin, &treasury);
+
+    executor.create_period(&company_id);
+    executor.close_period(&company_id, &1);
+
+    let unauthorized_user = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &unauthorized_user,
+        invoke: &MockAuthInvoke {
+            contract: &executor_id,
+            fn_name: "reopen_period",
+            args: (company_id, 1u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    executor.reopen_period(&company_id, &1);
+}
+
 // ============================================================================
 // Category 4: Unauthorized Audit Access Change Tests
 // ============================================================================

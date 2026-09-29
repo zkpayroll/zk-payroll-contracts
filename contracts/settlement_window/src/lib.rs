@@ -171,11 +171,7 @@ impl SettlementWindowContract {
         }
 
         let seq_key = DataKey::PeriodSequence(company_id);
-        let period_id: u32 = env
-            .storage()
-            .persistent()
-            .get(&seq_key)
-            .unwrap_or(1u32);
+        let period_id: u32 = env.storage().persistent().get(&seq_key).unwrap_or(1u32);
 
         // Reject if a non-finalized period already exists for this company.
         if period_id > 1 {
@@ -186,9 +182,7 @@ impl SettlementWindowContract {
                 .get::<DataKey, SettlementPeriod>(&prev_key)
             {
                 match prev.phase {
-                    PeriodPhase::Closed
-                    | PeriodPhase::Expired
-                    | PeriodPhase::Cancelled => {}
+                    PeriodPhase::Closed | PeriodPhase::Expired | PeriodPhase::Cancelled => {}
                     _ => return Err(SettlementError::PeriodAlreadyExists),
                 }
             }
@@ -210,9 +204,7 @@ impl SettlementWindowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Period(company_id, period_id), &period);
-        env.storage()
-            .persistent()
-            .set(&seq_key, &(period_id + 1));
+        env.storage().persistent().set(&seq_key, &(period_id + 1));
 
         payroll_events::emit_settlement_period_created(
             &env,
@@ -471,9 +463,10 @@ impl SettlementWindowContract {
     }
 
     fn save_period(env: &Env, period: &SettlementPeriod) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::Period(period.company_id, period.period_id), period);
+        env.storage().persistent().set(
+            &DataKey::Period(period.company_id, period.period_id),
+            period,
+        );
     }
 
     fn require_not_finalized(period: &SettlementPeriod) -> Result<(), SettlementError> {
@@ -518,13 +511,17 @@ mod tests {
         let (open_at, execute_at, grace_until, close_at) = make_window(now + 10);
 
         let company_id = 1u64;
-        let period = client.create_period(&company_id, &open_at, &execute_at, &grace_until, &close_at);
+        let period =
+            client.create_period(&company_id, &open_at, &execute_at, &grace_until, &close_at);
         assert_eq!(period.period_id, 1);
         assert_eq!(period.phase, PeriodPhase::Pending);
 
         // Before open_at — should reject
         let result = client.try_check_execution_allowed(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::PeriodNotYetOpen);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::PeriodNotYetOpen
+        );
     }
 
     #[test]
@@ -535,7 +532,13 @@ mod tests {
         let company_id = 2u64;
 
         // Set window: open now, execute now+10, grace now+1000, close now+2000
-        client.create_period(&company_id, &base, &(base + 10), &(base + 1000), &(base + 2000));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 1000),
+            &(base + 2000),
+        );
 
         // Advance time into execute window
         env.ledger().with_mut(|l| l.timestamp = base + 50);
@@ -551,13 +554,22 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 3u64;
 
-        client.create_period(&company_id, &base, &(base + 500), &(base + 1000), &(base + 2000));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 500),
+            &(base + 1000),
+            &(base + 2000),
+        );
 
         // Time is at open_at but before execute_at
         env.ledger().with_mut(|l| l.timestamp = base + 100);
 
         let result = client.try_check_execution_allowed(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::ExecutionWindowNotOpen);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
     }
 
     #[test]
@@ -567,13 +579,22 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 4u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
 
         // Advance past grace
         env.ledger().with_mut(|l| l.timestamp = base + 150);
 
         let result = client.try_check_execution_allowed(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::ExecutionWindowExpired);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowExpired
+        );
     }
 
     #[test]
@@ -583,13 +604,22 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 5u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
         let cancelled = client.cancel_period(&company_id, &1);
         assert_eq!(cancelled.phase, PeriodPhase::Cancelled);
 
         // Second cancel should fail
         let result = client.try_cancel_period(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::AlreadyFinalized);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
     }
 
     #[test]
@@ -599,12 +629,21 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 6u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 50), &(base + 100));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
 
         // Before grace_until — should not expire
         env.ledger().with_mut(|l| l.timestamp = base + 80);
         let too_early = client.try_expire_period(&company_id, &1);
-        assert_eq!(too_early.unwrap_err().unwrap(), SettlementError::ExecutionWindowNotOpen);
+        assert_eq!(
+            too_early.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
 
         // After grace_until
         env.ledger().with_mut(|l| l.timestamp = base + 110);
@@ -619,8 +658,17 @@ mod tests {
         let base = env.ledger().timestamp();
 
         // execute_at before open_at
-        let result = client.try_create_period(&1u64, &(base + 100), &(base + 50), &(base + 200), &(base + 300));
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::InvalidWindowConfig);
+        let result = client.try_create_period(
+            &1u64,
+            &(base + 100),
+            &(base + 50),
+            &(base + 200),
+            &(base + 300),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::InvalidWindowConfig
+        );
     }
 
     #[test]
@@ -630,10 +678,27 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 7u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200)).period_id;
+        client
+            .create_period(
+                &company_id,
+                &base,
+                &(base + 10),
+                &(base + 100),
+                &(base + 200),
+            )
+            .period_id;
         // Second call while first is still active
-        let result = client.try_create_period(&company_id, &(base + 300), &(base + 310), &(base + 400), &(base + 500));
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::PeriodAlreadyExists);
+        let result = client.try_create_period(
+            &company_id,
+            &(base + 300),
+            &(base + 310),
+            &(base + 400),
+            &(base + 500),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::PeriodAlreadyExists
+        );
     }
 
     #[test]
@@ -643,11 +708,23 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 8u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
         client.cancel_period(&company_id, &1);
 
         // Should succeed now that period 1 is cancelled
-        let p2 = client.create_period(&company_id, &(base + 300), &(base + 310), &(base + 400), &(base + 500));
+        let p2 = client.create_period(
+            &company_id,
+            &(base + 300),
+            &(base + 310),
+            &(base + 400),
+            &(base + 500),
+        );
         assert_eq!(p2.period_id, 2);
     }
 }

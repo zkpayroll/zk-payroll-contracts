@@ -24,14 +24,10 @@
 /// | `test_prepared_run_not_marked_settled` | `prepare_payroll_run` alone does not mark settled |
 /// | `test_cancelled_run_not_marked_settled` | Cancelled pending run is never marked settled |
 /// | `test_is_settled_for_nonexistent_run_returns_false` | Unknown run id → false, never panic |
-
 use payroll::{Payroll, PayrollClient, ReconciliationStatus};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    Address, BytesN, Env, Symbol, Vec,
-};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Symbol, Vec};
 use token::{Token, TokenClient};
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────
@@ -272,7 +268,11 @@ fn test_duplicate_nonce_error_is_stable() {
     let mut employees = Vec::new(&ctx.env);
     employees.push_back(ctx.employee.clone());
 
-    ctx.payroll().batch_process_payroll(
+    ctx.payroll()
+        .batch_process_payroll(&proofs, &amounts, &employees, &500, &shared_nonce, &None);
+
+    // Call the duplicate twice — both must fail, not only the first retry.
+    let r1 = ctx.payroll().try_batch_process_payroll(
         &proofs,
         &amounts,
         &employees,
@@ -280,13 +280,13 @@ fn test_duplicate_nonce_error_is_stable() {
         &shared_nonce,
         &None,
     );
-
-    // Call the duplicate twice — both must fail, not only the first retry.
-    let r1 = ctx.payroll().try_batch_process_payroll(
-        &proofs, &amounts, &employees, &500, &shared_nonce, &None,
-    );
     let r2 = ctx.payroll().try_batch_process_payroll(
-        &proofs, &amounts, &employees, &500, &shared_nonce, &None,
+        &proofs,
+        &amounts,
+        &employees,
+        &500,
+        &shared_nonce,
+        &None,
     );
 
     assert!(r1.is_err(), "first duplicate must fail");
@@ -308,14 +308,24 @@ fn test_funds_not_transferred_on_duplicate_attempt() {
     employees.push_back(ctx.employee.clone());
 
     ctx.payroll().batch_process_payroll(
-        &proofs, &amounts, &employees, &2_000, &shared_nonce, &None,
+        &proofs,
+        &amounts,
+        &employees,
+        &2_000,
+        &shared_nonce,
+        &None,
     );
 
     let treasury_after_first = ctx.token().balance(&ctx.treasury);
 
     // Duplicate attempt — must fail, treasury must not change.
     let _ = ctx.payroll().try_batch_process_payroll(
-        &proofs, &amounts, &employees, &2_000, &shared_nonce, &None,
+        &proofs,
+        &amounts,
+        &employees,
+        &2_000,
+        &shared_nonce,
+        &None,
     );
 
     assert_eq!(
@@ -339,13 +349,23 @@ fn test_employee_balance_unchanged_on_duplicate_attempt() {
     employees.push_back(ctx.employee.clone());
 
     ctx.payroll().batch_process_payroll(
-        &proofs, &amounts, &employees, &3_000, &shared_nonce, &None,
+        &proofs,
+        &amounts,
+        &employees,
+        &3_000,
+        &shared_nonce,
+        &None,
     );
 
     let employee_after_first = ctx.token().balance(&ctx.employee);
 
     let _ = ctx.payroll().try_batch_process_payroll(
-        &proofs, &amounts, &employees, &3_000, &shared_nonce, &None,
+        &proofs,
+        &amounts,
+        &employees,
+        &3_000,
+        &shared_nonce,
+        &None,
     );
 
     assert_eq!(
@@ -442,9 +462,17 @@ fn test_multiple_employees_settled_once_each() {
 
     // Retry with the same nonce must fail — no employee was paid twice.
     let dup = ctx.payroll().try_batch_process_payroll(
-        &proofs, &amounts, &employees, &1_800, &nonce(&ctx.env, 30), &None,
+        &proofs,
+        &amounts,
+        &employees,
+        &1_800,
+        &nonce(&ctx.env, 30),
+        &None,
     );
-    assert!(dup.is_err(), "Duplicate multi-employee batch must be rejected");
+    assert!(
+        dup.is_err(),
+        "Duplicate multi-employee batch must be rejected"
+    );
 }
 
 // ── Read-only confirmation ─────────────────────────────────────────────────────

@@ -1003,39 +1003,39 @@ impl AuditModule {
 #[cfg(test)]
 mod tests;
 
-    // ────────────────────────────────────────────────────────────────────────────
-    // Issue #513: Audit Grant Scope Query Endpoint
-    // ────────────────────────────────────────────────────────────────────────────
-    
-    /// Query the effective scope and lifecycle state of an audit grant.
-    /// 
-    /// Returns:
-    /// - Grant scope (FullCompany, TimeRange, EmployeeList, AggregateOnly)
-    /// - Expiration ledger
-    /// - Whether grant is currently active (not expired)
-    /// - Granted by (admin address)
-    /// - Delegation status
-    /// 
-    /// Read-only query, no authorization required for transparency.
-    /// Privacy-safe: returns metadata only, no salary or employee data.
-    pub fn query_grant_scope(env: Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
-        let record: ViewKeyRecord = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AuditorKey(auditor))
-            .ok_or(AuditError::KeyNotFound)?;
-            
-        Ok(record)
+// ────────────────────────────────────────────────────────────────────────────
+// Issue #513: Audit Grant Scope Query Endpoint
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Query the effective scope and lifecycle state of an audit grant.
+///
+/// Returns:
+/// - Grant scope (FullCompany, TimeRange, EmployeeList, AggregateOnly)
+/// - Expiration ledger
+/// - Whether grant is currently active (not expired)
+/// - Granted by (admin address)
+/// - Delegation status
+///
+/// Read-only query, no authorization required for transparency.
+/// Privacy-safe: returns metadata only, no salary or employee data.
+pub fn query_grant_scope(env: Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
+    let record: ViewKeyRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::AuditorKey(auditor))
+        .ok_or(AuditError::KeyNotFound)?;
+
+    Ok(record)
+}
+
+/// Check if a grant is currently active (exists and not expired).
+pub fn is_grant_active(env: Env, auditor: Address) -> bool {
+    match env
+        .storage()
+        .persistent()
+        .get::<_, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
+    {
+        Some(record) => env.ledger().sequence() <= record.expiration_ledger,
+        None => false,
     }
-    
-    /// Check if a grant is currently active (exists and not expired).
-    pub fn is_grant_active(env: Env, auditor: Address) -> bool {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
-        {
-            Some(record) => env.ledger().sequence() <= record.expiration_ledger,
-            None => false,
-        }
-    }
+}

@@ -231,6 +231,32 @@ pub struct PayrollRunDraft {
     pub updated_at: u64,
 }
 
+// ── Issue #471 / #484: Payroll period freeze & reopening guard ────────────────
+
+/// Record representing a frozen payroll period (#471, #484).
+///
+/// Created automatically when a draft is submitted (`reason = finalized`),
+/// or manually by the admin via `freeze_payroll_period`. Once frozen/finalized, no
+/// draft creation, amendment, description update, finalization, or submission
+/// is allowed for this period until the admin unfreezes/reopens it.
+/// The record intentionally contains no salary values or per-employee data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodFreeze {
+    /// Period label this freeze guards (matches the draft `period_label`).
+    pub period_label: Symbol,
+    /// Address that applied the freeze (admin, or the admin that submitted
+    /// the run which auto-froze the period).
+    pub frozen_by: Address,
+    /// Ledger timestamp when the freeze was applied.
+    pub frozen_at: u64,
+    /// Short operator label for the freeze (e.g. `finalized`, `manual`).
+    pub reason: Symbol,
+    /// Number of payroll runs that had been submitted for this period when
+    /// the freeze was applied.
+    pub runs_count: u32,
+}
+
 // ?? Reviewer Authorization & Run Review ?????????????????????????????????????
 
 /// Review decision outcome for a payroll run.
@@ -922,6 +948,8 @@ pub enum DataKey {
     /// `true` once the period is frozen; absent means editable unless the
     /// period is implicitly frozen (settlement-ready or a submitted run).
     PeriodConfigFrozen(Symbol),
+    /// Explicit freeze record for a finalized payroll period (#471, #484).
+    PeriodFreeze(Symbol),
     /// Tracks paid employees per run to prevent duplicate payments (#482).
     EmployeePaidTracker(u64),
     /// Status view for a payroll run (#485).
@@ -3085,31 +3113,34 @@ impl Payroll {
         Self::require_not_paused(&e);
         Self::validate_run_id(run_id);
         Self::require_run_not_disputed(&e, run_id);
-        
+
         let pending_key = DataKey::PendingRun(run_id);
         let mut pending_run: PendingPayrollRun = e
             .storage()
             .persistent()
             .get(&pending_key)
             .expect("Pending run not found");
-            
+
         if pending_run.admin != current_admin {
             panic!("Unauthorized: caller is not the pending run admin");
         }
-        
+
         current_admin.require_auth();
-        
+
         if current_admin == new_admin {
             panic!("Invalid transfer: new admin is the same as current admin");
         }
-        
+
         pending_run.admin = new_admin.clone();
-        
+
         e.storage().persistent().set(&pending_key, &pending_run);
-        
+
         e.events().publish(
-            (Symbol::new(&e, "payroll"), Symbol::new(&e, "run_admin_transferred")),
-            (run_id, current_admin, new_admin)
+            (
+                Symbol::new(&e, "payroll"),
+                Symbol::new(&e, "run_admin_transferred"),
+            ),
+            (run_id, current_admin, new_admin),
         );
     }
 
@@ -4055,6 +4086,9 @@ impl Payroll {
         }
         admin.require_auth();
 
+        // Issue #471: a frozen period cannot receive new drafts.
+        Self::require_period_not_frozen(&e, &period_label);
+
         if total_amount <= 0 {
             panic!("total_amount must be positive");
         }
@@ -4434,6 +4468,115 @@ impl Payroll {
             .remove(&DataKey::ActiveDraftForPeriod(draft.period_label.clone()));
 
         payroll_events::emit_draft_expired(&e, draft_id, admin);
+    }
+
+    // ── Issue #471 / #484: payroll period freeze and reopening guard ─────────
+
+    /// Panic if the given payroll period is currently frozen/finalized (#471, #484).
+    ///
+    /// Called by every state-mutating payroll edit path that must be blocked
+    /// once a period has been finalized (draft creation, amendment,
+    /// draft finalization, and draft submission).
+    fn require_period_not_frozen(e: &Env, period_label: &Symbol) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label.clone()))
+        {
+            panic!("Payroll period is frozen: it has been finalized and can no longer be edited");
+        }
+    }
+
+    /// Freeze a payroll period.
+    ///
+    /// Once frozen, no new drafts can be created for `period_label`, and
+    /// existing pending/finalized drafts for the period can no longer be
+    /// amended, finalized, or submitted. Cancelling or expiring a
+    /// draft remains possible as an operator escape hatch — those paths
+    /// remove pending payroll work instead of adding or changing it.
+    ///
+    /// Only the `admin` may freeze. Freezing an already-frozen period is
+    /// rejected so the audit trail stays unambiguous; use `unfreeze` first.
+    ///
+    /// Emits `period_frozen`.
+    pub fn freeze_payroll_period(e: Env, admin: Address, period_label: Symbol, reason: Symbol) {
+        Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        Self::validate_symbol_not_empty(&e, &reason, "reason");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let freeze_key = DataKey::PeriodFreeze(period_label.clone());
+        if e.storage().persistent().has(&freeze_key) {
+            panic!("Payroll period is already frozen");
+        }
+
+        let freeze = PeriodFreeze {
+            period_label: period_label.clone(),
+            frozen_by: admin.clone(),
+            frozen_at: e.ledger().timestamp(),
+            reason: reason.clone(),
+            runs_count: Self::count_runs_for_period(&e, &period_label),
+        };
+        e.storage().persistent().set(&freeze_key, &freeze);
+
+        payroll_events::emit_period_frozen(&e, period_label, admin, reason);
+    }
+
+    /// Lift the freeze on a finalized payroll period (reopen finalized period).
+    ///
+    /// Only the `admin` may unfreeze/reopen (#484). This is the sole path back to editing
+    /// after a period has been finalized; the unfreeze event preserves the full audit trail.
+    ///
+    /// Emits `period_unfrozen`.
+    pub fn unfreeze_payroll_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let freeze_key = DataKey::PeriodFreeze(period_label.clone());
+        if !e.storage().persistent().has(&freeze_key) {
+            panic!("Payroll period is not frozen");
+        }
+
+        e.storage().persistent().remove(&freeze_key);
+
+        payroll_events::emit_period_unfrozen(&e, period_label, admin);
+    }
+
+    /// Explicit alias for `unfreeze_payroll_period` to reopen a finalized payroll period (#484).
+    ///
+    /// Only the contract admin can call this entrypoint.
+    pub fn reopen_payroll_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::unfreeze_payroll_period(e, admin, period_label);
+    }
+
+    /// Return the freeze record for a period, if it is frozen.
+    pub fn get_period_freeze(e: Env, period_label: Symbol) -> Option<PeriodFreeze> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PeriodFreeze(period_label))
+    }
+
+    /// Return `true` if the payroll period is currently frozen.
+    pub fn is_period_frozen(e: Env, period_label: Symbol) -> bool {
+        e.storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label))
     }
 
     // ?? Issue #91: privileged-role rotation ??????????????????????????????????
@@ -5397,15 +5540,19 @@ impl Payroll {
         let can_execute = !is_paused && window_allows_execution && !capacity_exceeded;
 
         let (status, reason) = if is_paused {
-            (PeriodHealthStatus::Blocked, PeriodHealthReason::ContractPaused)
+            (
+                PeriodHealthStatus::Blocked,
+                PeriodHealthReason::ContractPaused,
+            )
         } else if let Some(ws) = window_status_enum {
             match ws {
                 SettlementWindowStatus::PreOpen => {
                     (PeriodHealthStatus::Blocked, PeriodHealthReason::PreOpen)
                 }
-                SettlementWindowStatus::Closed => {
-                    (PeriodHealthStatus::Blocked, PeriodHealthReason::WindowClosed)
-                }
+                SettlementWindowStatus::Closed => (
+                    PeriodHealthStatus::Blocked,
+                    PeriodHealthReason::WindowClosed,
+                ),
                 SettlementWindowStatus::Grace => {
                     (PeriodHealthStatus::Warning, PeriodHealthReason::GracePeriod)
                 }
@@ -5416,7 +5563,10 @@ impl Payroll {
                             capacity_reason.unwrap_or(PeriodHealthReason::BatchCapacityExceeded),
                         )
                     } else if is_frozen {
-                        (PeriodHealthStatus::Warning, PeriodHealthReason::PeriodFrozen)
+                        (
+                            PeriodHealthStatus::Warning,
+                            PeriodHealthReason::PeriodFrozen,
+                        )
                     } else {
                         (PeriodHealthStatus::Healthy, PeriodHealthReason::Normal)
                     }
@@ -5428,7 +5578,10 @@ impl Payroll {
                 capacity_reason.unwrap_or(PeriodHealthReason::BatchCapacityExceeded),
             )
         } else if is_frozen {
-            (PeriodHealthStatus::Warning, PeriodHealthReason::PeriodFrozen)
+            (
+                PeriodHealthStatus::Warning,
+                PeriodHealthReason::PeriodFrozen,
+            )
         } else {
             (PeriodHealthStatus::Healthy, PeriodHealthReason::Normal)
         };
@@ -6390,7 +6543,8 @@ impl Payroll {
             .expect("No operator key registered");
 
         let message = require_not_expired(&e, &payload);
-        e.crypto().ed25519_verify(&operator_key, &message, &signature);
+        e.crypto()
+            .ed25519_verify(&operator_key, &message, &signature);
 
         let consume_key = DataKey::ConsumedOperatorAuth(consumed_key(&e, &payload));
         if e.storage().persistent().has(&consume_key) {
@@ -7055,9 +7209,9 @@ impl Payroll {
                     }
                     PayrollRunState::Confirming => PayrollRunStatusKind::Executing,
                     PayrollRunState::Completed => PayrollRunStatusKind::Completed,
-                    PayrollRunState::Failed | PayrollRunState::ReconciliationRequired | PayrollRunState::Expired => {
-                        PayrollRunStatusKind::Failed
-                    }
+                    PayrollRunState::Failed
+                    | PayrollRunState::ReconciliationRequired
+                    | PayrollRunState::Expired => PayrollRunStatusKind::Failed,
                     PayrollRunState::Cancelled => PayrollRunStatusKind::Failed,
                 };
 
@@ -7178,10 +7332,9 @@ impl Payroll {
         };
 
         let previous_ref = stored_ref(&env, &DataKey::PayrollCurrencyConfig);
-        env.storage().persistent().set(
-            &DataKey::PayrollCurrencyConfig,
-            &config,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::PayrollCurrencyConfig, &config);
 
         env.events().publish((symbol_short!("currency"),), config);
         record_config_change(
@@ -7196,7 +7349,9 @@ impl Payroll {
 
     /// Get the configured payroll currency for this contract.
     pub fn get_payroll_currency(env: Env) -> Option<PayrollCurrencyConfig> {
-        env.storage().persistent().get(&DataKey::PayrollCurrencyConfig)
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayrollCurrencyConfig)
     }
 
     /// Validate that the asset being used for payroll matches the configured currency.
@@ -7208,16 +7363,17 @@ impl Payroll {
     /// # Panics
     /// If the asset does not match the configured payroll currency.
     fn validate_payroll_currency(env: &Env, asset: &Address) -> Result<(), TreasuryError> {
-        if let Some(config) = env.storage().persistent().get::<_, PayrollCurrencyConfig>(
-            &DataKey::PayrollCurrencyConfig
-        ) {
+        if let Some(config) = env
+            .storage()
+            .persistent()
+            .get::<_, PayrollCurrencyConfig>(&DataKey::PayrollCurrencyConfig)
+        {
             if config.asset != *asset {
                 return Err(TreasuryError::CrossAssetMismatch);
             }
         }
         Ok(())
     }
-
 
     // ────────────────────────────────────────────────────────────────────────────
     // Issue #515: Period Cloning Validation
@@ -7233,7 +7389,8 @@ impl Payroll {
         }
 
         // Verify settlement window exists
-        if !e.storage()
+        if !e
+            .storage()
             .persistent()
             .has(&DataKey::SettlementWindow(period.clone()))
         {
@@ -7248,7 +7405,11 @@ impl Payroll {
     // ────────────────────────────────────────────────────────────────────────────
 
     /// Verify draft checksum matches between preparation and finalization.
-    pub fn verify_draft_checksum(e: &Env, run_id: u64, provided_hash: BytesN<32>) -> Result<(), ()> {
+    pub fn verify_draft_checksum(
+        e: &Env,
+        run_id: u64,
+        provided_hash: BytesN<32>,
+    ) -> Result<(), ()> {
         let pending_run: PendingPayrollRun = e
             .storage()
             .persistent()

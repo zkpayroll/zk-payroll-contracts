@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use payroll::{Payroll, PayrollClient, PendingPayrollRun, ContractAddresses};
+use payroll::{ContractAddresses, Payroll, PayrollClient, PendingPayrollRun};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 
@@ -15,7 +15,7 @@ fn test_transfer_pending_run_admin_success() {
     let (proofs, amounts, employees) = common::one_payment(&env, &employee);
     let expected_total_spend = amounts.get(0).unwrap();
     let nonce = common::nonce(&env, 1);
-    
+
     // Note: Since prepare_payroll_run does not require admin auth, we just call it.
     // However, it creates a PendingPayrollRun with admin = addrs.admin
     let run_id = client.prepare_payroll_run(
@@ -49,7 +49,7 @@ fn test_transfer_pending_run_admin_unauthorized() {
     let (proofs, amounts, employees) = common::one_payment(&env, &employee);
     let expected_total_spend = amounts.get(0).unwrap();
     let nonce = common::nonce(&env, 1);
-    
+
     let run_id = client.prepare_payroll_run(
         &proofs,
         &amounts,
@@ -75,7 +75,7 @@ fn test_transfer_pending_run_admin_same_admin() {
     let (proofs, amounts, employees) = common::one_payment(&env, &employee);
     let expected_total_spend = amounts.get(0).unwrap();
     let nonce = common::nonce(&env, 1);
-    
+
     let run_id = client.prepare_payroll_run(
         &proofs,
         &amounts,
@@ -84,7 +84,7 @@ fn test_transfer_pending_run_admin_same_admin() {
         &nonce,
         &None,
     );
-    
+
     let pending_run = client.get_pending_run(&run_id).unwrap();
     let admin = pending_run.admin.clone();
 

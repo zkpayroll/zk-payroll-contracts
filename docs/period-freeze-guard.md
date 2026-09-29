@@ -48,7 +48,7 @@ for that period:
 | Entrypoint | Why it stays available |
 |------------|------------------------|
 | `cancel_run_draft` / `expire_run_draft` | These remove pending work instead of adding or changing it — an operator must always be able to clean up an orphaned draft on a frozen period. |
-| `unfreeze_payroll_period` | The authorized correction valve; see below. |
+| `unfreeze_payroll_period` / `reopen_payroll_period` | The authorized correction valve (#471, #484); see below. |
 | `freeze_payroll_period` | Freezing an already-frozen period is rejected (`"Payroll period is already frozen"`), but the freeze state itself must remain inspectable and the error actionable. |
 | `get_period_freeze` / `is_period_frozen` | Read-only queries; clients should use these to disable edit affordances proactively. |
 
@@ -57,12 +57,12 @@ for that period:
 Freezes are reversible by design, but only through an explicit admin action:
 
 ```
-freeze  ──▶  (edits blocked)  ──▶  unfreeze  ──▶  (edits possible again)
+freeze  ──▶  (edits blocked)  ──▶  unfreeze/reopen  ──▶  (edits possible again)
 ```
 
 1. Admin checks `is_period_frozen(period_label)`.
-2. Admin calls `unfreeze_payroll_period(period_label)` — this emits
-   `period_unfrozen` and is the **sole** path back to editing.
+2. Admin calls `unfreeze_payroll_period(period_label)` or `reopen_payroll_period(period_label)` — this emits
+   `period_unfrozen` and is the **sole** path back to editing. Only the contract admin can call this entrypoint (#484).
 3. The correction is performed (e.g. a new draft is created).
 4. The period is re-frozen by the normal flow (auto-freeze on
    `submit_run_draft`, or a manual `freeze_payroll_period`).
@@ -91,7 +91,7 @@ exactly in the unfreeze-and-correct flow described above).
 
 ## QA coverage
 
-`contracts/payroll/tests/period_freeze_guard.rs` covers:
+`contracts/payroll/tests/period_freeze_guard.rs` and `contracts/payroll/tests/unauthorized_period_reopening.rs` cover:
 
 - Manual freeze/unfreeze round trip with state assertions.
 - Event emission for both freeze and unfreeze (topics + payload).
@@ -100,7 +100,8 @@ exactly in the unfreeze-and-correct flow described above).
 - Auto-freeze on `submit_run_draft` (reason `finalized`) and its enforcement.
 - Escape hatches: cancel and expire of a pending draft remain possible while
   frozen.
-- Validation and authorization: double freeze, unfreeze-without-freeze,
-  non-admin freeze/unfreeze, empty period label / reason.
+- Authorization: unauthorized callers are rejected when attempting to unfreeze/reopen finalized or frozen periods (#484).
+- Authorized admin flow: reopening allows new drafts to be created and submitted.
+- Validation and edge cases: double freeze, unfreeze-without-freeze, non-frozen period rejection, empty period label / reason, paused contract protection.
 - Privacy: the freeze record and event payloads carry no salary or employee
   data.

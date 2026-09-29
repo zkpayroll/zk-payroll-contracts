@@ -8,7 +8,6 @@
 /// | `test_verify_snapshot_not_found_fails` | Un-recorded snapshot verification -> panics with "Obligation snapshot not found" |
 /// | `test_invalid_snapshot_parameters_rejected` | Zero amount, zero count, or zero root -> rejected |
 /// | `test_obligation_snapshot_privacy_invariants` | Emitted events carry non-sensitive metadata only |
-
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};

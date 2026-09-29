@@ -84,7 +84,9 @@ fn setup_system<'a>(
         &0i128,
     );
 
-    (executor, registry, commitment, token, company_id, treasury, employee)
+    (
+        executor, registry, commitment, token, company_id, treasury, employee,
+    )
 }
 
 fn payment_inputs(env: &Env, seed: u8) -> (BytesN<64>, BytesN<128>, BytesN<64>, BytesN<32>) {
@@ -123,11 +125,9 @@ fn one_employee_batch(
 #[test]
 fn test_unused_receipt_succeeds() {
     let env = Env::default();
-    let (executor, _reg, _com, _tok, company_id, _treasury, employee) =
-        setup_system(&env, 1_000);
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_000);
     let receipt = BytesN::from_array(&env, &[7u8; 32]);
-    let (employees, amounts, a, b, c, nullifiers) =
-        one_employee_batch(&env, &employee, 500, 1);
+    let (employees, amounts, a, b, c, nullifiers) = one_employee_batch(&env, &employee, 500, 1);
 
     let records = executor.execute_batch_payroll_with_receipt(
         &company_id,
@@ -148,8 +148,7 @@ fn test_unused_receipt_succeeds() {
 #[test]
 fn test_duplicate_receipt_is_rejected() {
     let env = Env::default();
-    let (executor, _reg, _com, _tok, company_id, _treasury, employee) =
-        setup_system(&env, 1_000);
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_000);
     let receipt = BytesN::from_array(&env, &[8u8; 32]);
 
     let (e1, a1, pa1, pb1, pc1, n1) = one_employee_batch(&env, &employee, 500, 1);
@@ -178,17 +177,13 @@ fn test_duplicate_receipt_is_rejected() {
         &receipt,
     );
 
-    assert_eq!(
-        result,
-        Err(Ok(PaymentError::SettlementReceiptAlreadyUsed))
-    );
+    assert_eq!(result, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
 }
 
 #[test]
 fn test_different_receipts_are_independent() {
     let env = Env::default();
-    let (executor, _reg, _com, _tok, company_id, _treasury, employee) =
-        setup_system(&env, 2_000);
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 2_000);
     let receipt_a = BytesN::from_array(&env, &[10u8; 32]);
     let receipt_b = BytesN::from_array(&env, &[11u8; 32]);
 
@@ -225,8 +220,7 @@ fn test_different_receipts_are_independent() {
 #[test]
 fn test_receipt_is_globally_unique() {
     let env = Env::default();
-    let (executor, _reg, _com, _tok, company_id, _treasury, employee) =
-        setup_system(&env, 1_000);
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_000);
     let receipt = BytesN::from_array(&env, &[12u8; 32]);
 
     let (e1, a1, pa1, pb1, pc1, n1) = one_employee_batch(&env, &employee, 500, 1);
@@ -245,28 +239,16 @@ fn test_receipt_is_globally_unique() {
     // Reuse the same receipt for a different (nonexistent) company ID.
     // The uniqueness guard is global, not per-company.
     let result = executor.try_execute_batch_payroll_with_receipt(
-        &9999u64,
-        &e1,
-        &a1,
-        &pa1,
-        &pb1,
-        &pc1,
-        &n1,
-        &1,
-        &receipt,
+        &9999u64, &e1, &a1, &pa1, &pb1, &pc1, &n1, &1, &receipt,
     );
 
-    assert_eq!(
-        result,
-        Err(Ok(PaymentError::SettlementReceiptAlreadyUsed))
-    );
+    assert_eq!(result, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
 }
 
 #[test]
 fn test_rejected_batch_leaves_receipt_unused() {
     let env = Env::default();
-    let (executor, _reg, _com, _tok, company_id, _treasury, employee) =
-        setup_system(&env, 1_000);
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_000);
     let receipt = BytesN::from_array(&env, &[13u8; 32]);
 
     // First call consumes the receipt successfully.
@@ -298,9 +280,6 @@ fn test_rejected_batch_leaves_receipt_unused() {
         &receipt,
     );
 
-    assert_eq!(
-        result,
-        Err(Ok(PaymentError::SettlementReceiptAlreadyUsed))
-    );
+    assert_eq!(result, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
     assert!(executor.is_settlement_receipt_used(&receipt));
 }

@@ -524,6 +524,12 @@ pub fn emit_period_closed(e: &Env, company_id: u64, period_id: u32) {
         .publish((Symbol::new(e, "PeriodClosed"), company_id), (period_id,));
 }
 
+/// Emitted when a closed payroll period is reopened for a company.
+pub fn emit_period_reopened(e: &Env, company_id: u64, period_id: u32) {
+    e.events()
+        .publish((Symbol::new(e, "PeriodReopened"), company_id), (period_id,));
+}
+
 /// Emitted when a single payment is executed in the payment executor.
 pub fn emit_executor_payment_processed(
     e: &Env,
@@ -828,6 +834,26 @@ pub fn emit_draft_expired(e: &Env, draft_id: u64, admin: Address) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "draft_expired")),
         (draft_id, admin),
+    );
+}
+
+/// Emitted when a payroll period is frozen (#471).
+///
+/// `reason` is a short operator-supplied label (e.g. `finalized` when the
+/// freeze was applied automatically by `submit_run_draft`). No salary values
+/// or per-employee data are ever included in this event.
+pub fn emit_period_frozen(e: &Env, period_label: Symbol, frozen_by: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "period_frozen")),
+        (period_label, frozen_by, reason),
+    );
+}
+
+/// Emitted when a payroll period freeze is lifted (#471).
+pub fn emit_period_unfrozen(e: &Env, period_label: Symbol, unfrozen_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "period_unfrozen")),
+        (period_label, unfrozen_by),
     );
 }
 

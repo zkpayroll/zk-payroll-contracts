@@ -185,9 +185,10 @@ impl RetentionManagerContract {
             pruned: false,
         };
 
-        env.storage()
-            .persistent()
-            .set(&Self::record_key(company_id, record_id, &record_type), &entry);
+        env.storage().persistent().set(
+            &Self::record_key(company_id, record_id, &record_type),
+            &entry,
+        );
 
         payroll_events::emit_retention_record_registered(
             &env,
@@ -498,7 +499,9 @@ mod tests {
 
         client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
 
-        let record = client.get_record(&company_id, &record_id, &RecordType::FinalizedBatch).unwrap();
+        let record = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
         assert!(record.pruned);
     }
 
@@ -515,7 +518,10 @@ mod tests {
 
         // Time has NOT advanced — should be rejected
         let result = client.try_prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
-        assert_eq!(result.unwrap_err().unwrap(), RetentionError::RetentionWindowActive);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::RetentionWindowActive
+        );
     }
 
     // ── Ineligible: active audit block ──────────────────────────────────────
@@ -535,7 +541,10 @@ mod tests {
         });
 
         let result = client.try_prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
-        assert_eq!(result.unwrap_err().unwrap(), RetentionError::ActiveAuditBlock);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::ActiveAuditBlock
+        );
     }
 
     // ── Ineligible: active challenge block ──────────────────────────────────
@@ -555,7 +564,10 @@ mod tests {
         });
 
         let result = client.try_prune_record(&company_id, &record_id, &RecordType::ChallengeRecord);
-        assert_eq!(result.unwrap_err().unwrap(), RetentionError::ActiveChallengeBlock);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::ActiveChallengeBlock
+        );
     }
 
     // ── Block cleared → pruning succeeds ────────────────────────────────────
@@ -578,7 +590,9 @@ mod tests {
         client.set_audit_block(&company_id, &record_id, &RecordType::FinalizedBatch, &false);
 
         client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
-        let r = client.get_record(&company_id, &record_id, &RecordType::FinalizedBatch).unwrap();
+        let r = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
         assert!(r.pruned);
     }
 
@@ -640,6 +654,10 @@ mod tests {
         env.ledger().with_mut(|l| l.timestamp = l.timestamp + 2);
 
         // Should be eligible because custom window (1s) has passed
-        assert!(client.is_eligible_for_pruning(&company_id, &record_id, &RecordType::FinalizedBatch));
+        assert!(client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
     }
 }

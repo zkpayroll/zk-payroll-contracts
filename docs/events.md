@@ -421,6 +421,23 @@ data       (u32 period_id,)
 
 ---
 
+### `PeriodReopened` ? `payment_executor`
+
+Emitted when a closed payroll period is reopened by the company admin (#484).
+Allows payments to resume for the period, provided no other period is active.
+
+```
+topics[0]  Symbol("PeriodReopened")
+topics[1]  u64   company_id
+data       (u32 period_id,)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` (exceptional lifecycle event) | Indexers, reconciliation tools, audit dashboards |
+
+---
+
 ### `PayrollProcessed` ? `payment_executor`
 
 Emitted after a successful private payment execution via the period-aware
