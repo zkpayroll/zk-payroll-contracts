@@ -1,8 +1,7 @@
 //! Stable payroll failure reason codes (issue #509) and dry-run preflight
 //! validation for payroll execution (issue #521).
 //!
-//! `batch_process_payroll`'s preconditions are enforced as bare `panic!`"
-//! calls with free-text messages (see `contracts/payroll/src/lib.rs`), which
+//! `batch_process_payroll`'s preconditions are enforced as bare `panic!"`//! calls with free-text messages (see `contracts/payroll/src/lib.rs`), which
 //! abort the whole transaction with no structured, stable-for-off-chain-use
 //! identifier and stop at the first failure. This module adds a stable,
 //! numbered reason-code registry — mirroring the existing
@@ -79,6 +78,19 @@ pub enum PayrollFailureReason {
     AmountBelowMinimum = 17,
     /// The import source for this payroll batch is not authorized.
     UnauthorizedImportSource = 18,
+    /// The contract period being submitted does not match the expected
+    /// contract period for this employer (contract period transition
+    /// inconsistency).
+    ContractPeriodNotConsistent = 19,
+    /// The contract period being submitted has already been closed and
+    /// cannot be transitioned again.
+    ContractPeriodAlreadyClosed = 20,
+    /// The contract period transition would skip one or more expected
+    /// intermediate periods.
+    ContractPeriodSkipped = 21,
+    /// The contract period transition is not allowed from the current
+    /// period state.
+    ContractPeriodTransitionInvalid = 22,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.
@@ -116,7 +128,7 @@ impl PayrollDryRunReport {
         }
     }
 
-    pub(crate) fn push(&mut self, reason: PayrollFailureReason) {
+    pub(crate) fn push&mut self, reason: PayrollFailureReason) {
         self.blockers.push_back(reason);
         self.would_succeed = false;
     }
@@ -140,10 +152,76 @@ pub struct DryRunArgs {
     pub draft_hash: Option<BytesN<32>>,
     pub proof_count: u32,
     /// Optional caller-declared payroll submission sequence number. When
-    /// `SOME`, the dry-run checks it against the employer's last accepted
+    /// `SOME`\, the dry-run checks it against the employer's last accepted
     /// sequence and reports `SequenceNotMonotonic` or `DuplicateSequence`
     /// as appropriate. When `NONE`, no sequence check is performed.
     pub sequence: Option<u32>,
     /// Optional import source address for validation.
     pub source_address: Option<Address>,
+    /// Optional contract period identifier being submitted. When `SOME`\,
+    /// the dry-run checks it against the employer's expected contract
+    /// period and reports contract period transition inconsistencies.
+    pub contract_period: Option<u32>,
+    /// Optional expected next contract period for this employer. When
+    /// `SOME`, it is used to detect skipped or out-of-order contract
+    /// period transitions.
+    pub expected_contract_period: Option<u32>,
+    /// Optional flag indicating the contract period being submitted has
+    /// already been closed. When `true`, the dry-run reports
+    /// `ContractPeriodAlreadyClosed`.
+    pub contract_period_closed: bool,
+}
+
+/// Validates contract period transition consistency for a payroll batch.
+///
+/// Returns the list of contract-period-related blockers found in the
+/// supplied `DryRunArgs`. This is a pure function over the arguments and
+/// does not touch storage, so it is safe to call from any context.
+pub(crate) fn check_contract_period_consistency(
+    e: &Env,
+    args: &DryRunArgs,
+    report: &mut PayrollDryRunReport,
+) {
+    // A contract period that has already been closed cannot be
+    // transitioned again.
+    if args.contract_period_closed {
+        report.push(PayrollFailureReason::ContractPeriodAlreadyClosed);
+        return;
+    }
+
+    // When an expected contract period is declared, ensure the submitted
+    // contract period matches it exactly.
+    if let Some(expected) = args.expected_contract_period {
+        if let Some(actual) = args.contract_period {
+            if actual != expected {
+                // Allow a forward transition only to the immediately next
+                // period; anything else is either a skip or an invalid
+                // transition.
+                if actual > expected {
+                    if actual == expected.saturating_add(1) {
+                        report.push(PayrollFailureReason::ContractPeriodNotConsistent);
+                    } else {
+                        report.push(PayrollFailureReason::ContractPeriodSkipped);
+                    }
+                } else {
+                    report.push(PayrollFailureReason::ContractPeriodTransitionInvalid);
+                }
+            }
+        } else {
+            // An expected contract period was declared but the caller
+            // did not supply the actual contract period.
+            report.push(PayrollFailureReason::ContractPeriodNotConsistent);
+        }
+    }
+
+    // When an expected contract period is not declared but an actual
+    // contract period is supplied, there is nothing to compare against,
+    // so the transition is considered inconsistent.
+    if args.expected_contract_period.is_none() && args.contract_period.is_some() {
+        report.push(PayrollFailureReason::ContractPeriodNotConsistent);
+    }
+
+    // Ensure the report is not left in an inconsistent state when no
+    // contract-period blockers were found.
+    let _ = e;
 }

@@ -7,13 +7,14 @@
 //! - Cooldown is disabled when set to 0
 //! - Error messages don't expose payroll data
 
-#![cfg(test)]
+
 
 use payroll::{Payroll, PayrollClient, PeriodFreeze, PeriodReopenCooldown};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
 fn setup(env: &Env) -> (PayrollClient<'_>, Address, Symbol) {
+    env.budget().reset_unlimited();
     env.mock_all_auths();
     let admin = Address::generate(env);
     let contract_id = env.register_contract(None, Payroll);
@@ -27,6 +28,7 @@ fn setup(env: &Env) -> (PayrollClient<'_>, Address, Symbol) {
         &Address::generate(env),
         &Address::generate(env),
     );
+    let _ = (PeriodFreeze, PeriodReopenCooldown);
 
     let period = Symbol::new(env, "2024M01");
     (client, admin, period)
@@ -202,6 +204,7 @@ fn test_multiple_periods_independent_cooldowns() {
 #[test]
 #[should_panic(expected = "Unauthorized")]
 fn test_non_admin_cannot_set_cooldown() {
+    use soroban_sdk::IntoVal;
     let env = Env::default();
     let (payroll, admin, period) = setup(&env);
 

@@ -16,7 +16,7 @@ pub struct PeriodId {
 /// Errors produced by the period validation guard.
 ///
 /// The variants deliberately carry no payroll values (no amounts, no
-/// employee identifiers) so that surfacing them in UIS or logs cannot leak
+/// employee identifiers) so that surfacing them in UIs or logs cannot leak
 /// sensitive data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeriodValidationError {
@@ -42,7 +42,7 @@ pub const MAX_SEQUENCE_MONTHS_APROAD: u32 = 1;
 ///
 /// Returns `Err(MissingPeriod)` for empty input and `Err(MalformedPeriod)`
 /// for any other non-conforming input.
-pub fn parse_period_id(raw: &Option<String>) => Result<PeriodId, PeriodValidationError> {
+pub fn parse_period_id(raw: &Option<String>) > Result<PeriodId, PeriodValidationError> {
     let raw = match raw {
         Some(value) if !value.trim().is_empty() => value.trim(),
         _ => return Err(PeriodValidationError::MissingPeriod),
@@ -60,17 +60,17 @@ pub fn parse_period_id(raw: &Option<String>) => Result<PeriodId, PeriodValidatio
     let year_str = &raw[1..5];
     let month_str = &raw[6..];
 
-    if !year_str.bytes().all( |b | b.is_ascii_digit()) {
+    if !year_str.bytes().all(|b| b.is_ascii_digit()) {
         return Err(PeriodValidationError::MalformedPeriod);
     }
-    if !month_str.bytes().all(| b | b.is_ascii_digit()) {
+    if !month_str.bytes().all(|b| b.is_ascii_digit()) {
         return Err(PeriodValidationError::MalformedPeriod);
     }
 
     let year: u16 = year_str.parse().map_err(|_| PeriodValidationError::MalformedPeriod)?;
-    let month: u8 = month_str.parse().map_error|_| PeriodValidationError::MalformedPeriod)?;
+    let month: u8 = month_str.parse().map_err(|_| PeriodValidationError::MalformedPeriod)?;
 
-    if !(1..=month) || month > 12 {
+    if month < 1 || month > 12 {
         return Err(PeriodValidationError::MalformedPeriod);
     }
 
@@ -118,7 +118,7 @@ fn months_between(from: PeriodId, to: PeriodId) -> u32 {
     to_total - from_total
 }
 
-#cfg_test]
+#[cfg_test]
 mod tests {
     use super::*;
 
@@ -164,7 +164,7 @@ mod tests {
             assert_eq!(
                 parse_period_id(&some(raw)),
                 Err(PeriodValidationError::MalformedPeriod),
-                "expected malformed for {ra}"
+                "expected malformed for {raw}"
             );
         }
     }
@@ -204,7 +204,7 @@ mod tests {
                 &some("2024M03"),
                 Some(period(2024, 1)),
             ),
-            Err(PeriodValidationError::PeriodTooFarAwead)
+            Err(PeriodValidationError::PeriodTooForAwead)
         );
     }
 

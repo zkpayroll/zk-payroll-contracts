@@ -1,4 +1,4 @@
-/// Privacy-safe event helpers for the overpayment review subsystem.
+/// Privacy-safe event helpers for the overpayment review and contract period subsystems.
 ///
 /// # Privacy design
 ///
@@ -23,6 +23,7 @@
 /// | `REVIEW_OPENED`          | `("payroll", "review_opened")`    | `(review_id, run_id, flagged_at)`     |
 /// | `REVIEW_RESOLVED`        | `("payroll", "review_resolved")`  | `(review_id, run_id, resolved_at)`    |
 /// | `ARCHIVAL_BLOCKED`       | `("payroll", "archival_blocked")` | `(run_id, review_id)`                 |
+/// | `PERIOD_TRANSITION`      | `("payroll", "period_transition")`| `(run_id, from_period, to_period)`    |
 
 // ── Symbol string constants ───────────────────────────────────────────────────
 //
@@ -41,3 +42,18 @@ pub const ARCHIVAL_BLOCKED: &str = "archival_blocked";
 
 /// Top-level contract namespace used in all event topics.
 pub const PAYROLL_NS: &str = "payroll";
+
+/// Topics name for the "period transition" event.
+///
+/// Emitted whenever a payroll run advances from one contract period to the
+/// next.  The payload intentionally carries only opaque period identifiers so
+/// that off-chain indexers can follow the transition without learning any
+/// salary or contributor details.
+pub const PERIOD_TRANSITION: &str = "period_transition";
+
+/// Topics name for the "period transition rejected" guard event.
+///
+/// Emitted when a caller attempts an invalid period transition (e.g. a
+/// non-monotonic or skipped period).  Carries the same opaque identifiers as
+/// the success event so auditors can correlate the rejection with the run.
+pub const PERIOD_TRANSITION_REJECTED: &str = "period_transition_rejected";

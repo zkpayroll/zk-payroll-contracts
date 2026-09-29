@@ -351,6 +351,47 @@ pub struct PeriodReopenCooldown {
     pub last_reopen_at: u64,
 }
 
+/// Issue #621: Contract period transition consistency check result.
+///
+/// Describes whether a requested transition between two payroll periods is
+/// consistent with the currently open capacity-accounting period. The result
+/// is privacy-safe: it contains only period labels and a stable reason code,
+/// never salary amounts, employee identities, or proof material.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PeriodTransitionStatus {
+    /// Transition is allowed: the target period is the current period or a
+    /// strictly later period, and no conflicting state blocks the move.
+    Allowed = 0,
+    /// Transition is rejected because the target period precedes the current
+    /// open period (a backwards transition).
+    BackwardsTransition = 1,
+    /// Transition is rejected because the source period does not match the
+    /// currently open period.
+    SourceMismatch = 2,
+    /// Transition is rejected because the target period is already frozen.
+    TargetFrozen = 3,
+    /// Transition is rejected because the source period is not frozen and
+    /// therefore still open for edits.
+    SourceNotFrozen = 4,
+}
+
+/// Issue #621: Read-only assessment of a contract period transition.
+///
+/// Exposes the verdict, the source and target period labels, and the current
+/// open period so integrators can render actionable errors without leaking
+/// payroll data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodTransitionCheck {
+    pub status: PeriodTransitionStatus,
+    pub from_period: Symbol,
+    pub to_period: Symbol,
+    pub current_period: Option<Symbol>,
+    pub allowed: bool,
+}
+
 // ?? Reviewer Authorization & Run Review ?????????????????????????????????????
 
 /// Review decision outcome for a payroll run.
