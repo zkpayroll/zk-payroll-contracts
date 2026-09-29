@@ -777,6 +777,12 @@ pub fn emit_audit_pause_manager_set(e: &Env, pause_manager: Address) {
         .publish((Symbol::new(e, "AuditPauseMgrSet"),), (pause_manager,));
 }
 
+/// Emitted when an expired audit grant is pruned.
+pub fn emit_audit_grant_pruned(e: &Env, admin: Address, auditor: Address) {
+    e.events()
+        .publish((Symbol::new(e, "AuditGrantPruned"), admin, auditor), ());
+}
+
 /// Emitted when locked payroll funds are updated (#343).
 pub fn emit_locked_funds_updated(e: &Env, asset: Address, locked_amount: i128) {
     e.events().publish(
@@ -1113,6 +1119,73 @@ pub fn emit_period_unfrozen(e: &Env, period_label: Symbol, unfrozen_by: Address)
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "period_unfrozen")),
         (period_label, unfrozen_by),
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Settlement Window Events (#316)
+// ════════════════════════════════════════════════════════════════════════
+
+/// Emitted when the settlement window contract is initialized.
+pub fn emit_settlement_window_initialized(e: &Env, admin: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_window_initialized")),
+        (admin,),
+    );
+}
+
+/// Emitted when a new settlement period is created.
+pub fn emit_settlement_period_created(
+    e: &Env,
+    company_id: u64,
+    period_id: u32,
+    open_at: u64,
+    execute_at: u64,
+    grace_until: u64,
+    close_at: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_period_created")),
+        (company_id, period_id, open_at, execute_at, grace_until, close_at),
+    );
+}
+
+/// Emitted when a settlement period phase changes.
+pub fn emit_settlement_period_phase_changed(
+    e: &Env,
+    company_id: u64,
+    period_id: u32,
+    new_phase: Symbol,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_period_phase_changed")),
+        (company_id, period_id, new_phase),
+    );
+}
+
+/// Emitted when a settlement period is cancelled.
+pub fn emit_settlement_period_cancelled(
+    e: &Env,
+    company_id: u64,
+    period_id: u32,
+    cancelled_at: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_period_cancelled")),
+        (company_id, period_id, cancelled_at),
+    );
+}
+
+/// Emitted when a settlement period expires.
+pub fn emit_settlement_period_expired(
+    e: &Env,
+    company_id: u64,
+    period_id: u32,
+    expired_at: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "settlement_period_expired")),
+        (company_id, period_id, expired_at),
     );
 }
 

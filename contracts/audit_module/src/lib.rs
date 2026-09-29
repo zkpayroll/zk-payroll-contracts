@@ -120,6 +120,7 @@ pub struct AuditQueryResult {
 /// - `verification_fail_count`  — entries where `matched == false`.
 /// - `exported_at`              — ledger timestamp of the export call.
 /// - `exported_by`              — auditor address that triggered the export.
+/// - `integrity_hash`           — SHA-256 hash of the summary fields for tamper detection (#607).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AuditMetadataSummary {
@@ -131,6 +132,7 @@ pub struct AuditMetadataSummary {
     pub verification_fail_count: u32,
     pub exported_at: u64,
     pub exported_by: Address,
+    pub integrity_hash: BytesN<32>,
 }
 
 /// Storage key namespace.
@@ -818,6 +820,10 @@ impl AuditModule {
     /// Requires a valid (non-expired) view key for the requesting auditor.
     /// Salary values are never included in the returned summary — only
     /// verification counts and metadata needed for external compliance tooling.
+    ///
+    /// The returned summary includes an `integrity_hash` field (#607) — a
+    /// SHA-256 hash of all summary fields — that allows recipients to verify
+    /// the export has not been tampered with after emission.
     pub fn export_audit_summary(
         env: Env,
         auditor: Address,
@@ -842,6 +848,9 @@ impl AuditModule {
             }
         }
 
+        let exported_at = env.ledger().timestamp();
+
+        // Build summary without integrity_hash first, then compute hash over all fields
         let summary = AuditMetadataSummary {
             company_id: company_id.clone(),
             period_start,
@@ -849,8 +858,16 @@ impl AuditModule {
             total_audit_entries: total,
             verification_pass_count: pass_count,
             verification_fail_count: fail_count,
-            exported_at: env.ledger().timestamp(),
+            exported_at,
             exported_by: auditor.clone(),
+            integrity_hash: BytesN::from_array(&env, &[0u8; 32]), // placeholder
+        };
+
+        // Compute integrity hash over the summary fields
+        let integrity_hash = Self::compute_export_integrity_hash(&env, &summary);
+        let summary_with_hash = AuditMetadataSummary {
+            integrity_hash,
+            ..summary
         };
 
         payroll_events::emit_audit_summary_exported(
@@ -862,7 +879,37 @@ impl AuditModule {
             total,
         );
 
-        Ok(summary)
+        Ok(summary_with_hash)
+    }
+
+    /// Compute the integrity hash for an audit export summary (#607).
+    ///
+    /// Hashes all fields of the summary to produce a tamper-evident marker.
+    /// The hash is computed over: company_id || period_start || period_end ||
+    /// total_audit_entries || verification_pass_count || verification_fail_count ||
+    /// exported_at || exported_by.
+    fn compute_export_integrity_hash(env: &Env, summary: &AuditMetadataSummary) -> BytesN<32> {
+        let mut preimage = soroban_sdk::Bytes::new(env);
+
+        // company_id (Symbol -> bytes via XDR)
+        let company_bytes = summary.company_id.clone().to_xdr(env);
+        preimage.append(&company_bytes);
+
+        // period timestamps
+        preimage.extend_from_array(&summary.period_start.to_le_bytes());
+        preimage.extend_from_array(&summary.period_end.to_le_bytes());
+
+        // counts
+        preimage.extend_from_array(&summary.total_audit_entries.to_le_bytes());
+        preimage.extend_from_array(&summary.verification_pass_count.to_le_bytes());
+        preimage.extend_from_array(&summary.verification_fail_count.to_le_bytes());
+
+        // export metadata
+        preimage.extend_from_array(&summary.exported_at.to_le_bytes());
+        let auditor_bytes = summary.exported_by.clone().to_xdr(env);
+        preimage.append(&auditor_bytes);
+
+        env.crypto().sha256(&preimage).into()
     }
 
     // ── Issue #177: metadata hash verification via audit scope ───────────────
