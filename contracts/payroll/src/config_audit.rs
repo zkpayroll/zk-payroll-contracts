@@ -1,1 +1,144 @@
-Ly8hIEF1ZGl0IHRyYWlsIGZvciBwYXlyb2xsIGNvbmZpZ3VyYXRpb24gY2hhbmdlcyAoaXNzdWUgIzQ5MCkuCi8vCi8vIEV2ZXJ5IHN1Y2Nlc3NmdWwgY2hhbmdlIHRvIGEgcGF5cm9sbCBjb25maWd1cmF0aW9uIHNldHRpbmcgZ29lcyB0aHJvdWdoCi8vIFtgcmVjb3JkX2NvbmZpZ19jaGFuZ2VgXSwgd2hpY2ggYnVtcHMgYSBjb250cmFjdC13aWRlIGNvbmZpZ3VyYXRpb24KLy8gcmV2aXNpb24gYW5kIHB1Ymxpc2hlcyBleGFjdGx5IG9uZSBgQ29uZmlnQ2hhbmdlZGAgZXZlbnQ6Ci8vCi8vIGBgYHRleHQKLy8gdG9waWNzID0gKCBAU3ltYm9sKCJwYXlyb2xsIiksIEBTeW1ib2woImNvbmZpZ19jaGFuZ2VkIiksIEBTeW1ib2woPGNvbmZpZyBrZXk+KSApCi8vIGRhdGEgICA9ICggYWN0b3IsIHN1YmplY3RfcmVmLCBwcmV2aW91c19yZWYsIG5ld19yZWYsIHJldmlzaW9uLCBsZWRnZXJfc2VxdWVuY2UsIHRpbWVzdGFtcCApCi8vIGBgYAovLwovLyBDb25maWd1cmF0aW9uIHZhbHVlcyBhcmUgbmV2ZXIgcHVibGlzaGVkIGluIHBsYWludGV4dC4gQSB2YWx1ZSBpcwovLyByZWZlcmVuY2VkIGJ5IGBzaGEyNTYodmFsdWUudG9feGRyKCkpYCBvZiBpdHMgY2Fub25pY2FsIFhEUiBlbmNvZGluZywgc28gYW4KLy8gYXVkaXRvciBjYW4gY2hlY2sgYSBjaGFuZ2UgYWdhaW5zdCB0aGUgdmFsdWUgcmVhZCBiYWNrIGZyb20gY29udHJhY3QKLy8gc3RvcmFnZSBhbmQgY2hhaW4gc3VjY2Vzc2l2ZSBjaGFuZ2VzIHRvIHRoZSBzYW1lIHNldHRpbmcgKGBwcmV2aW91c19yZWZgCi8vIG9mIG9uZSBjaGFuZ2UgZXF1YWxzIGBuZXdfcmVmYCBvZiB0aGUgY2hhbmdlIGJlZm9yZSBpdCkuCi8vCi8vIEEgY2hhbmdlIHRoYXQgbGVhdmVzIHRoZSBzdG9yZWQgdmFsdWUgYnl0ZS1mb3ItYnl0ZSBpZGVudGljYWwgaXMgYSBuby1vcDoKLy8gdGhlIHNldHRlciBrZWVwcyBpdHMgZXhpc3RpbmcgYmVoYXZpb3VyLCBidXQgbm8gYXVkaXQgZXZlbnQgaXMgcHVibGlzaGVkCi8vIGFuZCB0aGUgcmV2aXNpb24gaXMgbm90IGJ1bXBlZC4gRmFpbGVkIGNhbGxzIHJldmVydCwgc28gdGhleSBwdWJsaXNoCi8vIG5vdGhpbmcgZWl0aGVyLgovLwovLyBTZWUgYGRvY3MvY29uZmlnLWF1ZGl0LWV2ZW50cy5tZGAgZm9yIHRoZSBmdWxsIHNjaGVtYSBhbmQgaG93IHRvIHZlcmlmeSBpdC4KCnVzZSBwYXlyb2xsX2V2ZW50czo6Q29uZmlnQ2hhbmdlZDsKdXNlIHNvcm9iYW5fc2RrOjp4ZHI6OlRvWGRyOwp1c2Ugc29yb2Jhbl9zZGs6OnthZGRyZXNzOjpBZGRyZXNzLCBCeXRlc04sIEVudiwgSW50b1ZhbCwgU3ltYm9sLCBWYWx9OwoKdXNlIGNyYXRlOjpEYXRhS2V5OwoKLy8vIFJlZmVyZW5jZSBwdWJsaXNoZWQgd2hlbiB0aGVyZSBpcyBubyB2YWx1ZTogdGhlIHByZXZpb3VzIHZhbHVlIG9mIGEK Ly8vIHNldHRpbmcgdGhhdCB3YXMgbmV2ZXIgc2V0LCB0aGUgbmV3IHZhbHVlIG9mIGEgc2V0dGluZyB0aGF0IHdhcyByZW1vdmVkLAovLy8gYW5kIHRoZSBzdWJqZWN0IG9mIGEgc2V0dGluZyB0aGF0IGlzIG5vdCBrZXllZCBieSBhbiBhc3NldCwgcGVyaW9kLCBvcgovLy8gcm9sZSBob2xkZXIuCnB1YiBjb25zdCBOT19WQUxVRV9SRUY6IFt1ODsgMzJdID0gWzA7IDMyXTsKCi8vLyBDb25maWd1cmF0aW9uIGtleXMgcHVibGlzaGVkIGFzIHRoZSB0aGlyZCB0b3BpYyBvZiBhIGBjb25maWdfY2hhbmdlZGAKLy8vIGV2ZW50LiBFYWNoIGtleSBuYW1lcyBvbmUgc2V0dGluZyBhbmQgdGhlIGVudHJ5cG9pbnQocykgdGhhdCBjaGFuZ2UgaXQuCnB1YiBtb2QgY29uZmlnX2tleXMgewogICAgLy8vIGBzZXRfcGF1c2VfbWFuYWdlcmAg4oCUIHZhbHVlOiBwYXVzZSBtYW5hZ2VyIGBBZGRyZXNzYC4KICAgIHB1YiBjb25zdCBQQVVTRV9NQU5BR0VSOiAmc3RyID0gInBhdXNlX21hbmFnZXIiOwogICAgLy8vIGBzZXRfYXNzZXRfYWxsb3dlZGAg4oCUIHN1YmplY3Q6IGFzc2V0OyB2YWx1ZTogYGJvb2xgLgogICAgcHViIGNvbnN0IEFTU0VUX0FMTE9XRUQ6ICZzdHIgPSAiYXNzZXRfYWxsb3dlZCI7CiAgICAvLy8gYHNldF9jb21wYW55X3N0YXRlYCDigJQgdmFsdWU6IGBDb21wYW55U3RhdGVgLgogICAgcHViIGNvbnN0IENPTVBBTllfU1RBVEU6ICZzdHIgPSAiY29tcGFueV9zdGF0ZSI7CiAgICAvLy8gYHNldF9jYXBhY2l0eV9saW1pdHNgIOKAlCB2YWx1ZTogYENhcGFjaXR5TGltaXRzYC4KICAgIHB1YiBjb25zdCBDQVBBQ0lUWV9MSU1JVFM6ICZzdHIgPSAiY2FwYWNpdHlfbGltaXRzIjsKICAgIC8vLyBgc2V0X3NldHRsZW1lbnRfd2luZG93YCDigJQgc3ViamVjdDogcGVyaW9kOyB2YWx1ZTogYFNldHRsZW1lbnRXaW5kb3dgLgogICAgcHViIGNvbnN0IFNFVFRMRU1FTlRfV0lORE9XOiAmc3RyID0gInNldHRsZW1lbnRfd2luZG93IjsKICAgIC8vLyBgZnJlZXplX3BlcmlvZF9jb25maWdgIOKAlCBzdWJqZWN0OiBwZXJpb2Q7IHZhbHVlOiBgYm9vbGAuCiAgICBwdWIgY29uc3QgUEVSSU9EX0ZST1pFTjogJnN0ciA9ICJwZXJpb2RfZnJvemVuIjsKICAgIC8vLyBgc2V0X3JldGVudGlvbl9wb2xpY3lgIOKAlCB2YWx1ZTogYFJldGVudGlvblBvbGljeWAuCiAgICBwdWIgY29uc3QgUkVURU5USU9OX1BPTElDWTogJnN0ciA9ICJyZXRlbnRpb25fcG9saWN5IjsKICAgIC8vLyBgYWRkX2Rpc3B1dGVfYXV0aG9yaXR5YCAvIGByZW1vdmVfZGlzcHV0ZV9hdXRob3JpdHlgIOKAlCBzdWJqZWN0OgogICAgLy8vIGF1dGhvcml0eTsgdmFsdWU6IGBib29sYCAoYWJzZW50IG9uY2UgcmVtb3ZlZCkuCiAgICBwdWIgY29uc3QgRElTUFVURV9BVVRIT1JJVFk6ICZzdHIgPSAiZGlzcHV0ZV9hdXRob3JpdHkiOwogICAgLy8vIGBhZGRfcmV2aWV3ZXJgIC8gYHJlbW92ZV9yZXZpZXdlcmAg4oCUIHN1YmplY3Q6IHJldmlld2VyOyB2YWx1ZTogYGJvb2xgCiAgICAvLy8gKGFic2VudCBvbmNlIHJlbW92ZWQpLgogICAgcHViIGNvbnN0IFJFVklFV0VSOiAmc3RyID0gInJldmlld2VyIjsKICAgIC8vLyBgc2V0X21heF9yZXZpZXdlcnNgIOKAlCB2YWx1ZTogYHUzMmAgKGlzc3VlICM1MzkpLgogICAgcHViIGNvbnN0IE1BWF9SRVZJRVdFUlM6ICZzdHIgPSAibWF4X3Jldmlld2VycyI7CiAgICAvLy8gYHJlZ2lzdGVyX29wZXJhdG9yX2tleWAgLyBgcmV2b2tlX29wZXJhdG9yX2tleWAg4oCUIHZhbHVlOiBvcGVyYXRvcgogICAgLy8vIGVkMjU1MTkgcHVibGljIGtleSAoYWJzZW50IG9uY2UgcmV2b2tlZCkgKGlzc3VlICM1MTkpLgogICAgcHViIGNvbnN0IE9QRVJBVE9SX0tFWTogJnN0ciA9ICJvcGVyYXRvcl9rZXkiOwogICAgLy8vIGBzZXRfcmVzZXJ2YXRpb25fZXhwaXJ5X3BvbGljeWAg4oCUIHN1YmplY3Q6IGFzc2V0OyB2YWx1ZToKICAgIC8vLyBgUmVzZXJ2YXRpb25FeHBpcnlgLgogICAgcHViIGNvbnN0IFJFU0VSVkFUSU9OX0VYUElSWTogJnN0ciA9ICJyZXNlcnZhdGlvbl9leHBpcnkiOwogICAgLy8vIGBzZXRfcGF5cm9sbF9jdXJyZW5jeWAg4oCUIHZhbHVlOiBgUGF5cm9sbEN1cnJlbmN5Q29uZmlnYC4KICAgIHB1YiBjb25zdCBQQVlST0xMX0NVUlJFTkNZOiAmc3RyID0gInBheXJvbGxfY3VycmVuY3kiOwogICAgLy8vIGBzZXRfc3RvcmFnZV92ZXJzaW9uYCDigJQgdmFsdWU6IGBTdG9yYWdlVmVyc2lvblN0YXRlYC4KICAgIHB1YiBjb25zdCBTVE9SQUdFX1ZFUlNJT046ICZzdHIgPSAic3RvcmFnZV92ZXJzaW9uIjsKICAgIC8vLyBgYWNjZXB0X2FkbWluX3JvdGF0aW9uYCAvIGBhY2NlcHRfYWRtaW5faGFuZG92ZXJgIOKAlCB2YWx1ZTogYWRtaW4KICAgIC8vLyBgQWRkcmVzc2AuCiAgICBwdWIgY29uc3QgQURNSU46ICZzdHIgPSAiYWRtaW4iOwogICAgLy8vIGBhY2NlcHRfdHJlYXN1cnlfcm90YXRpb25gIOKAlCB2YWx1ZTogdHJlYXN1cnkgb3duZXIgYEFkZHJlc3NgLgogICAgcHViIGNvbnN0IFRSRUFTVVJZX09XTkVSOiAmc3RyID0gInRyZWFzdXJ5X293bmVyIjsKICAgIC8vLyBgc2V0X29yZ2FuaXphdGlvbl9wb2xpY3lgIOKAlCB2YWx1ZTogYE9yZ2FuaXphdGlvblBvbGljeWAuCiAgICBwdWIgY29uc3QgT1JHQU5JWkFUSU9OX1BPTElDWTogJnN0ciA9ICJvcmdhbml6YXRpb25fcG9saWN5IjsKfQoKLy8vIGBzaGEyNTYodmFsdWUudG9feGRyKCkpYDogdGhlIHJlZmVyZW5jZSBwdWJsaXNoZWQgZm9yIGEgY29uZmlndXJhdGlvbgovLy8gdmFsdWUgb3Igc3ViamVjdC4KcHViIGZuIHZhbHVlX3JlZjxUOiBJbnRvVmFsPEVudiwgVmFsPiArIENsb25lPihlOiAmRW52LCB2YWx1ZTogJlQpIC0+IEJ5dGVzTjwzMj4gewogICAgZS5jcnlwdG8oKS5zaGEyNTYoJnZhbHVlLmNsb25lKCkudG9feGRyKGUpKS5pbnRvKCkKfQoKLy8vIFtOT19WQUxVRV9SRUZdIGFzIGEgYEJ5dGVzTjwzMj5gLgpwdWIgZm4gbm9fdmFsdWVfcmVmKGU6ICZFbnYpIC0+IEJ5dGVzTjwzMj4gewogICAgQnl0ZXNOMzo6ZnJvbV9hcnJheShlLCAmTk9fVkFMVUVfUkVGKQp9CgovLy8gUmVmZXJlbmNlIG9mIHRoZSB2YWx1ZSBjdXJyZW50bHkgc3RvcmVkIHVuZGVyIGBrZXlgIGluIHBlcnNpc3RlbnQKLy8vIHN0b3JhZ2UsIG9yIFtOT19WQUxVRV9SRUZdIHdoZW4gbm90aGluZyBpcyBzdG9yZWQuIEhhc2hpbmcgdGhlIHJhdwovLy8gc3RvcmVkIGBWYWxgIHlpZWxkcyB0aGUgc2FtZSBYRFIgYXMgaGFzaGluZyB0aGUgdHlwZWQgdmFsdWUgcmV0dXJuZWQgYnkKLy8vIHRoZSBtYXRjaGluZyBnZXR0ZXIuCnB1YihjcmF0ZSkgZm4gc3RvcmVkX3JlZihlOiAmRW52LCBrZXk6ICZEYXRhS2V5KSAtPiBCeXRlc04zMj4gewogICAgbWF0Y2ggZS5zdG9yYWdlKCkucGVyc2lzdGVudCgpLmdldDo6PERhdGFLZXksIFZhbD4oa2V5KSB7CiAgICAgICAgU29tZSh2YWx1ZSkgPT4gdmFsdWVfcmVmKGUsICZ2YWx1ZSksCiAgICAgICAgTm9uZSA9PiBub192YWx1ZV9yZWYoZSksCiAgICB9Cn0KCi8vLyBDdXJyZW50IGNvbmZpZ3VyYXRpb24gcmV2aXNpb247IGAwYCB1bnRpbCB0aGUgZmlyc3QgYXVkaXRlZCBjaGFuZ2UuCnB1YihjcmF0ZSkgZm4gY29uZmlnX3JldmlzaW9uKGU6ICZFbnYpIC0+IHU2NCB7CiAgICBlLnN0b3JhZ2UoKQogICAgICAgIC5wZXJzaXN0ZW50KCkKICAgICAgICAuZ2V0KCZEYXRhS2V5OjpDb25maWdSZXZpc2lvbikKICAgICAgICAudW53cmFwX29yKDApCn0KCi8vLyBSZWNvcmQgYSBzdWNjZXNzZnVsIGNvbmZpZ3VyYXRpb24gY2hhbmdlOiBidW1wIHRoZSByZXZpc2lvbiBhbmQgcHVibGlzaAovLy8gb25lIGBDb25maWdDaGFuZ2VkYCBldmVudC4gQ2FsbCBpdCBhZnRlciB0aGUgbmV3IHZhbHVlIGhhcyBiZWVuIHdyaXR0ZW4KLy8vIGFuZCBvbmx5IGZyb20gYSBzZXR0ZXIgdGhhdCBoYXMgYWxyZWFkeSBhdXRob3JpemVkIGBhY3RvcmAuCi8vCi8vIERvZXMgbm90aGluZyB3aGVuIGBwcmV2aW91c19yZWYgPT0gbmV3X3JlZmAgKG5vLW9wIGNoYW5nZSkuCnB1YihjcmF0ZSkgZm4gcmVjb3JkX2NvbmZpZ19jaGFuZ2UoCiAgICBlOiAmRW52LAogICAgYWN0b3I6ICZBZGRyZXNzLAogICAgY29uZmlnX2tleTogJnN0ciwKICAgIHN1YmplY3RfcmVmOiBCeXRlc04zMiwKICAgIHByZXZpb3VzX3JlZjogQnl0ZXNOMzIsCiAgICBuZXdfcmVmOiBCeXRlc04zMiwKKSB7CiAgICBpZiBwcmV2aW91c19yZWYgPT0gbmV3X3JlZiB7CiAgICAgICAgcmV0dXJuOwogICAgfQoKICAgIGxldCByZXZpc2lvbiA9IGNvbmZpZ19yZXZpc2lvbihlKSArIDE7CiAgICBlLnN0b3JhZ2UoKQogICAgICAgIC5wZXJzaXN0ZW50KCkKICAgICAgICAuc2V0KCZEYXRhS2V5OjpDb25maWdSZXZpc2lvbiwgJnJldmlzaW9uKTsKCiAgICBDb25maWdDaGFuZ2VkIHsKICAgICAgICBrZXk6IFN5bWJvbDo6bmV3KGUsIGNvbmZpZ19rZXkpLAogICAgICAgIGFjdG9yOiBhY3Rvci5jbG9uZSgpLAogICAgICAgIHN1YmplY3RfcmVmLAogICAgICAgIHByZXZpb3VzX3JlZiwKICAgICAgICBuZXdfcmVmLAogICAgICAgIHJldmlzaW9uLAogICAgICAgIGxlZGdlcl9zZXF1ZW5jZTogZS5sZWRnZXIoKS5zZXF1ZW5jZSgpLAogICAgICAgIHRpbWVzdGFtcDogZS5sZWRnZXIoKS50aW1lc3RhbXAoKSwKICAgIH0KICAgIC5wdWJsaXNoKGUpOwp9Cg==
+//! Audit trail for payroll configuration changes (issue #490).
+//
+// Every successful change to a payroll configuration setting goes through
+// [`record_config_change`], which bumps a contract-wide configuration
+// revision and publishes exactly one `ConfigChanged` event:
+//
+// ```text
+// topics = ( Symbol("payroll"), Symbol("config_changed"), Symbol(<config key>) )
+// data   = ( actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp )
+// ```
+//
+// Configuration values are never published in plaintext. A value is
+// referenced by `sha256(value.to_xdr())` of its canonical XDR encoding, so an
+// auditor can check a change against the value read back from contract
+// storage and chain successive changes to the same setting (`previous_ref`
+// of one change equals `new_ref` of the change before it).
+//
+// A change that leaves the stored value byte-for-byte identical is a no-op:
+// the setter keeps its existing behaviour, but no audit event is published
+// and the revision is not bumped. Failed calls revert, so they publish
+// nothing either.
+//
+// See `docs/config-audit-events.md` for the full schema and how to verify it.
+
+use payroll_events::ConfigChanged;
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, Val};
+
+use crate::DataKey;
+
+/// Reference published when there is no value: the previous value of a
+/// setting that was never set, the new value of a setting that was removed,
+/// and the subject of a setting that is not keyed by an asset, period, or
+/// role holder.
+pub const NO_VALUE_REF: [u8; 32] = [0; 32];
+
+/// Configuration keys published as the third topic of a `config_changed`
+/// event. Each key names one setting and the entrypoint(s) that change it.
+pub mod config_keys {
+    /// `set_pause_manager` — value: pause manager `Address`.
+    pub const PAUSE_MANAGER: &str = "pause_manager";
+    /// `set_asset_allowed` — subject: asset; value: `bool`.
+    pub const ASSET_ALLOWED: &str = "asset_allowed";
+    /// `set_company_state` — value: `CompanyState`.
+    pub const COMPANY_STATE: &str = "company_state";
+    /// `set_capacity_limits` — value: `CapacityLimits`.
+    pub const CAPACITY_LIMITS: &str = "capacity_limits";
+    /// `set_settlement_window` — subject: period; value: `SettlementWindow`.
+    pub const SETTLEMENT_WINDOW: &str = "settlement_window";
+    /// `freeze_period_config` — subject: period; value: `bool`.
+    pub const PERIOD_FROZEN: &str = "period_frozen";
+    /// `set_retention_policy` — value: `RetentionPolicy`.
+    pub const RETENTION_POLICY: &str = "retention_policy";
+    /// `add_dispute_authority` / `remove_dispute_authority` — subject:
+    /// authority; value: `bool` (absent once removed).
+    pub const DISPUTE_AUTHORITY: &str = "dispute_authority";
+    /// `add_reviewer` / `remove_reviewer` — subject: reviewer; value: `bool`
+    /// (absent once removed).
+    pub const REVIEWER: &str = "reviewer";
+    /// `set_max_reviewers` — value: `u32` (issue #539).
+    pub const MAX_REVIEWERS: &str = "max_reviewers";
+    /// `register_operator_key` / `revoke_operator_key` — value: operator
+    /// ed25519 public key (absent once revoked) (issue #519).
+    pub const OPERATOR_KEY: &str = "operator_key";
+    /// `set_reservation_expiry_policy` — subject: asset; value:
+    /// `ReservationExpiry`.
+    pub const RESERVATION_EXPIRY: &str = "reservation_expiry";
+    /// `set_payroll_currency` — value: `PayrollCurrencyConfig`.
+    pub const PAYROLL_CURRENCY: &str = "payroll_currency";
+    /// `set_storage_version` — value: `StorageVersionState`.
+    pub const STORAGE_VERSION: &str = "storage_version";
+    /// `accept_admin_rotation` / `accept_admin_handover` — value: admin
+    /// `Address`.
+    pub const ADMIN: &str = "admin";
+    /// `accept_treasury_rotation` — value: treasury owner `Address`.
+    pub const TREASURY_OWNER: &str = "treasury_owner";
+    /// `set_organization_policy` — value: `OrganizationPolicy`.
+    pub const ORGANIZATION_POLICY: &str = "organization_policy";
+}
+
+/// `sha256(value.to_xdr())`: the reference published for a configuration
+/// value or subject.
+pub fn value_ref<T: IntoVal<Env, Val> + Clone>(e: &Env, value: &T) -> BytesN<32> {
+    e.crypto().sha256(&value.clone().to_xdr(e)).into()
+}
+
+/// [`NO_VALUE_REF`] as a `BytesN<32>`.
+pub fn no_value_ref(e: &Env) -> BytesN<32> {
+    BytesN::from_array(e, &NO_VALUE_REF)
+}
+
+/// Reference of the value currently stored under `key` in persistent
+/// storage, or [`NO_VALUE_REF`] when nothing is stored. Hashing the raw
+/// stored `Val` yields the same XDR as hashing the typed value returned by
+/// the matching getter.
+pub(crate) fn stored_ref(e: &Env, key: &DataKey) -> BytesN<32> {
+    match e.storage().persistent().get::<DataKey, Val>(key) {
+        Some(value) => value_ref(e, &value),
+        None => no_value_ref(e),
+    }
+}
+
+/// Current configuration revision; `0` until the first audited change.
+pub(crate) fn config_revision(e: &Env) -> u64 {
+    e.storage()
+        .persistent()
+        .get(&DataKey::ConfigRevision)
+        .unwrap_or(0)
+}
+
+/// Record a successful configuration change: bump the revision and publish
+/// one `ConfigChanged` event. Call it after the new value has been written
+/// and only from a setter that has already authorized `actor`.
+//
+// Does nothing when `previous_ref == new_ref` (no-op change).
+pub(crate) fn record_config_change(
+    e: &Env,
+    actor: &Address,
+    config_key: &str,
+    subject_ref: BytesN<32>,
+    previous_ref: BytesN<32>,
+    new_ref: BytesN<32>,
+) {
+    if previous_ref == new_ref {
+        return;
+    }
+
+    let revision = config_revision(e) + 1;
+    e.storage()
+        .persistent()
+        .set(&DataKey::ConfigRevision, &revision);
+
+    ConfigChanged {
+        key: Symbol::new(e, config_key),
+        actor: actor.clone(),
+        subject_ref,
+        previous_ref,
+        new_ref,
+        revision,
+        ledger_sequence: e.ledger().sequence(),
+        timestamp: e.ledger().timestamp(),
+    }
+    .publish(e);
+}

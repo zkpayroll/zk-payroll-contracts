@@ -49,7 +49,7 @@ All functions live in `contracts/payroll/src/lib.rs`.
 | --- | --- | --- |
 | `get_execution_initiator()` | none | Returns the address currently authorized to initiate a contract execution (`Some(admin)`), or `None` before `initialize`. |
 | `check_execution_initiator(initiator)` | none | Read-only authorization snapshot for an address: `{ initiator, authorized, role, initialized }`. |
-| `is_execution_initiator_authorized(initiator)` | none | Boolean convenience wrapper for `check_execution_initiator`. |
+| `is_exec_initiator_authorized(initiator)` | none | Boolean convenience wrapper for `check_execution_initiator`. |
 | `validate_execution_initiator(initiator)` | `initiator` | Rejects the call unless `initiator` is the registered admin, requiring its cryptographic authorization. Use this to assert the role on-chain as a precondition of a larger flow. |
 
 The read-only status shape (privacy-safe by construction):
@@ -77,7 +77,7 @@ remediation; no payroll values are included.
 ## Integrator guidance
 
 - Before submitting an execution, call `check_execution_initiator(me)` (or
-  `is_execution_initiator_authorized(me)`) to confirm the initiator role and show
+  `is_exec_initiator_authorized(me)`) to confirm the initiator role and show
   a clear message in the UI without paying for a reverted transaction.
 - `validate_execution_initiator` is useful when the authorization step must be
   recorded on-chain as a precondition of a larger workflow; it does not change

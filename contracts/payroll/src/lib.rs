@@ -190,6 +190,57 @@ pub struct BatchCheckpoint {
     pub failed: bool,
 }
 
+/// Lifecycle state for a resumable payroll batch (issue #611).
+///
+/// Serialized as a stable ordinal so off-chain clients can persist and
+/// pattern-match on it across contract upgrades.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BatchResumeStatus {
+    /// No checkpoint exists for the supplied batch identity: submit a fresh
+    /// `batch_process_payroll_bounded` call.
+    NotFound = 0,
+    /// A checkpoint is mid-execution with payments remaining: call
+    /// `batch_process_payroll_bounded` again with the same identity to resume.
+    Resumable = 1,
+    /// A checkpoint failed mid-execution: clear it with
+    /// `resume_payroll_batch` (admin-authorized) before resubmitting.
+    FailedRetryable = 2,
+    /// A checkpoint already finished (all payments executed). Resubmitting is
+    /// rejected, so the caller can stop polling.
+    Completed = 3,
+}
+
+/// Privacy-safe, actionable resume plan for an interrupted payroll batch
+/// (issue #611).
+///
+/// Exposes only batch-level operational progress: the persisted cursor, the
+/// count the caller reported for the batch, and the exact next action. It
+/// never contains employee addresses, salaries, proof material, or the
+/// remaining employee identities, so it is safe to surface to dashboards and
+/// integrators.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchResumePlan {
+    /// Coarse lifecycle classification of the batch (see
+    /// [`BatchResumeStatus`]).
+    pub status: BatchResumeStatus,
+    /// Number of payments already executed and checkpointed.
+    pub processed_count: u32,
+    /// Payment count the caller reports for this batch identity.
+    pub expected_total: u32,
+    /// `true` when the persisted cursor is consistent with `expected_total`.
+    pub cursor_consistent: bool,
+    /// Number of payments still outstanding (`expected_total -
+    /// processed_count` when consistent; `0` otherwise).
+    pub remaining_count: u32,
+    /// Whether `resume_payroll_batch` may be called right now. Only
+    /// `FailedRetryable` batches with a consistent cursor and at least one
+    /// outstanding payment are resumable.
+    pub can_resume: bool,
+}
+
 // ?? Issue #89: payroll amendment flow ????????????????????????????????????????
 
 /// Lifecycle state of a payroll run draft.
@@ -1302,7 +1353,10 @@ impl Payroll {
 
     /// Boolean convenience wrapper around `check_execution_initiator`
     /// (issue #620).
-    pub fn is_execution_initiator_authorized(e: Env, initiator: Address) -> bool {
+    ///
+    /// Soroban entrypoint names are limited to 32 characters, so this is the
+    /// compact form of `check_execution_initiator`.
+    pub fn is_exec_initiator_authorized(e: Env, initiator: Address) -> bool {
         execution_authorization::check(&e, &initiator).authorized
     }
 
@@ -1327,12 +1381,6 @@ impl Payroll {
     fn validate_draft_id(draft_id: u64) {
         if draft_id == 0 {
             panic!("Invalid draft ID: must be non-zero");
-        }
-    }
-
-    fn require_period_not_frozen(e: &Env, period_label: &Symbol) {
-        if Self::is_period_config_frozen(e.clone(), period_label.clone()) {
-            panic!("Payroll period is frozen: it has been finalized and can no longer be edited");
         }
     }
 
@@ -1468,6 +1516,16 @@ impl Payroll {
         let normalized_str = core::str::from_utf8(&out_buf[..trimmed_len])
             .expect("normalized employee identifier is valid UTF-8");
         String::from_str(e, normalized_str)
+    }
+
+    /// Normalize an employee reference identifier (#544).
+    ///
+    /// Public passthrough mirroring `salary_commitment::normalize_employee_identifier`
+    /// so clients can canonicalize identifiers against the same rules the
+    /// payroll contract enforces. Trims whitespace, uppercases ASCII letters,
+    /// validates the 1-256 character printable-ASCII range.
+    pub fn normalize_employee_identifier(e: Env, identifier: String) -> String {
+        Self::normalize_employee_identifier_internal(&e, &identifier)
     }
 
     /// Reject a payroll batch that lists the same employee wallet more than
@@ -2652,6 +2710,164 @@ impl Payroll {
             checkpoint_index,
         );
         true
+    }
+
+    // ── Issue #611: resumable payroll batch handling ─────────────────────────
+
+    /// Build a privacy-safe, actionable resume plan for a payroll batch
+    /// (issue #611).
+    ///
+    /// `expected_total` is the payment count the caller believes this batch
+    /// identity (employer + batch root + asset + execution nonce) carries. The
+    /// persisted cursor is compared against it so a mismatched resubmission
+    /// (wrong batch, wrong payment count) is surfaced as an inconsistent
+    /// cursor instead of silently resuming at the wrong offset.
+    ///
+    /// Read-only and privacy-safe: the plan carries progress counts and a
+    /// status only — never employee addresses, salary values, proof material,
+    /// or the remaining employee identities.
+    pub fn get_batch_resume_plan(
+        e: Env,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_total: u32,
+    ) -> BatchResumePlan {
+        if expected_total == 0 || expected_total > MAX_BATCH {
+            return BatchResumePlan {
+                status: BatchResumeStatus::NotFound,
+                processed_count: 0,
+                expected_total,
+                cursor_consistent: false,
+                remaining_count: 0,
+                can_resume: false,
+            };
+        }
+
+        let key = DataKey::BatchCheckpoint(employer, batch_root, asset, execution_nonce);
+        let Some(checkpoint) = e.storage().persistent().get::<_, BatchCheckpoint>(&key) else {
+            return BatchResumePlan {
+                status: BatchResumeStatus::NotFound,
+                processed_count: 0,
+                expected_total,
+                cursor_consistent: false,
+                remaining_count: 0,
+                can_resume: false,
+            };
+        };
+
+        let processed_count = checkpoint.last_checkpoint_index;
+        let cursor_consistent = processed_count <= expected_total;
+        let remaining_count = if cursor_consistent {
+            expected_total - processed_count
+        } else {
+            0
+        };
+
+        let status = if checkpoint.completed {
+            BatchResumeStatus::Completed
+        } else if checkpoint.failed {
+            BatchResumeStatus::FailedRetryable
+        } else if remaining_count > 0 {
+            BatchResumeStatus::Resumable
+        } else {
+            // Not completed, not failed, nothing remaining: an in-progress
+            // checkpoint whose cursor already covers the whole batch. Treat
+            // the batch as complete from the operator's point of view.
+            BatchResumeStatus::Completed
+        };
+
+        let can_resume = matches!(status, BatchResumeStatus::FailedRetryable)
+            && cursor_consistent
+            && remaining_count > 0;
+
+        BatchResumePlan {
+            status,
+            processed_count,
+            expected_total,
+            cursor_consistent,
+            remaining_count,
+            can_resume,
+        }
+    }
+
+    /// Explicitly resume an interrupted payroll batch after a failure
+    /// (issue #611).
+    ///
+    /// Clears the failed checkpoint state so the next
+    /// `batch_process_payroll_bounded` call with the same identity (employer,
+    /// batch root, asset, execution nonce) is accepted and continues from the
+    /// persisted cursor without repeating completed payouts.
+    ///
+    /// The caller must supply the batch's payment count; it is validated
+    /// against the persisted cursor so resuming with the wrong batch shape is
+    /// rejected with an actionable error instead of a silent partial run.
+    ///
+    /// # Panics
+    /// * `"Unauthorized"` — `admin` is not the stored contract admin.
+    /// * `"Batch execution checkpoint not found"` — no checkpoint exists for
+    ///   this identity; submit a fresh batch instead.
+    /// * `"Payroll batch is not resumable: check get_batch_resume_plan"` — the
+    ///   checkpoint is completed, mid-execution (not failed), or its cursor is
+    ///   inconsistent with `expected_total`.
+    /// * `"Invalid batch_root: must be non-zero"` / `"Invalid execution_nonce:
+    ///   must be non-zero"` — identity digests are zero.
+    pub fn resume_payroll_batch(
+        e: Env,
+        admin: Address,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_total: u32,
+    ) {
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_non_zero_digest(&e, &execution_nonce, "execution_nonce");
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::BatchCheckpoint(
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+        );
+        let mut checkpoint: BatchCheckpoint = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Batch execution checkpoint not found");
+
+        if checkpoint.completed
+            || !checkpoint.failed
+            || expected_total == 0
+            || expected_total > MAX_BATCH
+            || checkpoint.last_checkpoint_index >= expected_total
+        {
+            panic!("Payroll batch is not resumable: check get_batch_resume_plan");
+        }
+
+        checkpoint.state = BatchCheckpointState::Resumed;
+        checkpoint.failed = false;
+        e.storage().persistent().set(&key, &checkpoint);
+
+        payroll_events::emit_batch_checkpoint_resumed(
+            &e,
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+            checkpoint.last_checkpoint_index,
+        );
     }
 
     pub fn resume_batch_execution(
@@ -4359,13 +4575,28 @@ impl Payroll {
         );
 
         let mut checkpoint: BatchCheckpoint = if e.storage().persistent().has(&checkpoint_key) {
-            let cp: BatchCheckpoint = e.storage().persistent().get(&checkpoint_key).unwrap();
+            let mut cp: BatchCheckpoint = e.storage().persistent().get(&checkpoint_key).unwrap();
             if cp.completed {
                 panic!("Payroll batch already completed");
             }
             if cp.failed {
-                panic!("Failed payout retry requires an eligibility check and explicit resume");
+                panic!(
+                    "Failed payroll batch is not resumable: call resume_payroll_batch first (issue #611)"
+                );
             }
+            // Issue #611: a resubmission must replay the same batch shape. A
+            // persisted cursor beyond the submitted payment count means this
+            // call is not the original batch (or its size changed), which
+            // would silently skip or double-count payouts.
+            if cp.last_checkpoint_index > count {
+                panic!(
+                    "Batch identity mismatch: checkpoint progress {} exceeds submitted payment count {}",
+                    cp.last_checkpoint_index, count
+                );
+            }
+            // Issue #611: keep the recorded batch size aligned with the
+            // replayed payment count so progress reporting stays truthful.
+            cp.total_checkpoints = count;
             payroll_events::emit_batch_checkpoint_resumed(
                 &e,
                 addrs.admin.clone(),
@@ -4867,10 +5098,24 @@ impl Payroll {
 
         // Issue #471: the period is now final — auto-freeze it so no further
         // payroll edits can slip in after submission without an explicit
-        // authorized unfreeze.
+        // authorized unfreeze. Both the configuration freeze marker (#248)
+        // and the #471 freeze record (reason = "finalized") are written so
+        // `is_period_frozen` / `get_period_freeze` / `unfreeze_payroll_period`
+        // observe the freeze consistently.
         let freeze_key = DataKey::PeriodConfigFrozen(draft.period_label.clone());
         if !e.storage().persistent().has(&freeze_key) {
             e.storage().persistent().set(&freeze_key, &true);
+        }
+        let finalized_key = DataKey::PeriodFreeze(draft.period_label.clone());
+        if !e.storage().persistent().has(&finalized_key) {
+            let freeze = PeriodFreeze {
+                period_label: draft.period_label.clone(),
+                frozen_by: admin.clone(),
+                frozen_at: e.ledger().timestamp(),
+                reason: Symbol::new(&e, "finalized"),
+                runs_count: Self::count_runs_for_period(&e, &draft.period_label),
+            };
+            e.storage().persistent().set(&finalized_key, &freeze);
         }
 
         payroll_events::emit_draft_submitted(&e, draft_id, admin);
@@ -4959,7 +5204,8 @@ impl Payroll {
 
     // ── Issue #471 / #484: payroll period freeze and reopening guard ─────────
 
-    /// Panic if the given payroll period is currently frozen/finalized (#471, #484).
+    /// Panic if the given payroll period is frozen under either freeze
+    /// system (#248 config-freeze, #471 draft/finalized-freeze).
     ///
     /// Called by every state-mutating payroll edit path that must be blocked
     /// once a period has been finalized (draft creation, amendment,
@@ -4968,6 +5214,9 @@ impl Payroll {
         if e.storage()
             .persistent()
             .has(&DataKey::PeriodFreeze(period_label.clone()))
+            || e.storage()
+                .persistent()
+                .has(&DataKey::PeriodConfigFrozen(period_label.clone()))
         {
             panic!("Payroll period is frozen: it has been finalized and can no longer be edited");
         }

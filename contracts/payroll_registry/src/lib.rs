@@ -84,6 +84,55 @@ pub struct PendingThresholdRotation {
     pub effective_after: u64,
 }
 
+// ── Issue #610: payout destination change review ────────────────────────────
+
+/// Lifecycle state of a payout destination change under review (issue #610).
+///
+/// Serialized as a stable ordinal so off-chain clients can persist and
+/// pattern-match on it across contract upgrades.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DestinationReviewStatus {
+    /// Proposed by the employee, awaiting the company admin's decision.
+    Pending = 0,
+    /// Approved by the company admin and applied to the payout destination.
+    Approved = 1,
+    /// Rejected by the company admin; the payout destination is unchanged.
+    Rejected = 2,
+    /// Withdrawn by the proposing employee before a decision.
+    Cancelled = 3,
+}
+
+/// A payout destination change awaiting company-admin review (issue #610).
+///
+/// Privacy note: the record carries only the review lifecycle fields and the
+/// proposed destination, exactly as the direct (unreviewed) update flow does.
+/// No salary values, commitments, or payment history are involved.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayoutDestinationReview {
+    /// Company the employee is registered under.
+    pub company_id: u64,
+    /// Employee who proposed the change.
+    pub employee: Address,
+    /// Destination proposed by the employee.
+    pub new_destination: Address,
+    /// Destination currently on file at proposal time (best-effort snapshot;
+    /// payout destinations default to the employee address when unset).
+    pub current_destination: Address,
+    /// Ledger timestamp when the change was proposed.
+    pub proposed_at: u64,
+    /// Current review state.
+    pub status: DestinationReviewStatus,
+    /// Ledger timestamp of the admin decision or employee cancellation
+    /// (`0` while pending).
+    pub resolved_at: u64,
+    /// Company admin that approved/rejected (`None` while pending or when the
+    /// employee cancelled).
+    pub resolved_by: Option<Address>,
+}
+
 // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
 /// Versioned admin configuration tracking for reliable change detection.
@@ -138,6 +187,9 @@ pub enum DataKey {
     PendingThresholdRotation(u64),
     /// Custom payout destination for a registered employee (issue #486).
     PayoutDestination(u64, Address),
+    /// Payout destination change proposed by an employee and awaiting
+    /// company-admin review (issue #610). Keyed by the proposing employee.
+    DestinationReview(u64, Address),
     /// Versioned admin configuration for reliable change detection.
     AdminConfigVersion(u64),
 }
@@ -299,6 +351,50 @@ pub trait PayrollRegistryTrait {
     /// Read an employee's payout destination address under a company (#486).
     /// Returns the stored payout destination, or defaults to `employee` address if none set.
     fn get_payout_destination(env: Env, company_id: u64, employee: Address) -> Address;
+
+    // ── Issue #610: payout destination change review ────────────────────
+
+    /// Propose a payout destination change that requires company-admin
+    /// review before it is applied (issue #610).
+    ///
+    /// Requires authorization from the employee. Rejects the same invalid
+    /// destinations as the direct update flow (zero address, duplicate of the
+    /// destination already on file). Only one pending review per employee.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn propose_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination: Address,
+    );
+
+    /// Company-admin decision on a pending payout destination change
+    /// (issue #610). On approval the destination is applied atomically.
+    /// Requires authorization from the company admin.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn review_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        admin: Address,
+        approve: bool,
+    );
+
+    /// Withdraw a pending payout destination change before the admin
+    /// decides (issue #610). Requires authorization from the employee.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn cancel_payout_dest_change(env: Env, company_id: u64, employee: Address);
+
+    /// Return the current payout destination change review for an employee
+    /// (issue #610), or `None` when no review exists.
+    fn get_payout_dest_review(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutDestinationReview>;
 
     // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
@@ -1326,6 +1422,210 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .get(&DataKey::PayoutDestination(company_id, employee.clone()))
             .unwrap_or(employee)
+    }
+
+    // ── Issue #610: payout destination change review ────────────────────
+
+    fn propose_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination: Address,
+    ) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        // Only the employee may propose a change to their own destination.
+        employee.require_auth();
+
+        // Reject the same invalid destinations as the direct update flow.
+        let current_dest = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+        if current_dest == new_destination {
+            panic!("Destination address is already on file");
+        }
+        let zero_wallet = String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        if new_destination == Address::from_string(&zero_wallet) {
+            panic!("Cannot set zero address as payout destination");
+        }
+
+        let review_key = DataKey::DestinationReview(company_id, employee.clone());
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutDestinationReview>(&review_key)
+        {
+            if existing.status == DestinationReviewStatus::Pending {
+                panic!("A payout destination change is already under review");
+            }
+        }
+
+        let review = PayoutDestinationReview {
+            company_id,
+            employee: employee.clone(),
+            new_destination,
+            current_destination: current_dest,
+            proposed_at: env.ledger().timestamp(),
+            status: DestinationReviewStatus::Pending,
+            resolved_at: 0,
+            resolved_by: None,
+        };
+        env.storage().persistent().set(&review_key, &review);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutDestinationChangeProposed"),
+                company_id,
+                employee,
+            ),
+            (),
+        );
+    }
+
+    /// Company-admin decision on a pending payout destination change
+    /// (issue #610). On approval the destination is applied atomically.
+    /// Requires authorization from the company admin.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn review_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        admin: Address,
+        approve: bool,
+    ) {
+        Self::require_not_paused(&env);
+
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if info.revoked {
+            panic!("Company admin is revoked");
+        }
+        if admin != info.admin {
+            panic!("Unauthorized: caller is not the company admin");
+        }
+        admin.require_auth();
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        let review_key = DataKey::DestinationReview(company_id, employee.clone());
+        let mut review: PayoutDestinationReview = env
+            .storage()
+            .persistent()
+            .get(&review_key)
+            .expect("No payout destination change under review");
+
+        if review.status != DestinationReviewStatus::Pending {
+            panic!("Payout destination change is not pending review");
+        }
+
+        let decided_at = env.ledger().timestamp();
+        review.resolved_at = decided_at;
+        review.resolved_by = Some(admin.clone());
+
+        if approve {
+            // Apply the approved destination through the same validation and
+            // event shape as the direct update flow (#486).
+            let new_destination = review.new_destination.clone();
+            let current_dest =
+                Self::get_payout_destination(env.clone(), company_id, employee.clone());
+            if current_dest == new_destination {
+                panic!("Destination address is already on file");
+            }
+            env.storage().persistent().set(
+                &DataKey::PayoutDestination(company_id, employee.clone()),
+                &new_destination,
+            );
+            env.events().publish(
+                (
+                    Symbol::new(&env, "PayoutDestinationUpdated"),
+                    company_id,
+                    employee.clone(),
+                ),
+                (current_dest, new_destination),
+            );
+            review.status = DestinationReviewStatus::Approved;
+        } else {
+            review.status = DestinationReviewStatus::Rejected;
+        }
+
+        env.storage().persistent().set(&review_key, &review);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutDestinationChangeReviewed"),
+                company_id,
+                employee,
+            ),
+            (approve,),
+        );
+    }
+
+    fn cancel_payout_dest_change(env: Env, company_id: u64, employee: Address) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        // Only the proposing employee may withdraw their own change.
+        employee.require_auth();
+
+        let review_key = DataKey::DestinationReview(company_id, employee.clone());
+        let mut review: PayoutDestinationReview = env
+            .storage()
+            .persistent()
+            .get(&review_key)
+            .expect("No payout destination change under review");
+
+        if review.status != DestinationReviewStatus::Pending {
+            panic!("Payout destination change is not pending review");
+        }
+
+        review.status = DestinationReviewStatus::Cancelled;
+        review.resolved_at = env.ledger().timestamp();
+        env.storage().persistent().set(&review_key, &review);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutDestinationChangeCancelled"),
+                company_id,
+                employee,
+            ),
+            (),
+        );
+    }
+
+    fn get_payout_dest_review(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutDestinationReview> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DestinationReview(company_id, employee))
     }
 }
 

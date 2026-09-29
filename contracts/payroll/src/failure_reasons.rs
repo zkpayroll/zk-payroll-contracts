@@ -27,7 +27,7 @@ use crate::CapacityLimitKind;
 /// variant's discriminant never changes and is never reused for a different
 /// meaning, so off-chain consumers can safely persist and pattern-match on
 /// it across contract upgrades.
-@contracttype
+#[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PayrollFailureReason {
@@ -87,7 +87,7 @@ pub enum PayrollFailureReason {
 /// off-chain dashboard or agent the same way
 /// `payment_executor::check_upgrade_compatibility`'s report is documented to
 /// be.
-@contracttype
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct PayrollDryRunReport {
     /// `true` if and only if `blockers` is empty — the batch would be
@@ -128,7 +128,7 @@ impl PayrollDryRunReport {
 /// Arguments for a dry-run check, mirroring `batch_process_payroll`'s
 /// signature minus the proofs (proof verification is out of scope for this
 /// preflight — see the module doc comment).
-@contracttype
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct DryRunArgs {
     pub amounts: Vec<i128>,

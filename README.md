@@ -278,6 +278,49 @@ The eligibility check returns only a boolean and does not reveal employee or
 salary values. See [Payroll Run State Machine](docs/payroll-state-machine.md)
 for the recovery steps.
 
+#### Resuming a halted batch (issue #611)
+
+When a bounded batch halts, the checkpoint is left in the `Failed` state and
+further batches for the same run are rejected with a message naming
+`resume_payroll_batch`. Inspect the checkpoint before acting on it:
+
+```rust
+let plan = payroll.get_batch_resume_plan(
+    company_id,
+    batch_root,
+    asset,
+    execution_nonce,
+    expected_total,
+);
+// plan.status      -> NotFound | Resumable | FailedRetryable | Completed
+// plan.can_resume  -> true only when a partial, non-failed checkpoint exists
+// plan.remaining_count
+// plan.cursor_consistent
+```
+
+Then, as admin, clear the failure and continue from the recorded cursor:
+
+```rust
+payroll.resume_payroll_batch(
+    admin,
+    employer,
+    batch_root,
+    asset,
+    execution_nonce,
+    expected_total,
+);
+```
+
+`get_batch_resume_plan` is read-only and returns aggregate progress only — no
+employee addresses, amounts, or salary values. It reports `NotFound` when the
+batch identity is unknown or when `expected_total` is `0` or above the 50-employee
+cap, so an operator cannot use it to probe for payroll sizes outside the bounds
+the contract accepts. Resuming sets the checkpoint back to `Resumed`, clears the
+recorded failure, and emits `batch_checkpoint_resumed`; the next
+`batch_process_payroll_bounded` call continues at the stored index without
+re-paying the already processed employees. Resuming an already completed batch
+panics with an actionable message rather than silently re-running payments.
+
 ### Compliance Audit
 
 ```rust
