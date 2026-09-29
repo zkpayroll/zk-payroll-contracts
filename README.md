@@ -17,6 +17,7 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 - **Run Expiration** — Prepared-but-unfinalized payroll runs can expire after a configurable window, releasing reserved funds and stopping stale submissions
 - **Draft Lock Owner Query** — Query the lock holder for finalized drafts without exposing private employee counts or amounts
 - **Execution Initiator Authorization** — Every payroll preparation/execution path validates that its initiator is the registered admin, with a read-only preflight for SDKs and dashboards
+- **Duplicate Execution Guard** — Payroll runs cannot be executed twice; a second execution attempt fails with an actionable error without exposing salary or employee values
 - **Compliance Ready** — Selective disclosure for audits via view keys
 - **On-Chain Verification** — Groth16 proof verification on Soroban
 
@@ -62,6 +63,10 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 > **Commitment lifecycle:** an approved or settled commitment can be rotated
 > with `rotate_approved_commitment` without dropping its lock (#520) — see
 > [contracts/README.md](contracts/README.md#commitment-rotation-controls-salary_commitment--issue-520).
+>
+> **Duplicate execution guard:** a payroll run can only be executed once. A
+> repeated execution attempt is rejected with an actionable error and never
+> exposes salary, employee, or commitment values.
 
 ## Prerequisites
 

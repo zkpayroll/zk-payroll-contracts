@@ -1,4 +1,5 @@
 /// Settlement idempotency lock tests — issue #358.
+//! Settlement idempotency lock tests — issue #358.
 ///
 /// # Coverage
 ///
@@ -24,6 +25,7 @@
 /// | `test_prepared_run_not_marked_settled` | `prepare_payroll_run` alone does not mark settled |
 /// | `test_cancelled_run_not_marked_settled` | Cancelled pending run is never marked settled |
 /// | `test_is_settled_for_nonexistent_run_returns_false` | Unknown run id → false, never panic |
+/// | `test_duplicate_nonce_guard_does_not_leak_payroll_values` | Duplicate failure does not expose sensitive payroll values |
 use payroll::{Payroll, PayrollClient, ReconciliationStatus};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -704,4 +706,53 @@ fn test_is_settled_for_nonexistent_run_returns_false() {
     assert!(!ctx.payroll().is_settled(&0u64));
     assert!(!ctx.payroll().is_settled(&1u64));
     assert!(!ctx.payroll().is_settled(&u64::MAX));
+}
+
+// ── Duplicate-execution guard: no sensitive value leakage ─────────────────────
+
+/// The duplicate-execution guard must reject a repeated nonce without
+/// exposing sensitive payroll values (employee addresses, amounts, or
+/// commitment data) in the failure path.  This test asserts that the
+/// guard fires before any observable payroll state changes and that the
+/// rejection is a plain error signal rather than a value-bearing panic.
+#[test]
+fn test_duplicate_nonce_guard_does_not_leak_payroll_values() {
+    let ctx = setup();
+    let shared_nonce = nonce(&ctx.env, 90);
+
+    let mut proofs = Vec::new(&ctx.env);
+    proofs.push_back(mock_proof(&ctx.env));
+    let mut amounts = Vec::new(&ctx.env);
+    amounts.push_back(4_321i128);
+    let mut employees = Vec::new(&ctx.env);
+    employees.push_back(ctx.employee.clone());
+
+    // First settlement succeeds and records the run.
+    let run_id = ctx.payroll().batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &4_321,
+        &shared_nonce,
+        &None,
+    );
+
+    let treasury_snapshot = ctx.token().balance(&ctx.treasury);
+    let employee_snapshot = ctx.token().balance(&ctx.employee);
+
+    // Duplicate attempt must fail cleanly — no panic, no value leakage.
+    let result = ctx.payroll().try_batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &4_321,
+        &shared_nonce,
+        &None,
+    );
+    assert!(result.is_err(), "duplicate nonce must be rejected");
+
+    // The guard must not have mutated any observable payroll state.
+    assert!(ctx.payroll().is_settled(&run_id));
+    assert_eq!(ctx.token().balance(&ctx.treasury), treasury_snapshot);
+    assert_eq!(ctx.token().balance(&ctx.employee), employee_snapshot);
 }

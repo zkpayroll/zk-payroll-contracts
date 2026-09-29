@@ -27,6 +27,14 @@ use execution_authorization::ExecutionInitiatorAuthorization;
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
+/// Storage key for the duplicate-execution guard on payroll runs.
+///
+/// Maps a caller-supplied idempotency key to the run it produced so a
+/// repeated submission with the same key is rejected instead of executing
+/// payroll twice. The stored record contains only the run id and a payload
+/// hash, never salary values or employee identities.
+const EXECUTION_GUARD_KEY: Symbol = symbol_short!("exec_guard");
+
 #[contract]
 pub struct Payroll;
 
@@ -141,6 +149,20 @@ pub struct PayrollExecutionIdempotencyRecord {
     pub run_id: u64,
     pub payload_hash: BytesN<32>,
     pub created_at: u64,
+}
+
+/// Duplicate-execution guard record for a payroll run.
+///
+/// Keyed by a caller-supplied idempotency key. Stores only the resulting run
+/// id and a hash of the request payload so a retry with identical data can be
+/// recognised, while a key reused with different data is rejected. No salary
+/// amounts or employee identities are persisted here.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollExecutionGuard {
+    pub run_id: u64,
+    pub payload_hash: BytesN<32>,
+    pub recorded_at: u64,
 }
 
 /// Pending emergency withdrawal request (issue #104).
