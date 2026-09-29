@@ -153,6 +153,15 @@ than failing CI.
 
 ## Privacy: do not put secrets in environment variables
 
+### Employer-scoped import references
+
+External employee reference IDs are indexed within the salary commitment
+contract instance, which is the employer payroll scope. Duplicate IDs assigned
+to two employees in that scope are rejected with a generic error. Updating an
+employee's ID releases the old ID for reassignment. Keep these IDs
+non-sensitive (for example, an HR employee code); rejected calls do not include
+the submitted ID or any salary or employee data in their error message.
+
 Never export the following into shell history, CI logs, or `.env` files checked
 into git:
 
@@ -162,6 +171,79 @@ into git:
 
 On-chain events and commitments expose **Poseidon hashes only** — salary values
 are not recoverable from environment configuration or emitted event payloads.
+
+---
+
+## Commitment rotation controls (`salary_commitment` — issue #520)
+
+A payroll run locks each employee's commitment when it executes, so the value a
+settled payroll record was paid against cannot be silently changed afterwards.
+That protection also means a routine compensation change (raise, bonus,
+correction) after a settlement used to have no supported path: the admin had to
+`unlock_commitment_updates` first, leaving the approved binding unprotected
+between two separate transactions.
+
+`rotate_approved_commitment` rotates a locked commitment in a single authorized
+call and **keeps the lock in place**.
+
+### Entry-points
+
+| Entry-point | Commitment state | Lock after call | Use case |
+|-------------|------------------|-----------------|----------|
+| `rotate_commitment` | unlocked | unchanged (stays unlocked) | Pre-approval compensation change |
+| `rotate_approved_commitment` | locked (approved / settled) | **retained** | Post-settlement compensation change |
+| `can_rotate_approved_commitment` | — | — | Read-only: would the rotation succeed now? |
+
+### Why the settled record stays valid
+
+- The outgoing commitment value is archived into the employee's
+  `CommitmentHistory`, so it remains queryable via `get_commitment_history`.
+- Retired values stay permanently reserved (issue #242): a value that has ever
+  been bound to an employee can never be re-bound, so a settled payroll record
+  always resolves to exactly one commitment revision.
+- `version` keeps increasing monotonically across both rotations and updates,
+  so audit tooling can order commitment revisions.
+
+### Invoking it
+
+```bash
+stellar contract invoke \
+  --id "$COMMITMENT_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- rotate_approved_commitment \
+  --employee "$EMPLOYEE_ADDR" \
+  --new_commitment "$NEW_COMMITMENT_HEX"
+```
+
+### Error reference
+
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `"Commitment is not locked: use rotate_commitment to rotate an unlocked commitment"` | No approved/settled payroll run is bound to this commitment | Use `rotate_commitment` |
+| `"Commitment not found"` | The employee has no stored commitment | `store_commitment` first |
+| `"New commitment must differ from the current commitment"` | No-op rotation (the new value equals the active one) | Generate a fresh commitment off-chain |
+| `"Commitment already in use: ..."` | The new value is already bound to an employee, active or archived | Generate a fresh commitment; retired values are never released |
+| Host `authorized` failure | Not signed by the commitment admin | Sign with the admin from `get_commitment_admin` |
+
+All error messages are privacy-safe: they never echo commitment values, salary
+amounts, blinding factors, or employee details beyond the address the admin
+already supplied.
+
+### Manual QA (success path and edge case)
+
+1. **Success path** — store a commitment, `lock_commitment_updates`, then
+   `rotate_approved_commitment`: `get_commitment` returns the new value with an
+   incremented `version` and `revoked = false`, `is_commitment_locked` is still
+   `true`, and `get_commitment_history` contains the retired value.
+2. **Edge case** — call `rotate_approved_commitment` with the *current* value:
+   the call fails with `"New commitment must differ from the current
+   commitment"` and the stored commitment, version, lock, and history are all
+   unchanged.
+
+```bash
+cargo test -p salary_commitment rotate_approved_commitment
+```
 
 ---
 
@@ -256,6 +338,132 @@ Three token transfers are issued from the company treasury:
 | `InvalidWithholdingRate` | 14 | Combined bps > 10 000 or negative cap/floor. |
 | `NetAmountBelowMinimum` | 15 | Net after deductions < `min_net_per_payment`. |
 | `GrossAmountExceedsCap` | 16 | Gross amount > `max_gross_per_payment`. |
+
+---
+
+## Payout batch size limits (issue #510)
+
+`execute_batch_payroll` enforces a configurable per-company ceiling on the
+number of employees in a single batch. This prevents oversized payroll
+submissions from exhausting on-chain resources and causing unintended
+cost spikes.
+
+### Hard cap
+
+The contract always enforces a hard ceiling of **100 employees per batch**
+(`MAX_PAYOUT_BATCH_SIZE`). This cap applies even when no per-company policy
+has been configured. It cannot be raised via any admin call.
+
+### Per-company policy
+
+The executor admin can set a tighter limit per company:
+
+```bash
+stellar contract invoke \
+  --id "$EXECUTOR_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- set_max_batch_size \
+    --company_id 0 \
+    --max_size 25
+```
+
+Read the current effective limit back:
+
+```bash
+stellar contract invoke \
+  --id "$EXECUTOR_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- get_max_batch_size \
+    --company_id 0
+```
+
+| Field | Description |
+|-------|-------------|
+| `company_id` | Numeric company ID (returned by `register_company`). |
+| `max_size` | Maximum employees per batch (1–100 inclusive). |
+
+### Behaviour
+
+- When no policy is configured the effective limit is the hard cap (100).
+- `max_size = 0` is rejected; `max_size > 100` is rejected.
+- Limits are scoped per company; changing one company's limit does not
+  affect another.
+- Batches that exceed the limit are rejected immediately with
+  `PaymentError::BatchTooLarge` (error code 18). The error carries no
+  employee addresses or salary amounts, keeping failure paths privacy-safe.
+- `execute_batch_payroll_with_receipt` enforces the same limit as
+  `execute_batch_payroll`.
+
+### Error reference
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `BatchTooLarge` | 18 | Employee count exceeds the configured or default batch size limit. |
+
+---
+
+## Minimum payout amount threshold (issue #514)
+
+The payroll contract enforces a configurable minimum payout amount threshold for individual payments in a payroll batch. This guardrail prevents accidental or malicious payments below a policy floor while preserving backward compatibility when no threshold is set.
+
+### Overview
+
+The minimum payout threshold is a per-company configuration that applies to each individual payout amount in a batch. The check runs before proof verification and treasury transfers, so violations are caught early without consuming gas for expensive operations.
+
+### Setting the threshold (payroll admin only)
+
+```bash
+stellar contract invoke \
+  --id "$PAYROLL_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- set_minimum_payout_amount \
+    --minimum_amount 1000000
+```
+
+Read the current threshold back:
+
+```bash
+stellar contract invoke \
+  --id "$PAYROLL_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- get_minimum_payout_amount
+```
+
+| Field | Description |
+|-------|-------------|
+| `minimum_amount` | Minimum allowed payout amount (in smallest token units). Set to `0` to disable enforcement. |
+
+### Behaviour
+
+- **Default**: When no threshold is configured, the effective minimum is `0` (disabled). Existing deployments and workflows continue unchanged.
+- **Inclusive boundary**: Payouts with `amount >= minimum_amount` succeed. Payouts with `amount < minimum_amount` are rejected.
+- **Scope**: The threshold applies to each individual payout in a batch, not to the batch total.
+- **Authorization**: Only the configured payroll admin may set or update the threshold.
+- **Negative values**: Setting a negative threshold is rejected with a panic.
+- **Disabling**: Set `minimum_amount = 0` to disable enforcement while keeping the getter available for inspection.
+
+### Privacy-safe failure handling
+
+When a batch contains an amount below the threshold:
+
+- The entire batch is rejected with the generic panic message: `Payout amount below minimum threshold`
+- The emitted `min_payout_violation` event contains only the configured threshold value
+- The actual payout amount, employee address, and proof contents are **not** exposed in errors or events
+- The dry-run preflight (`dry_run_batch_process_payroll`) returns `PayrollFailureReason::AmountBelowMinimum` (code 17) without revealing which specific payout violated the threshold
+
+### Dry-run preflight integration
+
+Off-chain clients can call `dry_run_batch_process_payroll` before submitting a real batch. If any payout is below the threshold, the returned `PayrollDryRunReport` includes `AmountBelowMinimum` in its `blockers` list, allowing dashboards to surface actionable feedback without displaying sensitive payroll values.
+
+### Error reference
+
+| Failure Reason | Code | Meaning |
+|----------------|------|---------|
+| `AmountBelowMinimum` | 17 | One or more payout amounts is below the configured minimum threshold. |
 
 ---
 

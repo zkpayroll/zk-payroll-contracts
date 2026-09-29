@@ -1,7 +1,7 @@
-//! Tests for employee onboarding duplicate reference validation (Issue #440).
+//! Tests for employer-scoped employee import reference validation (Issues #440, #524).
 //!
 //! Verifies that:
-//! 1. Duplicate employee onboarding references for the same employer are strictly rejected.
+//! 1. Duplicate employee import references in the same employer scope are strictly rejected.
 //! 2. Rejection preserves original reference mappings and avoids state corruption.
 //! 3. Distinct references allow smooth subsequent onboarding of other employees.
 //! 4. Same-employee reference rotation / update is supported, freeing the previous reference.

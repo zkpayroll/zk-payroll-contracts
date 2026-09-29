@@ -15,7 +15,15 @@ fn mock_vk(env: &Env) -> VerificationKey {
         beta: BytesN::from_array(env, &[0u8; 128]),
         gamma: BytesN::from_array(env, &[0u8; 128]),
         delta: BytesN::from_array(env, &[0u8; 128]),
-        ic: Vec::from_array(env, [BytesN::from_array(env, &[0u8; 64]), BytesN::from_array(env, &[0u8; 64]), BytesN::from_array(env, &[0u8; 64]), BytesN::from_array(env, &[0u8; 64])]),
+        ic: Vec::from_array(
+            env,
+            [
+                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[0u8; 64]),
+            ],
+        ),
     }
 }
 
@@ -32,7 +40,14 @@ fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address) {
     let payroll_id = env.register_contract(None, Payroll);
     let payroll_client = PayrollClient::new(env, &payroll_id);
     let admin = Address::generate(env);
-    payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &Address::generate(env), &Address::generate(env));
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &Address::generate(env),
+        &Address::generate(env),
+    );
     (payroll_client, admin)
 }
 
@@ -50,8 +65,13 @@ fn test_draft_updated_event_snapshot_includes_period_and_update_counts() {
     let topic: Symbol = event.1.get(1).unwrap().try_into_val(&env).unwrap();
     assert_eq!(topic, Symbol::new(&env, "draft_updated"));
 
-    let (emitted_draft_id, emitted_period, total, employee_count, amendment_count): (u64, Symbol, i128, u32, u32) =
-        event.2.try_into_val(&env).unwrap();
+    let (emitted_draft_id, emitted_period, total, employee_count, amendment_count): (
+        u64,
+        Symbol,
+        i128,
+        u32,
+        u32,
+    ) = event.2.try_into_val(&env).unwrap();
     assert_eq!(emitted_draft_id, draft_id);
     assert_eq!(emitted_period, period);
     assert_eq!(total, 12_500i128);

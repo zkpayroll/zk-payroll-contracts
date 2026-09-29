@@ -50,7 +50,13 @@ fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &arr)
 }
 
-fn setup_test_contracts(env: &Env) -> (PayrollClient<'static>, PaymentExecutorClient<'static>, AuditModuleClient<'static>) {
+fn setup_test_contracts(
+    env: &Env,
+) -> (
+    PayrollClient<'static>,
+    PaymentExecutorClient<'static>,
+    AuditModuleClient<'static>,
+) {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
@@ -120,10 +126,7 @@ fn test_non_admin_cannot_prepare_payroll() {
         invoke: &MockAuthInvoke {
             contract: &env.current_contract_address(),
             fn_name: "prepare_payroll_run",
-            args: (
-                &[],
-                &[] as &[soroban_sdk::Val],
-            ).into_val(&env),
+            args: (&[], &[] as &[soroban_sdk::Val]).into_val(&env),
             sub_invokes: &[],
         },
     }]);
@@ -316,7 +319,13 @@ fn test_non_admin_cannot_place_compliance_hold() {
         invoke: &MockAuthInvoke {
             contract: &payroll_id,
             fn_name: "place_compliance_hold",
-            args: (&non_admin, &Address::generate(&env), &0u32, &Symbol::new(&env, "test")).into_val(&env),
+            args: (
+                &non_admin,
+                &Address::generate(&env),
+                &0u32,
+                &Symbol::new(&env, "test"),
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);

@@ -1,26 +1,26 @@
 //! Audit trail for payroll configuration changes (issue #490).
-//!
-//! Every successful change to a payroll configuration setting goes through
-//! [`record_config_change`], which bumps a contract-wide configuration
-//! revision and publishes exactly one `ConfigChanged` event:
-//!
-//! ```text
-//! topics = ( Symbol("payroll"), Symbol("config_changed"), Symbol(<config key>) )
-//! data   = ( actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp )
-//! ```
-//!
-//! Configuration values are never published in plaintext. A value is
-//! referenced by `sha256(value.to_xdr())` of its canonical XDR encoding, so an
-//! auditor can check a change against the value read back from contract
-//! storage and chain successive changes to the same setting (`previous_ref`
-//! of one change equals `new_ref` of the change before it).
-//!
-//! A change that leaves the stored value byte-for-byte identical is a no-op:
-//! the setter keeps its existing behaviour, but no audit event is published
-//! and the revision is not bumped. Failed calls revert, so they publish
-//! nothing either.
-//!
-//! See `docs/config-audit-events.md` for the full schema and how to verify it.
+//
+// Every successful change to a payroll configuration setting goes through
+// [`record_config_change`], which bumps a contract-wide configuration
+// revision and publishes exactly one `ConfigChanged` event:
+//
+// ```text
+// topics = ( Symbol("payroll"), Symbol("config_changed"), Symbol(<config key>) )
+// data   = ( actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp )
+// ```
+//
+// Configuration values are never published in plaintext. A value is
+// referenced by `sha256(value.to_xdr())` of its canonical XDR encoding, so an
+// auditor can check a change against the value read back from contract
+// storage and chain successive changes to the same setting (`previous_ref`
+// of one change equals `new_ref` of the change before it).
+//
+// A change that leaves the stored value byte-for-byte identical is a no-op:
+// the setter keeps its existing behaviour, but no audit event is published
+// and the revision is not bumped. Failed calls revert, so they publish
+// nothing either.
+//
+// See `docs/config-audit-events.md` for the full schema and how to verify it.
 
 use payroll_events::ConfigChanged;
 use soroban_sdk::xdr::ToXdr;
@@ -57,6 +57,11 @@ pub mod config_keys {
     /// `add_reviewer` / `remove_reviewer` — subject: reviewer; value: `bool`
     /// (absent once removed).
     pub const REVIEWER: &str = "reviewer";
+    /// `set_max_reviewers` — value: `u32` (issue #539).
+    pub const MAX_REVIEWERS: &str = "max_reviewers";
+    /// `register_operator_key` / `revoke_operator_key` — value: operator
+    /// ed25519 public key (absent once revoked) (issue #519).
+    pub const OPERATOR_KEY: &str = "operator_key";
     /// `set_reservation_expiry_policy` — subject: asset; value:
     /// `ReservationExpiry`.
     pub const RESERVATION_EXPIRY: &str = "reservation_expiry";
@@ -69,6 +74,8 @@ pub mod config_keys {
     pub const ADMIN: &str = "admin";
     /// `accept_treasury_rotation` — value: treasury owner `Address`.
     pub const TREASURY_OWNER: &str = "treasury_owner";
+    /// `set_organization_policy` — value: `OrganizationPolicy`.
+    pub const ORGANIZATION_POLICY: &str = "organization_policy";
 }
 
 /// `sha256(value.to_xdr())`: the reference published for a configuration
@@ -104,8 +111,8 @@ pub(crate) fn config_revision(e: &Env) -> u64 {
 /// Record a successful configuration change: bump the revision and publish
 /// one `ConfigChanged` event. Call it after the new value has been written
 /// and only from a setter that has already authorized `actor`.
-///
-/// Does nothing when `previous_ref == new_ref` (no-op change).
+//
+// Does nothing when `previous_ref == new_ref` (no-op change).
 pub(crate) fn record_config_change(
     e: &Env,
     actor: &Address,

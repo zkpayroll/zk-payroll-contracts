@@ -444,13 +444,17 @@ mod e2e {
 
         // ── Onboard Alice normally ───────────────────────────────────────────
         let commitment = alice_salary_commitment(&ctx.commitment_client);
-        ctx.commitment_client.store_commitment(&ctx.alice, &commitment);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &commitment);
         ctx.registry_client
             .add_employee(&ctx.company_id, &ctx.alice, &commitment);
 
         // ── Deactivate Alice in the registry ─────────────────────────────────
-        ctx.registry_client
-            .set_employee_status(&ctx.company_id, &ctx.alice, &payroll_registry::EmployeeStatus::Inactive);
+        ctx.registry_client.set_employee_status(
+            &ctx.company_id,
+            &ctx.alice,
+            &payroll_registry::EmployeeStatus::Inactive,
+        );
 
         // Verify the registry correctly marks her as ineligible.
         assert!(
@@ -496,14 +500,21 @@ mod e2e {
         let events = env.events().all();
         // Expected events: CompanyRegistered, CommitmentUpdated, EmployeeAdded,
         //   payment_executed, run_executed  (= 5 events total)
-        assert_eq!(events.len(), 5, "GAP: payment_executed event emitted for inactive employee");
+        assert_eq!(
+            events.len(),
+            5,
+            "GAP: payment_executed event emitted for inactive employee"
+        );
 
         let topics3 = events.get(3).unwrap().1;
         let evt_sym0: Symbol = topics3.get(0).unwrap().try_into_val(&env.clone()).unwrap();
         assert_eq!(evt_sym0, Symbol::new(env, "payroll"));
         let evt_sym1: Symbol = topics3.get(1).unwrap().try_into_val(&env.clone()).unwrap();
-        assert_eq!(evt_sym1, Symbol::new(env, "payment_executed"),
-            "GAP: payment_executed event fired for inactive employee");
+        assert_eq!(
+            evt_sym1,
+            Symbol::new(env, "payment_executed"),
+            "GAP: payment_executed event fired for inactive employee"
+        );
     }
 
     /// Tests the full proof-generation pipeline using a dynamically generated proof.

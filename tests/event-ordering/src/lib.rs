@@ -173,9 +173,11 @@ fn payroll_events_follow_lifecycle_order() {
         env,
         [
             Symbol::new(env, "run_prepared"),
+            Symbol::new(env, "treasury_balance_snapshot"),
             Symbol::new(env, "run_approved"),
             Symbol::new(env, "payment_executed"),
             Symbol::new(env, "run_executed"),
+            Symbol::new(env, "treasury_balance_snapshot"),
             Symbol::new(env, "reconciliation_updated"),
         ],
     );

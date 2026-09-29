@@ -155,7 +155,7 @@ fn employer_onboarding_event_order_is_stable() {
         payroll_events::emit_employee_added(&env, company_id, employee, commitment);
     });
 
-    let events = env.events().all().events().to_vec();
+    let events = env.events().all();
     assert_eq!(
         events.len(),
         3,

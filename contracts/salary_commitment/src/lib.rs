@@ -264,13 +264,15 @@ impl SalaryCommitmentContract {
         updated
     }
 
-    /// Rotate a salary commitment: archive the old one with `revoked = true`
-    /// and store the new one. Old commitments CANNOT be used for future payroll
-    /// proofs (see `is_commitment_active`).
+    /// Rotate a salary commitment: archive the old one and store the new one.
+    /// Old commitments CANNOT be used for future payroll proofs (see
+    /// `is_commitment_active`).
     /// Only the HR admin may call.
     ///
     /// Fails if the employee's commitment is currently locked (see
-    /// `lock_commitment_updates` / `unlock_commitment_updates`).
+    /// `lock_commitment_updates` / `unlock_commitment_updates`). To rotate a
+    /// locked commitment without dropping its lock, use
+    /// `rotate_approved_commitment`.
     pub fn rotate_commitment(
         env: Env,
         employee: Address,
@@ -280,25 +282,12 @@ impl SalaryCommitmentContract {
         Self::require_admin(&env);
 
         if Self::is_commitment_locked(env.clone(), employee.clone()) {
-            panic!("Commitment is locked: cannot rotate until unlocked by admin");
+            panic!("Commitment is locked: cannot rotate until unlocked by admin (or use rotate_approved_commitment to rotate it in place)");
         }
 
-        let key = DataKey::Commitment(employee.clone());
-        let mut existing: SalaryCommitment = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .expect("Commitment not found");
+        let existing: SalaryCommitment = Self::load_commitment(&env, &employee);
 
-        // Mark active commitment as revoked
-        existing.revoked = true;
-        env.storage().persistent().set(&key, &existing);
-
-        // Archive the revoked commitment
-        Self::archive_commitment(&env, &employee, &existing.commitment, existing.version);
-
-        // Store the new active commitment
-        let rotated = Self::store_commitment(env.clone(), employee.clone(), new_commitment);
+        let rotated = Self::apply_rotation(&env, &employee, &existing, &new_commitment);
 
         // Emit an explicit rotation event
         payroll_events::emit_commitment_rotated(
@@ -309,6 +298,88 @@ impl SalaryCommitmentContract {
         );
 
         rotated
+    }
+
+    /// Rotate a commitment that is currently **locked** (issue #520).
+    ///
+    /// `payroll` locks an employee's commitment when a payroll run executes
+    /// against it, so the commitment value that the settled payroll record
+    /// refers to cannot be silently changed afterwards. That also means a
+    /// routine compensation change (raise, bonus, correction) after a
+    /// settlement had no supported path: the admin had to unlock first, which
+    /// left the approved binding unprotected for as long as the two calls were
+    /// separate transactions.
+    ///
+    /// This entry-point performs the rotation in a single authorized call and
+    /// deliberately **keeps the lock in place**, so:
+    ///
+    /// - the previous commitment value is archived in `CommitmentHistory` and
+    ///   stays permanently reserved (#242), which keeps every settled payroll
+    ///   record attributable to the commitment it was paid against;
+    /// - the `version` counter keeps increasing monotonically, so audit
+    ///   tooling can order commitment revisions;
+    /// - the approved/settled binding is still enforced after the rotation.
+    ///
+    /// Only the HR admin may call.
+    ///
+    /// # Panics
+    /// - `"Commitment is not locked: use rotate_commitment to rotate an
+    ///   unlocked commitment"` when the employee's commitment is not locked.
+    /// - `"Commitment not found"` when the employee has no stored commitment.
+    /// - `"New commitment must differ from the current commitment"` when the
+    ///   new value equals the current one (no-op rotation).
+    /// - `"Commitment already in use: commitments must be unique across
+    ///   employees and payroll runs"` when the new value was already bound to
+    ///   any employee (#242).
+    ///
+    /// All failure messages are privacy-safe: they never include the
+    /// commitment values, salaries, or blinding factors.
+    pub fn rotate_approved_commitment(
+        env: Env,
+        employee: Address,
+        new_commitment: BytesN<32>,
+    ) -> SalaryCommitment {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        // Only a locked (approved / already settled) commitment may take this
+        // path; unlocked commitments keep using `rotate_commitment` so the two
+        // operations stay distinguishable in the audit trail.
+        if !Self::is_commitment_locked(env.clone(), employee.clone()) {
+            panic!(
+                "Commitment is not locked: use rotate_commitment to rotate an unlocked commitment"
+            );
+        }
+
+        let existing: SalaryCommitment = Self::load_commitment(&env, &employee);
+
+        // Reject no-op rotations before the uniqueness check, which would
+        // otherwise report the employee's own current value as "already in
+        // use" and send the caller looking in the wrong direction.
+        if existing.commitment == new_commitment {
+            panic!("New commitment must differ from the current commitment");
+        }
+
+        let rotated = Self::apply_rotation(&env, &employee, &existing, &new_commitment);
+
+        // The lock is intentionally left in place: the settlement that caused
+        // it must stay bound to its recorded commitment.
+        payroll_events::emit_commitment_approved_rotated(
+            &env,
+            employee,
+            existing.commitment,
+            rotated.commitment.clone(),
+        );
+
+        rotated
+    }
+
+    /// Whether `rotate_approved_commitment` would currently succeed for
+    /// `employee`: the employee must have an active, locked commitment.
+    /// Privacy-safe read-only view (no salary or commitment values returned).
+    pub fn can_rotate_approved_commitment(env: Env, employee: Address) -> bool {
+        Self::is_commitment_active(env.clone(), employee.clone())
+            && Self::is_commitment_locked(env, employee)
     }
 
     /// Check whether a commitment is currently active (not revoked).
@@ -360,8 +431,141 @@ impl SalaryCommitmentContract {
         env.storage().persistent().has(&key)
     }
 
+    /// Normalize an employee reference identifier according to standard rules (#544).
+    ///
+    /// Rules applied:
+    /// 1. Trims leading and trailing whitespace (spaces, tabs, newlines, carriage returns).
+    /// 2. Converts ASCII lowercase letters to uppercase for canonical matching.
+    /// 3. Validates length is between 1 and 256 characters after trimming.
+    /// 4. Validates that the identifier contains only printable ASCII characters (32..=126).
+    /// 5. Rejects empty or all-whitespace strings.
+    ///
+    /// Privacy-safe: operates strictly on opaque reference identifier strings without
+    /// exposing or logging salary amounts or cryptographic blinding factors.
+    ///
+    /// # Panics
+    /// - Panics with `"Reference ID must be 1-256 characters"` if empty, all-whitespace, or > 256 chars.
+    /// - Panics with `"Employee identifier contains invalid characters: must be printable ASCII"` if non-printable.
+    pub fn normalize_employee_identifier(env: Env, identifier: soroban_sdk::String) -> soroban_sdk::String {
+        Self::normalize_employee_identifier_internal(&env, &identifier)
+    }
+
+    /// Internal helper that normalizes an employee reference identifier.
+    fn normalize_employee_identifier_internal(
+        env: &Env,
+        identifier: &soroban_sdk::String,
+    ) -> soroban_sdk::String {
+        let raw_len = identifier.len() as usize;
+        if raw_len == 0 || raw_len > 512 {
+            panic!("Reference ID must be 1-256 characters");
+        }
+
+        let mut buf = [0u8; 512];
+        identifier.copy_into_slice(&mut buf[..raw_len]);
+        let slice = &buf[..raw_len];
+
+        let mut start = 0;
+        while start < raw_len
+            && (slice[start] == b' '
+                || slice[start] == b'\t'
+                || slice[start] == b'\n'
+                || slice[start] == b'\r')
+        {
+            start += 1;
+        }
+
+        let mut end = raw_len;
+        while end > start
+            && (slice[end - 1] == b' '
+                || slice[end - 1] == b'\t'
+                || slice[end - 1] == b'\n'
+                || slice[end - 1] == b'\r')
+        {
+            end -= 1;
+        }
+
+        let trimmed_len = end - start;
+        if trimmed_len == 0 || trimmed_len > 256 {
+            panic!("Reference ID must be 1-256 characters");
+        }
+
+        let mut out_buf = [0u8; 256];
+        for i in 0..trimmed_len {
+            let b = slice[start + i];
+            if b < 32 || b > 126 {
+                panic!("Employee identifier contains invalid characters: must be printable ASCII");
+            }
+            out_buf[i] = if b.is_ascii_lowercase() {
+                b - 32
+            } else {
+                b
+            };
+        }
+
+        let normalized_str = core::str::from_utf8(&out_buf[..trimmed_len])
+            .expect("normalized employee identifier is valid UTF-8");
+        soroban_sdk::String::from_str(env, normalized_str)
+    }
+
+    /// Try normalizing an identifier for read-only lookups, returning None if invalid.
+    fn try_normalize_employee_identifier_internal(
+        env: &Env,
+        identifier: &soroban_sdk::String,
+    ) -> Option<soroban_sdk::String> {
+        let raw_len = identifier.len() as usize;
+        if raw_len == 0 || raw_len > 512 {
+            return None;
+        }
+
+        let mut buf = [0u8; 512];
+        identifier.copy_into_slice(&mut buf[..raw_len]);
+        let slice = &buf[..raw_len];
+
+        let mut start = 0;
+        while start < raw_len
+            && (slice[start] == b' '
+                || slice[start] == b'\t'
+                || slice[start] == b'\n'
+                || slice[start] == b'\r')
+        {
+            start += 1;
+        }
+
+        let mut end = raw_len;
+        while end > start
+            && (slice[end - 1] == b' '
+                || slice[end - 1] == b'\t'
+                || slice[end - 1] == b'\n'
+                || slice[end - 1] == b'\r')
+        {
+            end -= 1;
+        }
+
+        let trimmed_len = end - start;
+        if trimmed_len == 0 || trimmed_len > 256 {
+            return None;
+        }
+
+        let mut out_buf = [0u8; 256];
+        for i in 0..trimmed_len {
+            let b = slice[start + i];
+            if b < 32 || b > 126 {
+                return None;
+            }
+            out_buf[i] = if b.is_ascii_lowercase() {
+                b - 32
+            } else {
+                b
+            };
+        }
+
+        let normalized_str = core::str::from_utf8(&out_buf[..trimmed_len]).ok()?;
+        Some(soroban_sdk::String::from_str(env, normalized_str))
+    }
+
     /// Set an external reference ID (e.g., HR system employee ID) for an employee.
     /// Only the HR admin may call. Reference IDs must be unique (no collisions).
+    /// Applies employee identifier normalization rules (#544).
     /// Non-sensitive IDs only (e.g., "EMP12345", not salary or bank account).
     pub fn set_employee_reference_id(
         env: Env,
@@ -371,13 +575,11 @@ impl SalaryCommitmentContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
-        // Validate reference ID is not empty and reasonable length (< 256 chars)
-        if reference_id.is_empty() || reference_id.len() > 256 {
-            panic!("Reference ID must be 1-256 characters");
-        }
+        let normalized_id = Self::normalize_employee_identifier_internal(&env, &reference_id);
 
         // Check if this reference ID is already assigned to a different employee
-        let index_key = DataKey::ReferenceIdIndex(reference_id.clone());
+        // in this employer's salary commitment contract (the payroll scope).
+        let index_key = DataKey::ReferenceIdIndex(normalized_id.clone());
         if let Some(existing_employee) = env
             .storage()
             .persistent()
@@ -395,7 +597,7 @@ impl SalaryCommitmentContract {
             .persistent()
             .get::<DataKey, soroban_sdk::String>(&employee_key)
         {
-            if old_ref_id != reference_id {
+            if old_ref_id != normalized_id {
                 // Remove old reverse mapping
                 env.storage()
                     .persistent()
@@ -403,11 +605,11 @@ impl SalaryCommitmentContract {
             }
         }
 
-        // Store both forward and reverse mappings
-        env.storage().persistent().set(&employee_key, &reference_id);
+        // Store both forward and reverse mappings using canonical normalized form
+        env.storage().persistent().set(&employee_key, &normalized_id);
         env.storage().persistent().set(&index_key, &employee);
 
-        payroll_events::emit_reference_id_set(&env, employee, reference_id);
+        payroll_events::emit_reference_id_set(&env, employee, normalized_id);
     }
 
     /// Get the external reference ID for an employee (if set).
@@ -417,15 +619,14 @@ impl SalaryCommitmentContract {
     }
 
     /// Get the employee address associated with a reference ID (for lookups).
-    /// Returns None if no employee is associated with this ID.
+    /// Normalizes the lookup identifier so mixed-case or padded queries resolve (#544).
+    /// Returns None if no employee is associated with this ID or if invalid.
     pub fn get_employee_by_reference_id(
         env: Env,
         reference_id: soroban_sdk::String,
     ) -> Option<Address> {
-        if reference_id.is_empty() || reference_id.len() > 256 {
-            return None;
-        }
-        let key = DataKey::ReferenceIdIndex(reference_id);
+        let normalized_id = Self::try_normalize_employee_identifier_internal(&env, &reference_id)?;
+        let key = DataKey::ReferenceIdIndex(normalized_id);
         env.storage().persistent().get(&key)
     }
 
@@ -627,6 +828,55 @@ impl SalaryCommitmentContract {
         }
     }
 
+    /// Load the active commitment record for an employee.
+    fn load_commitment(env: &Env, employee: &Address) -> SalaryCommitment {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Commitment(employee.clone()))
+            .expect("Commitment not found")
+    }
+
+    /// Shared rotation body for `rotate_commitment` and
+    /// `rotate_approved_commitment` (issue #520).
+    ///
+    /// Reserves the incoming value, archives the outgoing one into the
+    /// employee's history, and writes the new active record with a
+    /// monotonically increasing `version`. The caller's lock state is not
+    /// touched here — that is the difference between the two entry-points.
+    fn apply_rotation(
+        env: &Env,
+        employee: &Address,
+        previous: &SalaryCommitment,
+        new_commitment: &BytesN<32>,
+    ) -> SalaryCommitment {
+        // #242: the retired value stays permanently reserved, so a settled
+        // payroll record can always be matched to the commitment it used and
+        // the value can never be re-bound to another employee.
+        Self::register_commitment_uniqueness(env, new_commitment);
+
+        // Archive the previous commitment so it remains auditable.
+        Self::archive_commitment(env, employee, &previous.commitment, previous.version);
+
+        let timestamp = env.ledger().timestamp();
+        let rotated = SalaryCommitment {
+            commitment: new_commitment.clone(),
+            created_at: timestamp,
+            updated_at: timestamp,
+            // Versions increase monotonically across updates *and* rotations
+            // so audit tooling can order commitment revisions.
+            version: previous.version.saturating_add(1),
+            revoked: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Commitment(employee.clone()), &rotated);
+
+        payroll_events::emit_commitment_stored(env, employee.clone(), new_commitment.clone());
+
+        rotated
+    }
+
     /// Reject a commitment value that has already been bound to any
     /// employee (active or archived) and register it as used (issue #242).
     fn register_commitment_uniqueness(env: &Env, commitment: &BytesN<32>) {
@@ -787,7 +1037,10 @@ mod tests {
             }
         }
         assert!(found_symbol, "PayrollOperatorRemoved event not emitted");
-        assert!(found_operator, "Removed operator address not present in event data");
+        assert!(
+            found_operator,
+            "Removed operator address not present in event data"
+        );
     }
 
     /// A commitment value that was rotated out (archived) can never be
@@ -1249,6 +1502,155 @@ mod tests {
         client.set_payroll_operator(&operator);
     }
 
+    // ── Issue #520: commitment rotation controls ─────────────────────────────
+
+    /// Main path: a commitment that was approved (locked) by a settled payroll
+    /// run can be rotated in a single admin call, without dropping the lock and
+    /// without invalidating the settled record. The settled record refers to the
+    /// commitment value that was active when payroll executed, so that value
+    /// must remain in the rotation history and permanently reserved (#242).
+    #[test]
+    fn test_rotate_approved_commitment_keeps_lock_and_history() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let approved = BytesN::from_array(&env, &[31u8; 32]);
+        let replacement = BytesN::from_array(&env, &[32u8; 32]);
+
+        client.store_commitment(&employee, &approved);
+        // Payroll execution locks the commitment (#178) — this is the
+        // "approved payroll commitment" case.
+        client.lock_commitment_updates(&employee);
+        assert!(client.can_rotate_approved_commitment(&employee));
+
+        let rotated = client.rotate_approved_commitment(&employee, &replacement);
+
+        // The new commitment is active and the version advanced monotonically.
+        assert_eq!(rotated.commitment, replacement);
+        assert!(!rotated.revoked);
+        assert_eq!(rotated.version, 2);
+        assert!(client.is_commitment_active(&employee));
+
+        // The settled record stays attributable: the approved value is retained
+        // in history and is still the value the payroll run was paid against.
+        let history = client.get_commitment_history(&employee);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().commitment, approved);
+        assert_eq!(history.get(0).unwrap().version, 1);
+
+        // The approved binding is still enforced after the rotation.
+        assert!(client.is_commitment_locked(&employee));
+        assert!(client
+            .try_update_commitment(&employee, &replacement)
+            .is_err());
+    }
+
+    /// Edge case: a no-op rotation is rejected with an actionable message and
+    /// leaves the approved commitment completely untouched. Without the
+    /// explicit guard this would surface as the misleading "already in use"
+    /// uniqueness error, because the employee's own current value is, by
+    /// construction, already reserved.
+    #[test]
+    fn test_rotate_approved_commitment_rejects_noop() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let approved = BytesN::from_array(&env, &[33u8; 32]);
+
+        client.store_commitment(&employee, &approved);
+        client.lock_commitment_updates(&employee);
+
+        let result = client.try_rotate_approved_commitment(&employee, &approved);
+        assert!(result.is_err(), "No-op rotation must be rejected");
+
+        // State is unchanged: still the approved value, still version 1, still
+        // locked, and no history entry was written.
+        let current = client.get_commitment(&employee);
+        assert_eq!(current.commitment, approved);
+        assert_eq!(current.version, 1);
+        assert!(!current.revoked);
+        assert!(client.is_commitment_locked(&employee));
+        assert!(client.get_commitment_history(&employee).is_empty());
+    }
+
+    /// An unlocked commitment must keep using `rotate_commitment`; the
+    /// approved-rotation path is rejected so the audit trail stays
+    /// unambiguous.
+    #[test]
+    #[should_panic(expected = "Commitment is not locked")]
+    fn test_rotate_approved_commitment_rejects_unlocked() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let current = BytesN::from_array(&env, &[34u8; 32]);
+        let replacement = BytesN::from_array(&env, &[35u8; 32]);
+
+        client.store_commitment(&employee, &current);
+        assert!(!client.can_rotate_approved_commitment(&employee));
+
+        client.rotate_approved_commitment(&employee, &replacement);
+    }
+
+    /// Rotating an approved commitment onto a value that is already bound to
+    /// another employee is still rejected (#242) — the settled record for that
+    /// other employee must keep its own value.
+    #[test]
+    #[should_panic(expected = "Commitment already in use")]
+    fn test_rotate_approved_commitment_rejects_value_in_use_elsewhere() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee_a = Address::generate(&env);
+        let employee_b = Address::generate(&env);
+        let commitment_a = BytesN::from_array(&env, &[36u8; 32]);
+        let commitment_b = BytesN::from_array(&env, &[37u8; 32]);
+
+        client.store_commitment(&employee_a, &commitment_a);
+        client.store_commitment(&employee_b, &commitment_b);
+        client.lock_commitment_updates(&employee_a);
+
+        client.rotate_approved_commitment(&employee_a, &commitment_b);
+    }
+
+    /// `can_rotate_approved_commitment` is false for an unknown employee and
+    /// returns no commitment values (privacy-safe read-only view).
+    #[test]
+    fn test_can_rotate_approved_commitment_defaults_false() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        assert!(!client.can_rotate_approved_commitment(&employee));
+
+        let commitment = BytesN::from_array(&env, &[38u8; 32]);
+        client.store_commitment(&employee, &commitment);
+        assert!(!client.can_rotate_approved_commitment(&employee));
+        client.lock_commitment_updates(&employee);
+        assert!(client.can_rotate_approved_commitment(&employee));
+    }
+
+    /// Rotation keeps the commitment version monotonic across rotation and
+    /// update, so revision ordering survives a compensation change history
+    /// (mirrors the UP-05 upgrade invariant).
+    #[test]
+    fn test_rotation_increments_version_monotonically() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        client.store_commitment(&employee, &BytesN::from_array(&env, &[39u8; 32]));
+        let v1 = client.get_commitment(&employee).version;
+
+        let rotated = client.rotate_commitment(&employee, &BytesN::from_array(&env, &[40u8; 32]));
+        assert_eq!(rotated.version, v1 + 1);
+
+        let updated = client.update_commitment(&employee, &BytesN::from_array(&env, &[41u8; 32]));
+        assert_eq!(updated.version, v1 + 2);
+    }
+
     // ── Employee Reference ID Tests ──────────────────────────────────────────
 
     #[test]
@@ -1264,8 +1666,14 @@ mod tests {
 
         client.set_employee_reference_id(&employee, &reference_id);
 
-        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), reference_id);
-        assert_eq!(client.get_employee_by_reference_id(&reference_id).unwrap(), employee);
+        assert_eq!(
+            client.get_employee_reference_id(&employee).unwrap(),
+            reference_id
+        );
+        assert_eq!(
+            client.get_employee_by_reference_id(&reference_id).unwrap(),
+            employee
+        );
     }
 
     #[test]
@@ -1278,13 +1686,22 @@ mod tests {
         let new_ref_id = soroban_sdk::String::from_str(&env, "EMP-NEW");
 
         client.set_employee_reference_id(&employee, &old_ref_id);
-        assert_eq!(client.get_employee_by_reference_id(&old_ref_id).unwrap(), employee);
+        assert_eq!(
+            client.get_employee_by_reference_id(&old_ref_id).unwrap(),
+            employee
+        );
 
         client.set_employee_reference_id(&employee, &new_ref_id);
 
-        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), new_ref_id);
-        assert_eq!(client.get_employee_by_reference_id(&new_ref_id).unwrap(), employee);
-        
+        assert_eq!(
+            client.get_employee_reference_id(&employee).unwrap(),
+            new_ref_id
+        );
+        assert_eq!(
+            client.get_employee_by_reference_id(&new_ref_id).unwrap(),
+            employee
+        );
+
         // Old reverse mapping should be cleared
         assert!(client.get_employee_by_reference_id(&old_ref_id).is_none());
     }
@@ -1322,10 +1739,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, SalaryCommitmentContract);
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
-        
+
         let unauthorized_user = Address::generate(&env);
         let employee = Address::generate(&env);
         let reference_id = soroban_sdk::String::from_str(&env, "EMP-999");
@@ -1339,7 +1756,7 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        
+
         client.set_employee_reference_id(&employee, &reference_id);
     }
 }

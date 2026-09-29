@@ -103,14 +103,7 @@ fn test_approval_validity_window() {
 
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
     let nonce = test_nonce(&env, 30);
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &10_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
     payroll.approve_payroll_run(&reviewer, &run_id);
     assert!(!payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
@@ -133,14 +126,7 @@ fn test_finalize_panics_after_approval_expiry() {
 
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
     let nonce = test_nonce(&env, 31);
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &10_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
     payroll.approve_payroll_run(&reviewer, &run_id);
 
@@ -149,4 +135,187 @@ fn test_finalize_panics_after_approval_expiry() {
     });
 
     payroll.finalize_payroll_run(&admin, &run_id);
+}
+
+// ---------------------------------------------------------------------------
+// Clock Boundary Tests for Approval Expiry Cutoffs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_approval_at_exact_expiry_boundary() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 32);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer, &run_id);
+
+    // Exactly at expiry boundary - should still be valid
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_APPROVAL_EXPIRY_SECONDS;
+    });
+
+    assert!(!payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
+}
+
+#[test]
+fn test_approval_one_tick_before_expiry() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 33);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer, &run_id);
+
+    // One tick before expiry - should still be valid
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_APPROVAL_EXPIRY_SECONDS - 1;
+    });
+
+    assert!(!payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
+}
+
+#[test]
+fn test_approval_one_tick_after_expiry() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 34);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer, &run_id);
+
+    // One tick after expiry - should be expired
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_APPROVAL_EXPIRY_SECONDS + 1;
+    });
+
+    assert!(payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
+}
+
+#[test]
+fn test_finalize_at_exact_expiry_boundary_succeeds() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 35);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer, &run_id);
+
+    // Exactly at expiry boundary - finalization should succeed
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_APPROVAL_EXPIRY_SECONDS;
+    });
+
+    payroll.finalize_payroll_run(&admin, &run_id);
+    assert!(payroll.get_run_counter() >= run_id);
+}
+
+#[test]
+#[should_panic(expected = "Payroll approval expired: approval record exceeds maximum allowed age")]
+fn test_finalize_one_tick_after_expiry_panics() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 36);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer, &run_id);
+
+    // One tick after expiry - finalization should panic
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_APPROVAL_EXPIRY_SECONDS + 1;
+    });
+
+    payroll.finalize_payroll_run(&admin, &run_id);
+}
+
+#[test]
+fn test_approval_expiry_with_custom_expiry_seconds() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 37);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer, &run_id);
+
+    let custom_expiry = 500u64;
+
+    // Before custom expiry
+    env.ledger().with_mut(|li| {
+        li.timestamp += custom_expiry - 1;
+    });
+    assert!(!payroll.is_payroll_approval_expired(&run_id, &custom_expiry));
+
+    // At custom expiry boundary
+    env.ledger().with_mut(|li| {
+        li.timestamp += 1;
+    });
+    assert!(!payroll.is_payroll_approval_expired(&run_id, &custom_expiry));
+
+    // After custom expiry
+    env.ledger().with_mut(|li| {
+        li.timestamp += 1;
+    });
+    assert!(payroll.is_payroll_approval_expired(&run_id, &custom_expiry));
+}
+
+#[test]
+fn test_multiple_approvals_with_different_timestamps() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer1 = Address::generate(&env);
+    let reviewer2 = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer1);
+    payroll.add_reviewer(&admin, &reviewer2);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 38);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    payroll.approve_payroll_run(&reviewer1, &run_id);
+
+    // Advance time
+    env.ledger().with_mut(|li| {
+        li.timestamp += 100;
+    });
+
+    payroll.approve_payroll_run(&reviewer2, &run_id);
+
+    // Advance to just before expiry from the first approval
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_APPROVAL_EXPIRY_SECONDS - 100 - 1;
+    });
+
+    // Should still be valid since the second approval is more recent
+    assert!(!payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
 }

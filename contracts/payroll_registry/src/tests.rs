@@ -1,10 +1,33 @@
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events};
-use soroban_sdk::{Env, IntoVal, String, Symbol, TryIntoVal};
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::{xdr, Env, IntoVal, String, Symbol, TryFromVal, Val};
 
 const VALID_EMPLOYEE_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const BAD_CHECKSUM_EMPLOYEE_WALLET: &str =
     "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHA";
+
+/// Decodes the topics of the recorded contract event at `index` into host values.
+fn event_topics(env: &Env, index: usize) -> soroban_sdk::Vec<Val> {
+    let recorded = env.events().all();
+    let Some(event) = recorded.events().get(index) else {
+        panic!("no contract event recorded at index {index}");
+    };
+    let xdr::ContractEventBody::V0(body) = &event.body else {
+        panic!("expected a v0 contract event body");
+    };
+    let mut topics = soroban_sdk::Vec::new(env);
+    for topic in body.topics.iter() {
+        topics.push_back(Val::try_from_val(env, topic).expect("invalid event topic"));
+    }
+    topics
+}
+
+/// Decodes the topics of the last recorded contract event into host values.
+fn last_event_topics(env: &Env) -> soroban_sdk::Vec<Val> {
+    let recorded = env.events().all();
+    let index = recorded.events().len().checked_sub(1).expect("no events recorded");
+    event_topics(env, index)
+}
 
 fn setup() -> (Env, Address) {
     let env = Env::default();
@@ -138,12 +161,12 @@ fn test_add_employee_by_wallet_rejects_invalid_wallet_before_storage() {
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
 
     let company_id = client.register_company(&admin, &treasury);
-    let before = env.events().all().len();
     let result = client.try_add_employee_by_wallet(&company_id, &bad_wallet, &commitment);
-    let after = env.events().all().len();
 
     assert!(result.is_err());
-    assert_eq!(after, before);
+    // A rejected invocation must not record any events.
+    let recorded = env.events().all();
+    assert_eq!(recorded.events().len(), 0);
 }
 
 #[test]
@@ -399,16 +422,13 @@ fn test_register_company_emits_event() {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let before = env.events().all().len();
     let company_id = client.register_company(&admin, &treasury);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 2);
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 2);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "CompanyRegistered"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
 }
 
@@ -422,18 +442,15 @@ fn test_add_employee_emits_event() {
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
 
     let company_id = client.register_company(&admin, &treasury);
-    let before = env.events().all().len();
     client.add_employee(&company_id, &employee, &commitment);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 3);
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 3);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "EmployeeAdded"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
-    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    let emp_addr: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
     assert_eq!(emp_addr, employee);
 }
 
@@ -448,18 +465,15 @@ fn test_remove_employee_emits_event() {
 
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
-    let before = env.events().all().len();
     client.remove_employee(&company_id, &employee);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 3);
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 3);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "EmployeeRemoved"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
-    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    let emp_addr: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
     assert_eq!(emp_addr, employee);
 }
 
@@ -475,18 +489,15 @@ fn test_update_commitment_emits_event() {
 
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &old_commitment);
-    let before = env.events().all().len();
     client.update_commitment(&company_id, &employee, &new_commitment);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 3);
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 3);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "CommitmentUpdated"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
-    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    let emp_addr: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
     assert_eq!(emp_addr, employee);
 }
 
@@ -501,18 +512,15 @@ fn test_deactivate_employee_emits_lifecycle_event() {
 
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
-    let before = env.events().all().len();
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 3);
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 3);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "EmployeeDeactivated"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
-    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    let emp_addr: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
     assert_eq!(emp_addr, employee);
 }
 
@@ -528,18 +536,15 @@ fn test_reactivate_employee_emits_lifecycle_event() {
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Suspended);
-    let before = env.events().all().len();
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    assert_eq!(event.1.len(), 3);
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 3);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "EmployeeReactivated"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
-    let emp_addr: Address = event.1.get(2).unwrap().try_into_val(&env.clone()).unwrap();
+    let emp_addr: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
     assert_eq!(emp_addr, employee);
 }
 
@@ -779,15 +784,12 @@ fn test_propose_treasury_rotation_emits_event() {
     let company_id = client.register_company(&admin, &treasury);
     let new_treasury = Address::generate(&env);
 
-    let before = env.events().all().len();
     client.propose_treasury_rotation(&company_id, &admin, &new_treasury);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "TreasuryRotationProposed"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
 }
 
@@ -802,15 +804,13 @@ fn test_accept_treasury_rotation_emits_event() {
 
     client.propose_treasury_rotation(&company_id, &admin, &new_treasury);
 
-    let before = env.events().all().len();
     client.accept_treasury_rotation(&company_id, &new_treasury);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    // Accepting emits `TreasuryRotated` first, then the admin config version bump.
+    let topics = event_topics(&env, 0);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "TreasuryRotated"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
 
     let company = client.get_company(&company_id);
@@ -828,15 +828,12 @@ fn test_cancel_treasury_rotation_emits_event() {
 
     client.propose_treasury_rotation(&company_id, &admin, &new_treasury);
 
-    let before = env.events().all().len();
     client.cancel_treasury_rotation(&company_id, &admin);
-    let after = env.events().all().len();
-    assert_eq!(after, before + 1);
 
-    let event = env.events().all().get(after - 1).unwrap();
-    let sym0: Symbol = event.1.get(0).unwrap().try_into_val(&env.clone()).unwrap();
+    let topics = last_event_topics(&env);
+    let sym0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     assert_eq!(sym0, Symbol::new(&env, "TreasuryRotationCancelled"));
-    let comp_id: u64 = event.1.get(1).unwrap().try_into_val(&env.clone()).unwrap();
+    let comp_id: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
     assert_eq!(comp_id, company_id);
 }
 
@@ -879,11 +876,17 @@ fn test_successful_payout_destination_update_by_employee() {
     client.add_employee(&company_id, &employee, &commitment);
 
     // Initial payout destination defaults to employee address
-    assert_eq!(client.get_payout_destination(&company_id, &employee), employee);
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        employee
+    );
 
     // Employee updates their payout destination
     client.update_payout_destination(&company_id, &employee, &new_destination);
-    assert_eq!(client.get_payout_destination(&company_id, &employee), new_destination);
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        new_destination
+    );
 }
 
 #[test]
@@ -996,12 +999,227 @@ fn test_offboarded_employee_cannot_be_changed() {
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[0; 32]);
     let client = PayrollRegistryClient::new(&env, &env.register_contract(None, PayrollRegistry {}));
-    
+
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
-    
+
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Offboarded);
-    
+
     // Attempting to change status should panic
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
+}
+
+// ── Issue #610: payout destination change review tests ──────────────────────
+
+fn review_setup() -> (
+    Env,
+    PayrollRegistryClient<'static>,
+    u64,
+    Address,
+    Address,
+    Address,
+) {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[3u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    (env, client, company_id, admin, employee, treasury)
+}
+
+#[test]
+fn test_payout_destination_change_requires_review_before_takeover() {
+    let (env, client, company_id, admin, employee, _treasury) = review_setup();
+    let new_destination = Address::generate(&env);
+
+    // Proposing a change does NOT change the payout destination.
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        employee
+    );
+
+    let review = client
+        .get_payout_dest_review(&company_id, &employee)
+        .expect("review record missing");
+    assert_eq!(review.status, DestinationReviewStatus::Pending);
+    assert_eq!(review.company_id, company_id);
+    assert_eq!(review.employee, employee);
+    assert_eq!(review.new_destination, new_destination);
+    assert_eq!(review.current_destination, employee);
+    assert_eq!(review.resolved_at, 0);
+    assert_eq!(review.resolved_by, None);
+    assert_eq!(review.proposed_at, env.ledger().timestamp());
+
+    // The admin rejects: destination stays unchanged, review is Rejected.
+    client.review_payout_dest_change(&company_id, &employee, &admin, &false);
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        employee
+    );
+    let review = client
+        .get_payout_dest_review(&company_id, &employee)
+        .unwrap();
+    assert_eq!(review.status, DestinationReviewStatus::Rejected);
+    assert_eq!(review.resolved_by, Some(admin.clone()));
+    assert!(review.resolved_at >= review.proposed_at);
+
+    // The employee proposes the same change again and the admin approves.
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    client.review_payout_dest_change(&company_id, &employee, &admin, &true);
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        new_destination
+    );
+    let review = client
+        .get_payout_dest_review(&company_id, &employee)
+        .unwrap();
+    assert_eq!(review.status, DestinationReviewStatus::Approved);
+    assert_eq!(review.resolved_by, Some(admin));
+}
+
+#[test]
+fn test_payout_destination_review_emits_lifecycle_events() {
+    let (env, client, company_id, admin, employee, _treasury) = review_setup();
+    let new_destination = Address::generate(&env);
+
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    let topics = last_event_topics(&env);
+    assert_eq!(topics.len(), 3);
+    let sym: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(sym, Symbol::new(&env, "PayoutDestinationChangeProposed"));
+    let comp: u64 = u64::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(comp, company_id);
+    let emp: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
+    assert_eq!(emp, employee);
+
+    client.review_payout_dest_change(&company_id, &employee, &admin, &true);
+    // The review decision emits the review event AND the #486 update event.
+    let recorded = env.events().all();
+    let len = recorded.events().len();
+    assert_eq!(len, 2);
+
+    let review_topics = event_topics(&env, len - 1);
+    let sym: Symbol = Symbol::try_from_val(&env, &review_topics.get(0).unwrap()).unwrap();
+    assert_eq!(sym, Symbol::new(&env, "PayoutDestinationChangeReviewed"));
+
+    let update_topics = event_topics(&env, len - 2);
+    assert_eq!(update_topics.len(), 3);
+    let sym: Symbol = Symbol::try_from_val(&env, &update_topics.get(0).unwrap()).unwrap();
+    assert_eq!(sym, Symbol::new(&env, "PayoutDestinationUpdated"));
+    let emp: Address = Address::try_from_val(&env, &update_topics.get(2).unwrap()).unwrap();
+    assert_eq!(emp, employee);
+}
+
+#[test]
+fn test_employee_can_cancel_pending_payout_destination_change() {
+    let (env, client, company_id, _admin, employee, _treasury) = review_setup();
+    let new_destination = Address::generate(&env);
+
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    client.cancel_payout_dest_change(&company_id, &employee);
+
+    let review = client
+        .get_payout_dest_review(&company_id, &employee)
+        .unwrap();
+    assert_eq!(review.status, DestinationReviewStatus::Cancelled);
+    assert_eq!(review.resolved_by, None);
+    assert!(review.resolved_at >= review.proposed_at);
+
+    // Destination untouched and a fresh proposal is allowed.
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        employee
+    );
+    let other = Address::generate(&env);
+    client.propose_payout_dest_change(&company_id, &employee, &other);
+    assert_eq!(
+        client
+            .get_payout_dest_review(&company_id, &employee)
+            .unwrap()
+            .new_destination,
+        other
+    );
+}
+
+#[test]
+#[should_panic(expected = "A payout destination change is already under review")]
+fn test_payout_destination_review_rejects_duplicate_pending() {
+    let (env, client, company_id, _admin, employee, _treasury) = review_setup();
+    let new_destination = Address::generate(&env);
+
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    let another = Address::generate(&env);
+    client.propose_payout_dest_change(&company_id, &employee, &another);
+}
+
+#[test]
+#[should_panic(expected = "Destination address is already on file")]
+fn test_payout_destination_review_rejects_duplicate_destination() {
+    let (env, client, company_id, _admin, employee, _treasury) = review_setup();
+
+    // The destination on file defaults to the employee address.
+    client.propose_payout_dest_change(&company_id, &employee, &employee);
+}
+
+#[test]
+#[should_panic(expected = "Cannot set zero address as payout destination")]
+fn test_payout_destination_review_rejects_zero_address() {
+    let (env, client, company_id, _admin, employee, _treasury) = review_setup();
+
+    let zero_addr = Address::from_string(&String::from_str(&env, VALID_EMPLOYEE_WALLET));
+    client.propose_payout_dest_change(&company_id, &employee, &zero_addr);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn test_payout_destination_review_rejects_non_owner_proposer() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, PayrollRegistry);
+    let registry = PayrollRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "register_company",
+            args: (admin.clone(), treasury.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let company_id = registry.register_company(&admin, &treasury);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_employee",
+            args: (company_id, employee.clone(), commitment.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    // Attacker (not the employee) attempts to propose a destination change.
+    let attacker = Address::generate(&env);
+    let new_destination = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "propose_payout_dest_change",
+            args: (company_id, employee.clone(), new_destination.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    registry.propose_payout_dest_change(&company_id, &employee, &new_destination);
 }

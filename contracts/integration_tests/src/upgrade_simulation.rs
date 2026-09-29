@@ -500,7 +500,10 @@ mod upgrade_simulation {
             .unwrap();
         assert_eq!(report.current_version, 1, "UP-09: persisted version is 1");
         assert_eq!(report.target_version, 2, "UP-09: target version is 2");
-        assert!(report.initialized, "UP-09: contract must report initialized");
+        assert!(
+            report.initialized,
+            "UP-09: contract must report initialized"
+        );
         assert!(
             report.admin_configured,
             "UP-09: contract must report an executor admin"

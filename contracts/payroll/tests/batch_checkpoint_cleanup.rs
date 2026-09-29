@@ -1,9 +1,7 @@
 #![cfg(test)]
 
+use payroll::{BatchCheckpointState, ContractAddresses, PayrollClient};
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
-use payroll::{
-    BatchCheckpointState, ContractAddresses, PayrollClient,
-};
 
 fn setup(e: &Env) -> (Address, PayrollClient<'static>) {
     e.mock_all_auths();
@@ -57,13 +55,7 @@ fn test_cleanup_completed_batch() {
         &BatchCheckpointState::Completed,
     );
 
-    client.cleanup_batch_checkpoint(
-        &admin,
-        &employer,
-        &batch_root,
-        &asset,
-        &execution_nonce,
-    );
+    client.cleanup_batch_checkpoint(&admin, &employer, &batch_root, &asset, &execution_nonce);
 }
 
 #[test]
@@ -86,11 +78,5 @@ fn test_cleanup_active_batch_fails() {
         &0,
     );
 
-    client.cleanup_batch_checkpoint(
-        &admin,
-        &employer,
-        &batch_root,
-        &asset,
-        &execution_nonce,
-    );
+    client.cleanup_batch_checkpoint(&admin, &employer, &batch_root, &asset, &execution_nonce);
 }

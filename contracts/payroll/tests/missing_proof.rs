@@ -25,6 +25,7 @@ fn execution_rejects_a_missing_proof_with_the_same_error() {
     let env = Env::default();
     let (payroll, _, employee) = common::setup(&env);
     let (_, amounts, employees) = common::one_payment(&env, &employee);
+    let source = common::authorized_source(&env, &payroll);
 
     payroll.batch_process_payroll(
         &Vec::<BytesN<256>>::new(&env),
@@ -33,6 +34,7 @@ fn execution_rejects_a_missing_proof_with_the_same_error() {
         &100,
         &common::nonce(&env, 6),
         &None,
+        &source,
     );
 }
 

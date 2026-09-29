@@ -1,5 +1,16 @@
 # Payroll Workflow Validation Implementations
 
+## Issue #389: Audit Reference Attachment Validation
+**Status**: Implemented validation function and error handling
+**Location**: `contracts/audit_module/src/challenge.rs`, `contracts/shared_errors/src/lib.rs`
+- Added `validate_audit_reference_attachment` function for comprehensive proof reference validation
+- Added `InvalidProofReference` error to shared error taxonomy (code 210)
+- Integrated validation into `respond_to_challenge` workflow
+- Privacy-safe validation that only checks hash format, not content
+- Comprehensive unit tests in `contracts/audit_module/src/tests.rs`
+- Integration tests in `contracts/audit_module/tests/audit_reference_validation.rs`
+- Documentation in `docs/audit-reference-validation.md`
+
 ## Issue #514: Cancellation Reason Validation
 **Status**: Enhanced existing implementation  
 **Location**: `contracts/payroll/src/lib.rs` line 2839-2904

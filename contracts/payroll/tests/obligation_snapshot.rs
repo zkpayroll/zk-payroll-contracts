@@ -8,7 +8,6 @@
 /// | `test_verify_snapshot_not_found_fails` | Un-recorded snapshot verification -> panics with "Obligation snapshot not found" |
 /// | `test_invalid_snapshot_parameters_rejected` | Zero amount, zero count, or zero root -> rejected |
 /// | `test_obligation_snapshot_privacy_invariants` | Emitted events carry non-sensitive metadata only |
-
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -52,6 +51,7 @@ struct Ctx {
     treasury: Address,
     employee: Address,
     payroll_id: Address,
+    import_source: Address,
 }
 
 impl Ctx {
@@ -96,12 +96,16 @@ fn setup() -> Ctx {
     token.mint(&treasury, &1_000_000i128);
     commitment.store_commitment(&employee, &BytesN::from_array(&env, &[0u8; 32]));
 
+    let import_source = Address::generate(&env);
+    payroll.register_import_source(&import_source, &0u32);
+
     Ctx {
         env,
         admin,
         treasury,
         employee,
         payroll_id,
+        import_source,
     }
 }
 
@@ -120,6 +124,7 @@ fn run_payroll(ctx: &Ctx, seed: u8) -> u64 {
         &1_000i128,
         &test_nonce(&ctx.env, seed),
         &None,
+        &ctx.import_source,
     )
 }
 

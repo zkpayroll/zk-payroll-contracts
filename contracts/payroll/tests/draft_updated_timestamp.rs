@@ -94,8 +94,14 @@ fn test_draft_updated_at_advances_when_editable_fields_amended() {
     payroll.amend_run_draft(&admin, &draft_id, &110_000i128, &11u32);
 
     let amended = payroll.get_run_draft(&draft_id);
-    assert_eq!(amended.created_at, 1_700_000_000, "created_at must remain immutable");
-    assert_eq!(amended.updated_at, 1_700_000_600, "updated_at must reflect modification time");
+    assert_eq!(
+        amended.created_at, 1_700_000_000,
+        "created_at must remain immutable"
+    );
+    assert_eq!(
+        amended.updated_at, 1_700_000_600,
+        "updated_at must reflect modification time"
+    );
     assert_eq!(payroll.get_draft_updated_at(&draft_id), 1_700_000_600);
     assert_eq!(amended.total_amount, 110_000i128);
     assert_eq!(amended.employee_count, 11u32);
@@ -168,7 +174,10 @@ fn test_draft_updated_at_frozen_after_finalization() {
     // Try amending after finalization at +1200s
     env.ledger().set_timestamp(1_700_001_200);
     let rejected_amend = payroll.try_amend_run_draft(&admin, &draft_id, &50_000i128, &5u32);
-    assert!(rejected_amend.is_err(), "Finalized draft must reject amendments");
+    assert!(
+        rejected_amend.is_err(),
+        "Finalized draft must reject amendments"
+    );
 
     // updated_at reflects last valid modification before finalization
     let draft = payroll.get_run_draft(&draft_id);
@@ -197,4 +206,3 @@ fn test_timestamp_query_leaks_no_private_payroll_data() {
     let ts = payroll.get_draft_updated_at(&draft_id);
     assert_eq!(ts, 1_700_000_123u64);
 }
-

@@ -95,10 +95,8 @@ mod tests {
         // Register employee
         let mut alice_blinding = [0u8; 32];
         alice_blinding[31] = 123u8;
-        let alice_commitment = commitment_client.compute_commitment(
-            &5000u64,
-            &BytesN::from_array(env, &alice_blinding),
-        );
+        let alice_commitment = commitment_client
+            .compute_commitment(&5000u64, &BytesN::from_array(env, &alice_blinding));
         commitment_client.register_employee(&alice, &alice_commitment);
 
         TestContext {

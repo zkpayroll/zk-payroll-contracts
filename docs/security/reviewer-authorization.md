@@ -17,6 +17,7 @@ Only explicitly authorized reviewer accounts can submit approval decisions, reje
 ### 2.1 Role Provisioning & Revocation
 - **Granting Reviewer Role (`add_reviewer`)**: 
   - Executed exclusively by the contract `admin`.
+  - Rejected once granting it would exceed the configured `MaxReviewers` cap, if any (see §2.2, issue #539). Re-adding an address that is already authorized is always a no-op with respect to the cap.
   - Emits `reviewer_added` event with the newly authorized reviewer `Address`.
 - **Revoking Reviewer Role (`remove_reviewer`)**:
   - Executed exclusively by the contract `admin`.
@@ -24,6 +25,14 @@ Only explicitly authorized reviewer accounts can submit approval decisions, reje
   - Emits `reviewer_removed` event.
 - **Authorization Query (`is_reviewer`)**:
   - Public read-only query returning `bool` indicating active reviewer status.
+
+### 2.2 Reviewer Assignment Limits (issue #539)
+- **`set_max_reviewers(admin, max_reviewers)`**: employer-configurable, opt-in cap on the number of concurrently authorized reviewers. Admin-only, mirrors `set_capacity_limits`'s opt-in shape: absent a policy, `add_reviewer` remains unlimited, matching this workflow's pre-#539 behavior.
+  - Rejects `max_reviewers == 0`.
+  - Lowering the cap below the current reviewer count is allowed and never revokes existing reviewers; it only blocks further `add_reviewer` calls until the count drops back under the cap.
+  - Emits `max_reviewers_set`.
+- **`get_max_reviewers()`**: returns the configured cap, or `None` if unset.
+- **`get_reviewer_count()`**: returns the number of currently authorized reviewers, maintained incrementally alongside `AuthorizedReviewer` so the cap can be enforced without an unbounded storage scan.
 
 ```
        +--------------+  add_reviewer(admin)  +-------------------+

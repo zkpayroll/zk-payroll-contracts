@@ -2,7 +2,7 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, Bytes,
-    BytesN, Env, Symbol, Vec,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 use pause_manager::PauseManagerClient;
@@ -13,7 +13,30 @@ use shared_errors::{AuthError, PaymentError, TreasuryError};
 pub mod config_audit;
 use config_audit::{config_keys, no_value_ref, record_config_change, stored_ref, value_ref};
 
+pub mod failure_reasons;
+use failure_reasons::{DryRunArgs, PayrollDryRunReport, PayrollFailureReason};
+
+pub mod signed_operator_actions;
+use signed_operator_actions::{
+    consumed_key, require_not_expired, SignedOperatorAction, SignedOperatorPayload,
+};
+
+pub mod execution_authorization;
+use execution_authorization::ExecutionInitiatorAuthorization;
+
+pub mod import_source;
+use import_source::{require_authorized_source, validate_source_for_report};
+
 const MAX_BATCH: u32 = 50;
+const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
+
+/// Storage key for the duplicate-execution guard on payroll runs.
+///
+/// Maps a caller-supplied idempotency key to the run it produced so a
+/// repeated submission with the same key is rejected instead of executing
+/// payroll twice. The stored record contains only the run id and a payload
+/// hash, never salary values or employee identities.
+const EXECUTION_GUARD_KEY: Symbol = symbol_short!("exec_guard");
 
 #[contract]
 pub struct Payroll;
@@ -116,6 +139,11 @@ pub struct PayrollRun {
     pub reconciliation_status: ReconciliationStatus,
     /// Off-chain metadata hash (period, company, batch, commitments) (#177).
     pub metadata_hash: BytesN<32>,
+    /// Hash of an off-chain payroll note (e.g. a payslip or payment receipt
+    /// document issued outside the contract) bound to this run (#617). The
+    /// zero hash indicates no note has been bound yet, the same convention
+    /// `metadata_hash` already uses.
+    pub note_hash: BytesN<32>,
 }
 
 /// Immutable result binding for a client-supplied idempotency key.
@@ -129,6 +157,20 @@ pub struct PayrollExecutionIdempotencyRecord {
     pub run_id: u64,
     pub payload_hash: BytesN<32>,
     pub created_at: u64,
+}
+
+/// Duplicate-execution guard record for a payroll run.
+///
+/// Keyed by a caller-supplied idempotency key. Stores only the resulting run
+/// id and a hash of the request payload so a retry with identical data can be
+/// recognised, while a key reused with different data is rejected. No salary
+/// amounts or employee identities are persisted here.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollExecutionGuard {
+    pub run_id: u64,
+    pub payload_hash: BytesN<32>,
+    pub recorded_at: u64,
 }
 
 /// Pending emergency withdrawal request (issue #104).
@@ -178,6 +220,57 @@ pub struct BatchCheckpoint {
     pub failed: bool,
 }
 
+/// Lifecycle state for a resumable payroll batch (issue #611).
+///
+/// Serialized as a stable ordinal so off-chain clients can persist and
+/// pattern-match on it across contract upgrades.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BatchResumeStatus {
+    /// No checkpoint exists for the supplied batch identity: submit a fresh
+    /// `batch_process_payroll_bounded` call.
+    NotFound = 0,
+    /// A checkpoint is mid-execution with payments remaining: call
+    /// `batch_process_payroll_bounded` again with the same identity to resume.
+    Resumable = 1,
+    /// A checkpoint failed mid-execution: clear it with
+    /// `resume_payroll_batch` (admin-authorized) before resubmitting.
+    FailedRetryable = 2,
+    /// A checkpoint already finished (all payments executed). Resubmitting is
+    /// rejected, so the caller can stop polling.
+    Completed = 3,
+}
+
+/// Privacy-safe, actionable resume plan for an interrupted payroll batch
+/// (issue #611).
+///
+/// Exposes only batch-level operational progress: the persisted cursor, the
+/// count the caller reported for the batch, and the exact next action. It
+/// never contains employee addresses, salaries, proof material, or the
+/// remaining employee identities, so it is safe to surface to dashboards and
+/// integrators.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchResumePlan {
+    /// Coarse lifecycle classification of the batch (see
+    /// [`BatchResumeStatus`]).
+    pub status: BatchResumeStatus,
+    /// Number of payments already executed and checkpointed.
+    pub processed_count: u32,
+    /// Payment count the caller reports for this batch identity.
+    pub expected_total: u32,
+    /// `true` when the persisted cursor is consistent with `expected_total`.
+    pub cursor_consistent: bool,
+    /// Number of payments still outstanding (`expected_total -
+    /// processed_count` when consistent; `0` otherwise).
+    pub remaining_count: u32,
+    /// Whether `resume_payroll_batch` may be called right now. Only
+    /// `FailedRetryable` batches with a consistent cursor and at least one
+    /// outstanding payment are resumable.
+    pub can_resume: bool,
+}
+
 // ?? Issue #89: payroll amendment flow ????????????????????????????????????????
 
 /// Lifecycle state of a payroll run draft.
@@ -223,6 +316,90 @@ pub struct PayrollRunDraft {
     pub updated_at: u64,
 }
 
+// ── Issue #471 / #484: Payroll period freeze & reopening guard ────────────────
+
+/// Record representing a frozen payroll period (#471, #484).
+///
+/// Created automatically when a draft is submitted (`reason = finalized`),
+/// or manually by the admin via `freeze_payroll_period`. Once frozen/finalized, no
+/// draft creation, amendment, description update, finalization, or submission
+/// is allowed for this period until the admin unfreezes/reopens it.
+/// The record intentionally contains no salary values or per-employee data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodFreeze {
+    /// Period label this freeze guards (matches the draft `period_label`).
+    pub period_label: Symbol,
+    /// Address that applied the freeze (admin, or the admin that submitted
+    /// the run which auto-froze the period).
+    pub frozen_by: Address,
+    /// Ledger timestamp when the freeze was applied.
+    pub frozen_at: u64,
+    /// Short operator label for the freeze (e.g. `finalized`, `manual`).
+    pub reason: Symbol,
+    /// Number of payroll runs that had been submitted for this period when
+    /// the freeze was applied.
+    pub runs_count: u32,
+}
+
+/// Cooldown configuration for period reopen operations.
+///
+/// Prevents rapid reopening of finalized periods by enforcing a minimum
+/// time gap between successive reopens. This guards against accidental
+/// or malicious repeated unfreezes that could expose the period to
+/// uncontrolled edits.
+///
+/// Privacy-safe: contains only duration and timestamps, never payroll data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodReopenCooldown {
+    /// Minimum seconds required between period reopens (0 = disabled).
+    pub cooldown_seconds: u64,
+    /// Last timestamp when this period was reopened.
+    pub last_reopen_at: u64,
+}
+
+/// Issue #621: Contract period transition consistency check result.
+///
+/// Describes whether a requested transition between two payroll periods is
+/// consistent with the currently open capacity-accounting period. The result
+/// is privacy-safe: it contains only period labels and a stable reason code,
+/// never salary amounts, employee identities, or proof material.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PeriodTransitionStatus {
+    /// Transition is allowed: the target period is the current period or a
+    /// strictly later period, and no conflicting state blocks the move.
+    Allowed = 0,
+    /// Transition is rejected because the target period precedes the current
+    /// open period (a backwards transition).
+    BackwardsTransition = 1,
+    /// Transition is rejected because the source period does not match the
+    /// currently open period.
+    SourceMismatch = 2,
+    /// Transition is rejected because the target period is already frozen.
+    TargetFrozen = 3,
+    /// Transition is rejected because the source period is not frozen and
+    /// therefore still open for edits.
+    SourceNotFrozen = 4,
+}
+
+/// Issue #621: Read-only assessment of a contract period transition.
+///
+/// Exposes the verdict, the source and target period labels, and the current
+/// open period so integrators can render actionable errors without leaking
+/// payroll data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodTransitionCheck {
+    pub status: PeriodTransitionStatus,
+    pub from_period: Symbol,
+    pub to_period: Symbol,
+    pub current_period: Option<Symbol>,
+    pub allowed: bool,
+}
+
 // ?? Reviewer Authorization & Run Review ?????????????????????????????????????
 
 /// Review decision outcome for a payroll run.
@@ -248,7 +425,31 @@ pub struct RunReview {
     pub reviewed_at: u64,
 }
 
-// ── Issue #342: dispute freeze/thaw controls ─────────────────────────
+/// Result of removing a stale approval record (#548).
+///
+/// Deliberately carries no reviewer address and no payroll amounts: the record
+/// type is enough for an operator or indexer to reconcile the cleanup.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleApprovalCleanupResult {
+    pub run_id: u64,
+    pub removed: bool,
+    pub reviewed_at: u64,
+    pub expired_at: u64,
+}
+
+/// Read-only staleness assessment for a payroll run's approval (#548).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleApprovalStatus {
+    pub run_id: u64,
+    pub is_stale: bool,
+    pub reviewed_at: u64,
+    pub expires_at: u64,
+}
+
+// ── Issue #342: dispute freeze/thaw controls ─────────────────────────────────
+
 /// Lifecycle status of a payroll dispute.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,7 +648,70 @@ pub struct PayrollRunStatus {
     pub total_amount: i128,
 }
 
-// ── Issue #478: Payroll run metadata versioning ────────────────────────
+// ── Issue #552: Expose payroll period health summary ──────────────────────────
+
+/// Operational health status of a payroll period (#552).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PeriodHealthStatus {
+    /// Period is healthy and operational for payroll execution.
+    Healthy = 0,
+    /// Period is operational but requires attention (e.g., grace window, frozen config).
+    Warning = 1,
+    /// Period cannot execute payroll runs (e.g., paused, closed window, capacity exhausted).
+    Blocked = 2,
+}
+
+/// Concise reason explaining the period health status (#552).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PeriodHealthReason {
+    /// Normal operational state; all checks pass.
+    Normal = 0,
+    /// Settlement window is in pre-open phase; execution not yet permitted.
+    PreOpen = 1,
+    /// Settlement window is in grace period; execution blocked, only settlement/expiry.
+    GracePeriod = 2,
+    /// Settlement window has expired or closed.
+    WindowClosed = 3,
+    /// Capacity limit on batch count reached or exceeded.
+    BatchCapacityExceeded = 4,
+    /// Capacity limit on employee count reached or exceeded.
+    EmployeeCapacityExceeded = 5,
+    /// Capacity limit on total value reached or exceeded.
+    ValueCapacityExceeded = 6,
+    /// Payroll contract is paused.
+    ContractPaused = 7,
+    /// Period configuration or edits are frozen.
+    PeriodFrozen = 8,
+}
+
+/// Operational health summary for a payroll period (#552).
+///
+/// Privacy-safe: exposes operational readiness, timing state, and capacity counters
+/// without leaking sensitive employee identities or individual salary values.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodHealthSummary {
+    pub period: Symbol,
+    pub status: PeriodHealthStatus,
+    pub reason: PeriodHealthReason,
+    pub is_current_period: bool,
+    pub can_execute: bool,
+    pub is_frozen: bool,
+    pub is_paused: bool,
+    pub has_active_draft: bool,
+    pub window_status: Option<u32>,
+    pub capacity_configured: bool,
+    pub batch_count: u32,
+    pub employee_count: u32,
+    pub capacity_exceeded: bool,
+}
+
+// ── Issue #478: Payroll run metadata versioning ────────────────────────────────
+
 /// Version metadata for a payroll run to handle contract changes safely.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -598,6 +862,47 @@ pub struct SafeTreasurySummary {
     pub available_balance: i128,
     pub reserved_balance: i128,
     pub blocked_balance: i128,
+}
+
+/// A stable reason a payroll funding source is not ready for a requested spend.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FundingSourceBlocker {
+    /// Payroll has not been initialized with funding-source addresses.
+    NotInitialized = 0,
+    /// A funding readiness request must use a positive amount.
+    InvalidRequiredAmount = 1,
+    /// The canonical payout asset is not enabled for payroll.
+    AssetNotAllowed = 2,
+    /// The configured address did not respond as a SEP-41 token contract.
+    TokenUnavailable = 3,
+    /// Unreserved treasury funds do not cover the requested amount.
+    InsufficientFunds = 4,
+    /// The source is ready: no blocker applies.
+    ///
+    /// A sentinel rather than wrapping this enum in `Option` in
+    /// [`FundingSourceReadiness`]: soroban-sdk's `#[repr(u32)]` enum codegen
+    /// only implements the fallible `TryInto<ScVal>` direction, not the
+    /// infallible `Into<ScVal>` that `#[contracttype]`'s `Option<T>` field
+    /// support requires, so `Option<FundingSourceBlocker>` does not compile
+    /// as a struct field.
+    NotBlocked = 5,
+}
+
+/// Read-only readiness result for the configured payroll funding source.
+///
+/// The result exposes only aggregate treasury availability and a stable
+/// blocker code; it contains no employee, salary-row, or proof data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundingSourceReadiness {
+    pub ready: bool,
+    /// [`FundingSourceBlocker::NotBlocked`] when `ready` is true.
+    pub blocker: FundingSourceBlocker,
+    pub required_amount: i128,
+    /// `None` when the source is not initialized, allowlisted, or queryable.
+    pub available_balance: Option<i128>,
 }
 
 // ?? Issue #404: Cancelled Batch Read Status ????????????????????????????????????
@@ -777,6 +1082,11 @@ pub enum DataKey {
     DepositNonce(BytesN<32>),
     /// Pre-committed draft hash bound before execution (#102).
     DraftCommitment(BytesN<32>),
+    /// Pre-committed payroll note hash bound before being attached to a run
+    /// (#617). Kept in its own keyspace, separate from `DraftCommitment`,
+    /// so a note hash can never be mistaken for, or collide in storage
+    /// with, an unrelated draft or metadata commitment.
+    NoteCommitment(BytesN<32>),
     /// Pending emergency withdrawal request (#104).
     EmergencyRequest,
     /// Accumulated deposit balance per depositor address (#62).
@@ -849,7 +1159,9 @@ pub enum DataKey {
     /// Contract storage version for migration checks (#360).
     StorageVersion,
     /// Migration readiness status for sensitive operations (#360).
-    MigrationReadiness,
+    MigrationReady,
+    /// Minimum payout amount threshold configuration (#514).
+    MinimumPayoutAmount,
     /// Cancelled payroll batch status record (#404).
     CancelledBatchRecord(u64),
     /// Batch split record linking parent and child batch runs (#352).
@@ -858,6 +1170,9 @@ pub enum DataKey {
     BatchSplitTracker(u64),
     /// Settlement window configuration for a capacity-accounting period (#316).
     SettlementWindow(Symbol),
+    /// Enumerable labels with configured settlement windows, used to reject
+    /// overlapping payroll calendar ranges.
+    SettlementWindowPeriods,
     /// The capacity-accounting period a pending run was prepared under, if
     /// any was open at the time — used to locate its settlement window for
     /// later expiration (#316).
@@ -866,8 +1181,10 @@ pub enum DataKey {
     /// `true` once the period is frozen; absent means editable unless the
     /// period is implicitly frozen (settlement-ready or a submitted run).
     PeriodConfigFrozen(Symbol),
-    /// Audit record for an auto-freeze applied at draft submission (#471).
+    /// Explicit freeze record for a finalized payroll period (#471, #484).
     PeriodFreeze(Symbol),
+    /// Period reopen cooldown configuration and last reopen timestamp.
+    PeriodReopenCooldown(Symbol),
     /// Tracks paid employees per run to prevent duplicate payments (#482).
     EmployeePaidTracker(u64),
     /// Status view for a payroll run (#485).
@@ -879,8 +1196,56 @@ pub enum DataKey {
     /// Contract-wide configuration revision, bumped once per audited
     /// configuration change (#490). Absent means `0`.
     ConfigRevision,
+    /// Employer-configured maximum number of concurrently authorized
+    /// reviewers (#539). Absent means unlimited, matching the pre-existing
+    /// behaviour of `add_reviewer`.
+    MaxReviewers,
+    /// Count of currently authorized reviewers, kept in sync with
+    /// `AuthorizedReviewer` additions/removals so the cap in `MaxReviewers`
+    /// can be enforced without an unbounded scan (#539). Absent means `0`.
+    ReviewerCount,
+    /// The admin-registered ed25519 public key that signs off-chain,
+    /// expiring operator authorizations (#519). Absent means no operator
+    /// key is registered and `signed_add_reviewer` is unusable.
+    OperatorKey,
+    /// Marks a signed operator authorization payload (keyed by its
+    /// SHA-256'd XDR encoding) as already consumed, preventing replay of
+    /// the exact same signed payload (#519).
+    ConsumedOperatorAuth(BytesN<32>),
+    /// Organization policy version applied to this contract (#553).
+    /// Absent means no policy has been applied yet.
+    OrganizationPolicyVersion,
+    /// Record of the last applied organization policy migration (#553).
+    /// Stores the previous and new policy versions plus the migration
+    /// timestamp so integrators can audit policy transitions.
+    OrganizationPolicyMigration,
+    /// Registered import source for payroll batch authorization.
+    ImportSource(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
+}
+
+// ── Issue #553: Contract organization policy migration validation ────────────
+
+/// Record describing the outcome of an organization policy migration.
+///
+/// A migration is only accepted when the target `new_version` is strictly
+/// greater than the currently applied `previous_version`, preventing
+/// accidental downgrades or no-op replays. The record is privacy-safe and
+/// contains no salary or employee data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrganizationPolicyMigrationRecord {
+    /// Policy version that was active before this migration.
+    pub previous_version: u32,
+    /// Policy version that is active after this migration.
+    pub new_version: u32,
+    /// Ledger timestamp when the migration was applied.
+    pub migrated_at: u64,
+    /// Admin that applied the migration.
+    pub migrated_by: Address,
+    /// Short operator label describing the migration reason.
+    pub reason: Symbol,
 }
 
 /// Storage version state for migration checks (#360).
@@ -993,6 +1358,22 @@ pub struct ComplianceEvidencePointer {
 #[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl Payroll {
+    /// Publish the same aggregate treasury view exposed by the read-only API.
+    /// No employee rows, salary values, or proof material are included.
+    fn emit_treasury_balance_snapshot(e: &Env, asset: Address, trigger: Symbol) {
+        let summary = Self::get_safe_treasury_summary(e.clone(), asset);
+        payroll_events::emit_treasury_balance_snapshot(
+            e,
+            summary.asset,
+            summary.total_balance,
+            summary.available_balance,
+            summary.reserved_balance,
+            summary.blocked_balance,
+            e.ledger().timestamp(),
+            trigger,
+        );
+    }
+
     pub fn initialize(
         e: Env,
         admin: Address,
@@ -1005,6 +1386,16 @@ impl Payroll {
         let key = DataKey::Addresses;
         if e.storage().persistent().has(&key) {
             panic!("Already initialized")
+        }
+        // Validate the configured asset before writing any payroll state. A
+        // token address that does not implement the SEP-41 balance interface
+        // would otherwise produce an initialized contract that cannot safely
+        // report treasury availability or execute payroll.
+        if soroban_token::Client::new(&e, &token)
+            .try_balance(&treasury)
+            .is_err()
+        {
+            panic!("Configured payroll asset is unavailable or does not implement the token balance interface");
         }
         let addrs = ContractAddresses {
             admin,
@@ -1122,6 +1513,109 @@ impl Payroll {
         Self::pending_payroll_run_count(&e) > 0
     }
 
+    // ── Issue #620: contract execution initiator authorization ─────────────
+
+    /// Require that the caller may initiate a contract execution (issue #620).
+    ///
+    /// Every on-chain execution entrypoint (`prepare_payroll_run`,
+    /// `batch_process_payroll`, `batch_process_payroll_idempotent`, and
+    /// `batch_process_payroll_bounded`) calls this before any other work, so an
+    /// unauthorized initiator is rejected immediately with an actionable error
+    /// instead of after unrelated validation has already run.
+    fn require_execution_initiator(e: &Env) {
+        let initiator = execution_authorization::authorized_initiator(e).expect(
+            "Not initialized: contract addresses must be configured before a payroll execution",
+        );
+        execution_authorization::require_authorized(e, &initiator);
+    }
+
+    /// Return the address currently authorized to initiate a contract execution
+    /// (issue #620).
+    ///
+    /// This is the payroll admin recorded by `initialize` and updated by the
+    /// admin rotation/handover flows. Returns `None` when the contract has not
+    /// been initialized, so callers can distinguish "not configured" from
+    /// "configured, but this address is not the initiator".
+    ///
+    /// Privacy-safe: exposes only the operational role address, never salary
+    /// amounts, employee identities, or proof material.
+    pub fn get_execution_initiator(e: Env) -> Option<Address> {
+        execution_authorization::authorized_initiator(&e)
+    }
+
+    /// Preflight whether `initiator` may initiate a contract execution
+    /// (issue #620).
+    ///
+    /// Read-only and safe to call before submitting an execution, so SDKs and
+    /// dashboards can tell a caller whether they hold the required role without
+    /// spending a transaction. Returns the full authorization snapshot:
+    /// verdict, resolved role, and whether the contract is initialized.
+    pub fn check_execution_initiator(
+        e: Env,
+        initiator: Address,
+    ) -> ExecutionInitiatorAuthorization {
+        execution_authorization::check(&e, &initiator)
+    }
+
+    /// Boolean convenience wrapper around `check_execution_initiator`
+    /// (issue #620).
+    ///
+    /// Soroban entrypoint names are limited to 32 characters, so this is the
+    /// compact form of `check_execution_initiator`.
+    pub fn is_exec_initiator_authorized(e: Env, initiator: Address) -> bool {
+        execution_authorization::check(&e, &initiator).authorized
+    }
+
+    /// Validate that `initiator` is authorized to initiate a contract execution
+    /// (issue #620).
+    ///
+    /// Unlike `check_execution_initiator`, this requires `initiator`'s
+    /// cryptographic authorization, so integrators can assert the role on-chain
+    /// as a precondition of a larger flow. It panics with an actionable error
+    /// when the contract is not initialized or the address is not the
+    /// registered payroll admin.
+    pub fn validate_execution_initiator(e: Env, initiator: Address) {
+        execution_authorization::require_authorized(&e, &initiator);
+    }
+
+    // ── Import source authorization ───────────────────────────────────────────
+
+    /// Register an authorized import source for payroll batches.
+    ///
+    /// Only the payroll admin may register sources. Once registered, sources
+    /// can submit payroll batches. Duplicate registration updates the source
+    /// metadata.
+    pub fn register_import_source(
+        e: Env,
+        source_address: Address,
+        source_type: u32,
+    ) {
+        let source_type = match source_type {
+            0 => import_source::ImportSourceType::ExternalService,
+            1 => import_source::ImportSourceType::InternalSource,
+            2 => import_source::ImportSourceType::VerificationService,
+            _ => panic!("Invalid import source type"),
+        };
+        import_source::register_source(&e, source_address, source_type);
+    }
+
+    /// Deactivate an authorized import source.
+    ///
+    /// Only the payroll admin may deactivate sources. Deactivated sources
+    /// cannot submit new payroll batches but their historical records remain
+    /// for audit purposes.
+    pub fn deactivate_import_source(e: Env, source_address: Address) {
+        import_source::deactivate_source(&e, source_address);
+    }
+
+    /// Check if an import source is currently authorized.
+    ///
+    /// Returns true if the source is registered and active, false otherwise.
+    /// Privacy-safe: exposes only an authorization boolean.
+    pub fn is_import_source_authorized(e: Env, source_address: Address) -> bool {
+        import_source::is_source_authorized(&e, &source_address)
+    }
+
     fn validate_run_id(run_id: u64) {
         if run_id == u64::MAX {
             panic!("Invalid payroll run ID");
@@ -1207,6 +1701,80 @@ impl Payroll {
         Symbol::new(e, normalized_str)
     }
 
+    /// Internal helper that normalizes an employee reference identifier (#544).
+    ///
+    /// Rules applied:
+    /// 1. Trims leading and trailing whitespace (spaces, tabs, newlines, carriage returns).
+    /// 2. Converts ASCII lowercase letters to uppercase for canonical matching.
+    /// 3. Validates length is between 1 and 256 characters after trimming.
+    /// 4. Validates that the identifier contains only printable ASCII characters (32..=126).
+    /// 5. Rejects empty or all-whitespace strings.
+    ///
+    /// Privacy-safe: operates strictly on opaque reference identifier strings without
+    /// exposing or logging salary amounts or cryptographic blinding factors.
+    fn normalize_employee_identifier_internal(e: &Env, identifier: &String) -> String {
+        let raw_len = identifier.len() as usize;
+        if raw_len == 0 || raw_len > 512 {
+            panic!("Reference ID must be 1-256 characters");
+        }
+
+        let mut buf = [0u8; 512];
+        identifier.copy_into_slice(&mut buf[..raw_len]);
+        let slice = &buf[..raw_len];
+
+        let mut start = 0;
+        while start < raw_len
+            && (slice[start] == b' '
+                || slice[start] == b'\t'
+                || slice[start] == b'\n'
+                || slice[start] == b'\r')
+        {
+            start += 1;
+        }
+
+        let mut end = raw_len;
+        while end > start
+            && (slice[end - 1] == b' '
+                || slice[end - 1] == b'\t'
+                || slice[end - 1] == b'\n'
+                || slice[end - 1] == b'\r')
+        {
+            end -= 1;
+        }
+
+        let trimmed_len = end - start;
+        if trimmed_len == 0 || trimmed_len > 256 {
+            panic!("Reference ID must be 1-256 characters");
+        }
+
+        let mut out_buf = [0u8; 256];
+        for i in 0..trimmed_len {
+            let b = slice[start + i];
+            if b < 32 || b > 126 {
+                panic!("Employee identifier contains invalid characters: must be printable ASCII");
+            }
+            out_buf[i] = if b.is_ascii_lowercase() {
+                b - 32
+            } else {
+                b
+            };
+        }
+
+        let normalized_str = core::str::from_utf8(&out_buf[..trimmed_len])
+            .expect("normalized employee identifier is valid UTF-8");
+        String::from_str(e, normalized_str)
+    }
+
+    /// Normalize an employee reference identifier (#544).
+    ///
+    /// Public passthrough mirroring `salary_commitment::normalize_employee_identifier`
+    /// so clients can canonicalize identifiers against the same rules the
+    /// payroll contract enforces. Trims whitespace, uppercases ASCII letters,
+    /// validates the 1-256 character printable-ASCII range.
+    pub fn normalize_employee_identifier(e: Env, identifier: String) -> String {
+        Self::normalize_employee_identifier_internal(&e, &identifier)
+    }
+
     /// Reject a payroll batch that lists the same employee wallet more than
     /// once (#379).
     ///
@@ -1272,6 +1840,19 @@ impl Payroll {
             }
         }
         // If no sequence state exists, this is the first nonce for this employer - always valid
+    }
+
+    /// Validate the submission sequence of a payroll run (#payroll-submission-sequence).
+    ///
+    /// Ensures a run cannot be submitted out of order relative to the employer's
+    /// last accepted nonce sequence. This is a thin, privacy-safe guard that
+    /// only inspects the caller-supplied nonce and the stored sequence counter;
+    /// it never reads or emits salary values.
+    ///
+    /// # Panics
+    /// - If the nonce is stale or has already been used for this employer.
+    fn validate_submission_sequence(env: &Env, employer: &Address, nonce: &BytesN<32>) {
+        Self::validate_nonce_monotonicity(env, employer, nonce);
     }
 
     /// Update the nonce sequence tracking after a successful payroll run (#362).
@@ -1566,7 +2147,7 @@ impl Payroll {
         };
         e.storage()
             .persistent()
-            .set(&DataKey::MigrationReadiness, &readiness);
+            .set(&DataKey::MigrationReady, &readiness);
 
         // Emit event for audit trail
         e.events().publish(
@@ -1736,7 +2317,7 @@ impl Payroll {
         };
         e.storage()
             .persistent()
-            .set(&DataKey::MigrationReadiness, &readiness);
+            .set(&DataKey::MigrationReady, &readiness);
     }
 
     pub fn set_pause_manager(e: Env, pause_manager: Address) {
@@ -1841,6 +2422,32 @@ impl Payroll {
             .unwrap_or(false)
     }
 
+    /// Check whether an asset has been explicitly deactivated by the admin.
+    ///
+    /// A deactivated asset is the canonical treasury asset with an explicit
+    /// `false` allowlist entry. It cannot back payouts, deposits, or treasury
+    /// movements until the admin re-enables it through
+    /// [`Self::set_asset_allowed`]. Unlike [`Self::is_asset_allowed`], this
+    /// distinguishes "explicitly switched off" from "never configured", and
+    /// returns `false` for any asset that is not this contract's canonical
+    /// treasury asset.
+    pub fn is_asset_deactivated(e: Env, asset: Address) -> bool {
+        let canonical_asset: Option<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .map(|addresses: ContractAddresses| addresses.token);
+        if canonical_asset.as_ref() != Some(&asset) {
+            return false;
+        }
+        matches!(
+            e.storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::AllowedAsset(asset)),
+            Some(false)
+        )
+    }
+
     /// Validate the canonical treasury asset used by all payroll transfers.
     ///
     /// Asset identity is the serialized Soroban token contract address. A
@@ -1859,6 +2466,21 @@ impl Payroll {
             return Err(TreasuryError::AssetNotAllowed);
         }
         Ok(())
+    }
+
+    /// Panic with an actionable message when an asset cannot back a treasury
+    /// movement.
+    ///
+    /// Keeps the two failure modes distinguishable: a deactivated asset is a
+    /// configuration state the admin can undo, while a foreign asset is an
+    /// identity mismatch that can never be corrected at runtime.
+    fn require_active_treasury_asset(e: &Env, asset: Address) {
+        match Self::validate_treasury_asset(e.clone(), asset) {
+            Ok(()) => {}
+            Err(TreasuryError::AssetNotAllowed) => panic!("Asset not allowed"),
+            Err(TreasuryError::CrossAssetMismatch) => panic!("Cross-asset treasury mismatch"),
+            Err(_) => panic!("Invalid asset configuration"),
+        }
     }
 
     /// Return the payroll assets currently enabled for this employer contract.
@@ -1884,17 +2506,25 @@ impl Payroll {
             panic!("Deposit amount must be positive");
         }
 
-        let nonce_key = DataKey::DepositNonce(deposit_id.clone());
-        if e.storage().persistent().has(&nonce_key) {
-            panic!("Deposit already processed");
-        }
-        e.storage().persistent().set(&nonce_key, &true);
-
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
+
+        // Deactivated assets must not accept new deposits: payouts are already
+        // blocked for a deactivated asset, so inbound funds would be stranded.
+        // Checked before the deposit nonce is recorded so a rejected deposit
+        // does not burn the caller's deposit id.
+        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+            panic!("Asset not allowed");
+        }
+
+        let nonce_key = DataKey::DepositNonce(deposit_id.clone());
+        if e.storage().persistent().has(&nonce_key) {
+            panic!("Deposit already processed");
+        }
+        e.storage().persistent().set(&nonce_key, &true);
 
         let treasury_owner: Address = e
             .storage()
@@ -1919,6 +2549,7 @@ impl Payroll {
             (symbol_short!("payroll"), Symbol::new(&e, "deposit")),
             (from, amount, deposit_id, new_balance),
         );
+        Self::emit_treasury_balance_snapshot(&e, addrs.token, Symbol::new(&e, "deposit"));
     }
 
     /// Return the accumulated deposit balance for a given depositor address (#62).
@@ -2329,6 +2960,164 @@ impl Payroll {
         true
     }
 
+    // ── Issue #611: resumable payroll batch handling ─────────────────────────
+
+    /// Build a privacy-safe, actionable resume plan for a payroll batch
+    /// (issue #611).
+    ///
+    /// `expected_total` is the payment count the caller believes this batch
+    /// identity (employer + batch root + asset + execution nonce) carries. The
+    /// persisted cursor is compared against it so a mismatched resubmission
+    /// (wrong batch, wrong payment count) is surfaced as an inconsistent
+    /// cursor instead of silently resuming at the wrong offset.
+    ///
+    /// Read-only and privacy-safe: the plan carries progress counts and a
+    /// status only — never employee addresses, salary values, proof material,
+    /// or the remaining employee identities.
+    pub fn get_batch_resume_plan(
+        e: Env,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_total: u32,
+    ) -> BatchResumePlan {
+        if expected_total == 0 || expected_total > MAX_BATCH {
+            return BatchResumePlan {
+                status: BatchResumeStatus::NotFound,
+                processed_count: 0,
+                expected_total,
+                cursor_consistent: false,
+                remaining_count: 0,
+                can_resume: false,
+            };
+        }
+
+        let key = DataKey::BatchCheckpoint(employer, batch_root, asset, execution_nonce);
+        let Some(checkpoint) = e.storage().persistent().get::<_, BatchCheckpoint>(&key) else {
+            return BatchResumePlan {
+                status: BatchResumeStatus::NotFound,
+                processed_count: 0,
+                expected_total,
+                cursor_consistent: false,
+                remaining_count: 0,
+                can_resume: false,
+            };
+        };
+
+        let processed_count = checkpoint.last_checkpoint_index;
+        let cursor_consistent = processed_count <= expected_total;
+        let remaining_count = if cursor_consistent {
+            expected_total - processed_count
+        } else {
+            0
+        };
+
+        let status = if checkpoint.completed {
+            BatchResumeStatus::Completed
+        } else if checkpoint.failed {
+            BatchResumeStatus::FailedRetryable
+        } else if remaining_count > 0 {
+            BatchResumeStatus::Resumable
+        } else {
+            // Not completed, not failed, nothing remaining: an in-progress
+            // checkpoint whose cursor already covers the whole batch. Treat
+            // the batch as complete from the operator's point of view.
+            BatchResumeStatus::Completed
+        };
+
+        let can_resume = matches!(status, BatchResumeStatus::FailedRetryable)
+            && cursor_consistent
+            && remaining_count > 0;
+
+        BatchResumePlan {
+            status,
+            processed_count,
+            expected_total,
+            cursor_consistent,
+            remaining_count,
+            can_resume,
+        }
+    }
+
+    /// Explicitly resume an interrupted payroll batch after a failure
+    /// (issue #611).
+    ///
+    /// Clears the failed checkpoint state so the next
+    /// `batch_process_payroll_bounded` call with the same identity (employer,
+    /// batch root, asset, execution nonce) is accepted and continues from the
+    /// persisted cursor without repeating completed payouts.
+    ///
+    /// The caller must supply the batch's payment count; it is validated
+    /// against the persisted cursor so resuming with the wrong batch shape is
+    /// rejected with an actionable error instead of a silent partial run.
+    ///
+    /// # Panics
+    /// * `"Unauthorized"` — `admin` is not the stored contract admin.
+    /// * `"Batch execution checkpoint not found"` — no checkpoint exists for
+    ///   this identity; submit a fresh batch instead.
+    /// * `"Payroll batch is not resumable: check get_batch_resume_plan"` — the
+    ///   checkpoint is completed, mid-execution (not failed), or its cursor is
+    ///   inconsistent with `expected_total`.
+    /// * `"Invalid batch_root: must be non-zero"` / `"Invalid execution_nonce:
+    ///   must be non-zero"` — identity digests are zero.
+    pub fn resume_payroll_batch(
+        e: Env,
+        admin: Address,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_total: u32,
+    ) {
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_non_zero_digest(&e, &execution_nonce, "execution_nonce");
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::BatchCheckpoint(
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+        );
+        let mut checkpoint: BatchCheckpoint = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Batch execution checkpoint not found");
+
+        if checkpoint.completed
+            || !checkpoint.failed
+            || expected_total == 0
+            || expected_total > MAX_BATCH
+            || checkpoint.last_checkpoint_index >= expected_total
+        {
+            panic!("Payroll batch is not resumable: check get_batch_resume_plan");
+        }
+
+        checkpoint.state = BatchCheckpointState::Resumed;
+        checkpoint.failed = false;
+        e.storage().persistent().set(&key, &checkpoint);
+
+        payroll_events::emit_batch_checkpoint_resumed(
+            &e,
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+            checkpoint.last_checkpoint_index,
+        );
+    }
+
     pub fn resume_batch_execution(
         e: Env,
         admin: Address,
@@ -2440,6 +3229,107 @@ impl Payroll {
             asset,
             execution_nonce,
         );
+    }
+
+    /// Return whether an interrupted multi-batch payroll run can be safely recovered (#481).
+    ///
+    /// Checks that a checkpoint exists in an interrupted state (partially executed
+    /// or failed before completion), with progress strictly less than `expected_payment_count`.
+    /// Returns a privacy-safe boolean indicator without disclosing employee addresses or salary amounts.
+    pub fn is_interrupted_run_recoverable(
+        e: Env,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_payment_count: u32,
+    ) -> bool {
+        if expected_payment_count == 0 || expected_payment_count > MAX_BATCH {
+            return false;
+        }
+
+        let key = DataKey::BatchCheckpoint(employer, batch_root, asset, execution_nonce);
+        let Some(checkpoint) = e.storage().persistent().get::<_, BatchCheckpoint>(&key) else {
+            return false;
+        };
+
+        !checkpoint.completed
+            && (checkpoint.state == BatchCheckpointState::PartiallyCheckpointed
+                || checkpoint.state == BatchCheckpointState::Failed
+                || checkpoint.state == BatchCheckpointState::Started)
+            && checkpoint.last_checkpoint_index < expected_payment_count
+    }
+
+    /// Provide an authorized recovery mechanism for a payroll run interrupted between batches (#481).
+    ///
+    /// Requires company admin authorization. Validates that the batch checkpoint exists
+    /// and represents an interrupted run. Transitions the checkpoint state to `Resumed` while
+    /// preserving `last_checkpoint_index`, allowing subsequent bounded batch execution to resume
+    /// processing from the exact index where execution stopped without double-paying completed employees.
+    pub fn recover_interrupted_payroll_run(
+        e: Env,
+        admin: Address,
+        employer: Address,
+        batch_root: BytesN<32>,
+        asset: Address,
+        execution_nonce: BytesN<32>,
+        expected_payment_count: u32,
+    ) -> BatchCheckpoint {
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        Self::validate_non_zero_digest(&e, &execution_nonce, "execution_nonce");
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::BatchCheckpoint(
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+        );
+        let mut checkpoint: BatchCheckpoint = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("Interrupted payroll run checkpoint not found"));
+
+        if checkpoint.completed {
+            panic!("Cannot recover a fully completed payroll run");
+        }
+
+        if !Self::is_interrupted_run_recoverable(
+            e.clone(),
+            employer.clone(),
+            batch_root.clone(),
+            asset.clone(),
+            execution_nonce.clone(),
+            expected_payment_count,
+        ) {
+            panic!("Payroll run is not eligible for recovery");
+        }
+
+        checkpoint.state = BatchCheckpointState::Resumed;
+        checkpoint.failed = false;
+        e.storage().persistent().set(&key, &checkpoint);
+
+        payroll_events::emit_interrupted_run_recovered(
+            &e,
+            employer,
+            batch_root,
+            asset,
+            execution_nonce,
+            checkpoint.last_checkpoint_index,
+            checkpoint.total_checkpoints,
+        );
+
+        checkpoint
     }
 
     /// Return the canonical state for a payroll run ID.
@@ -2670,6 +3560,11 @@ impl Payroll {
         token_client.transfer(&addrs.treasury, &request.recipient, &request.amount);
 
         payroll_events::emit_emergency_approved(&e, request.amount, request.recipient);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "emergency_withdrawal"),
+        );
     }
 
     /// Cancel a pending emergency withdrawal request.
@@ -2731,6 +3626,8 @@ impl Payroll {
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
     ) -> u64 {
+        // Issue #620: authorize the execution initiator before any other work.
+        Self::require_execution_initiator(&e);
         Self::require_company_active(&e);
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "prepare_payroll_run");
@@ -2794,7 +3691,8 @@ impl Payroll {
         // #362 ? validate nonce monotonicity for this employer
         Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
 
-        addrs.admin.require_auth();
+        // Issue #620: `addrs.admin` was already authorized as the execution
+        // initiator at the top of this function.
 
         // Validate treasury asset allowlist
         if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
@@ -2854,8 +3752,54 @@ impl Payroll {
         Self::add_locked_funds(&e, addrs.token.clone(), expected_total_spend);
 
         payroll_events::emit_run_prepared(&e, run_id, expected_total_spend);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_prepared"),
+        );
 
         run_id
+    }
+
+    /// Transfer the admin role of a pending payroll run to a new admin.
+    pub fn transfer_pending_run_admin(
+        e: Env,
+        current_admin: Address,
+        run_id: u64,
+        new_admin: Address,
+    ) {
+        Self::require_not_paused(&e);
+        Self::validate_run_id(run_id);
+        Self::require_run_not_disputed(&e, run_id);
+
+        let pending_key = DataKey::PendingRun(run_id);
+        let mut pending_run: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .expect("Pending run not found");
+
+        if pending_run.admin != current_admin {
+            panic!("Unauthorized: caller is not the pending run admin");
+        }
+
+        current_admin.require_auth();
+
+        if current_admin == new_admin {
+            panic!("Invalid transfer: new admin is the same as current admin");
+        }
+
+        pending_run.admin = new_admin.clone();
+
+        e.storage().persistent().set(&pending_key, &pending_run);
+
+        e.events().publish(
+            (
+                Symbol::new(&e, "payroll"),
+                Symbol::new(&e, "run_admin_transferred"),
+            ),
+            (run_id, current_admin, new_admin),
+        );
     }
 
     /// Get a pending payroll run, if it exists.
@@ -2931,6 +3875,7 @@ impl Payroll {
             nonce: pending_run.nonce.clone(),
             reconciliation_status: ReconciliationStatus::Unreconciled,
             metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
+            note_hash: BytesN::from_array(&e, &[0u8; 32]),
         };
         e.storage()
             .persistent()
@@ -2939,6 +3884,11 @@ impl Payroll {
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_finalized")),
             (run_id, pending_run.total_amount),
+        );
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_finalized"),
         );
     }
 
@@ -3015,6 +3965,11 @@ impl Payroll {
             (symbol_short!("payroll"), Symbol::new(&e, "run_cancelled")),
             (run_id, reason),
         );
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_cancelled"),
+        );
     }
 
     /// Alias for cancel_payroll_run_with_reason
@@ -3075,7 +4030,10 @@ impl Payroll {
         expected_total_spend: i128,
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
+        source_address: Address,
     ) -> u64 {
+        // Issue #620: authorize the execution initiator before any other work.
+        Self::require_execution_initiator(&e);
         Self::require_company_active(&e);
         Self::validate_non_zero_digest(&e, &idempotency_key, "idempotency_key");
 
@@ -3098,12 +4056,8 @@ impl Payroll {
             if record.payload_hash != payload_hash {
                 panic!("Idempotency key payload mismatch");
             }
-            let addrs: ContractAddresses = e
-                .storage()
-                .persistent()
-                .get(&DataKey::Addresses)
-                .expect("Not initialized");
-            addrs.admin.require_auth();
+            // Issue #620: the execution initiator was authorized at the top of
+            // this function before the cached record is returned.
             return record.run_id;
         }
 
@@ -3115,6 +4069,7 @@ impl Payroll {
             expected_total_spend,
             nonce,
             draft_hash,
+            source_address,
         );
         e.storage().persistent().set(
             &key,
@@ -3146,8 +4101,14 @@ impl Payroll {
         expected_total_spend: i128,
         nonce: BytesN<32>,
         draft_hash: Option<BytesN<32>>,
+        source_address: Address,
     ) -> u64 {
+        // Issue #620: authorize the execution initiator before any other work.
+        Self::require_execution_initiator(&e);
         Self::require_company_active(&e);
+
+        // Validate import source authorization before any other work.
+        require_authorized_source(&e, &source_address);
 
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll");
@@ -3201,6 +4162,10 @@ impl Payroll {
             }
             total += amt;
         }
+
+        // #514 - validate minimum payout amount threshold
+        Self::validate_minimum_payout_amount(&e, &amounts);
+
         if total != expected_total_spend {
             panic!(
                 "Expected spend mismatch: authorised {} but batch totals {}",
@@ -3234,7 +4199,8 @@ impl Payroll {
             }
         }
 
-        addrs.admin.require_auth();
+        // Issue #620: `addrs.admin` was already authorized as the execution
+        // initiator at the top of this function.
 
         // Issue #338: enforce per-period capacity limits before the batch executes.
         Self::enforce_and_record_capacity(&e, count, expected_total_spend);
@@ -3316,6 +4282,7 @@ impl Payroll {
             nonce: nonce.clone(),
             reconciliation_status: ReconciliationStatus::Unreconciled,
             metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
+            note_hash: BytesN::from_array(&e, &[0u8; 32]),
         };
         e.storage()
             .persistent()
@@ -3335,11 +4302,491 @@ impl Payroll {
         Self::set_metadata_version(&e, run_id, 1u32, BytesN::from_array(&e, &[0u8; 32]));
 
         payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_executed"),
+        );
 
         run_id
     }
 
-    // ── Issue #475: Bounded batch processing for employee payments ────
+    // ── Issue #346: proof expiry enforcement ──────────────────────────────────
+
+    /// Same as [`batch_process_payroll`](Self::batch_process_payroll), except
+    /// each proof is verified through a registered, expiry-aware
+    /// `proof_verifier::ProofReference` (see `proof_verifier::verify_with_reference`)
+    /// instead of a bare `verify_payment_proof` call.
+    ///
+    /// `proof_refs[i]` must be the `ref_id` previously passed to
+    /// `proof_verifier::register_proof_reference` for `proofs[i]`. Execution
+    /// panics with an actionable message when a reference is missing,
+    /// revoked, expired, or was registered for different proof bytes -
+    /// stale payroll evidence can never be replayed through this entry point
+    /// after its verification window has passed, even if the raw proof
+    /// bytes would otherwise still satisfy `verify_payment_proof`.
+    ///
+    /// A caller who needs to replace a proof before settlement (e.g. the
+    /// original reference expired, or the wrong proof was registered) simply
+    /// registers a new reference for fresh proof bytes via
+    /// `proof_verifier::register_proof_reference` and passes its `ref_id`
+    /// here - there is no separate "replace" call, since registration itself
+    /// is the only way to create a currently-valid reference.
+    ///
+    /// This is intentionally a separate entry point rather than a change to
+    /// `batch_process_payroll`'s existing signature, so every current caller
+    /// of the unmodified function keeps working unchanged. It does not (yet)
+    /// have a bounded/idempotent counterpart the way `batch_process_payroll`
+    /// does - only the core batch path is covered here.
+    pub fn batch_process_with_expiry(
+        e: Env,
+        proofs: Vec<BytesN<256>>,
+        proof_refs: Vec<BytesN<32>>,
+        amounts: Vec<i128>,
+        employees: Vec<Address>,
+        expected_total_spend: i128,
+        nonce: BytesN<32>,
+        draft_hash: Option<BytesN<32>>,
+    ) -> u64 {
+        Self::require_company_active(&e);
+
+        Self::validate_storage_version_for_operation(&e, "batch_process_with_expiry");
+
+        Self::validate_non_zero_digest(&e, &nonce, "nonce");
+        if let Some(ref dh) = draft_hash {
+            Self::validate_non_zero_digest(&e, dh, "draft_hash");
+        }
+        let count = proofs.len();
+
+        if count == 0 {
+            panic!("Missing payroll proof: one proof is required per payment");
+        }
+
+        if amounts.len() != count || employees.len() != count || proof_refs.len() != count {
+            panic!("Array length mismatch");
+        }
+
+        assert!(count <= MAX_BATCH, "Batch too large");
+
+        let nonce_key = DataKey::RunNonce(nonce.clone());
+        if e.storage().persistent().has(&nonce_key) {
+            panic!("Duplicate run nonce: this payroll batch has already been submitted");
+        }
+
+        let resolved_draft_hash: BytesN<32> = if let Some(ref dh) = draft_hash {
+            let commit_key = DataKey::DraftCommitment(dh.clone());
+            if !e.storage().persistent().has(&commit_key) {
+                panic!("Draft hash not pre-committed: call commit_draft first");
+            }
+            e.storage().persistent().remove(&commit_key);
+            dh.clone()
+        } else {
+            BytesN::from_array(&e, &[0u8; 32])
+        };
+
+        Self::validate_no_duplicate_employees(&employees);
+
+        let mut total: i128 = 0;
+        for i in 0..count {
+            let amt = amounts.get(i).unwrap();
+            if amt <= 0 {
+                panic!("Amount must be positive");
+            }
+            total += amt;
+        }
+        if total != expected_total_spend {
+            panic!(
+                "Expected spend mismatch: authorised {} but batch totals {}",
+                expected_total_spend, total
+            );
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+
+        Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
+
+        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+            panic!("Asset not allowed");
+        }
+
+        if e.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = e
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(&e, &pm_addr);
+            if pm_client.is_paused() {
+                panic!("Payroll is paused");
+            }
+        }
+
+        addrs.admin.require_auth();
+
+        Self::enforce_and_record_capacity(&e, count, expected_total_spend);
+        Self::enforce_settlement_window_for_current_period(&e);
+
+        let run_id = Self::derive_run_id(&e);
+
+        e.storage().persistent().set(&nonce_key, &run_id);
+        Self::update_nonce_sequence(&e, &addrs.admin, &nonce);
+
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+
+        let treasury_balance = token_client.balance(&addrs.treasury);
+        if treasury_balance < expected_total_spend {
+            panic!(
+                "Insufficient treasury balance: available {} but batch requires {}",
+                treasury_balance, expected_total_spend
+            );
+        }
+
+        let verifier = ProofVerifierClient::new(&e, &addrs.verifier);
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+
+        for i in 0..count {
+            let proof = proofs.get(i).unwrap();
+            let ref_id = proof_refs.get(i).unwrap();
+            let amount = amounts.get(i).unwrap();
+            let employee = employees.get(i).unwrap();
+
+            let commitment_struct = commitment_client.get_commitment(&employee);
+            let commitment = commitment_struct.commitment;
+
+            Self::validate_employee_not_already_paid(&e, run_id, &commitment);
+
+            let mut nullifier_arr = [0u8; 32];
+            nullifier_arr[0] = (i % 256) as u8;
+            nullifier_arr[1] = (i / 256) as u8;
+            let nullifier = BytesN::from_array(&e, &nullifier_arr);
+            let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
+
+            let mut public_inputs = Vec::new(&e);
+            public_inputs.push_back(commitment.clone());
+            public_inputs.push_back(nullifier.clone());
+            public_inputs.push_back(recipient_hash.clone());
+
+            // Issue #346: verify through the expiry-aware reference rather
+            // than a bare proof-bytes check, so a stale (expired or revoked)
+            // reference blocks settlement even when the underlying proof
+            // bytes would otherwise still pass `verify_payment_proof`.
+            let ok = verifier.verify_with_reference(&ref_id, &proof, &public_inputs);
+            if !ok {
+                panic!(
+                    "Invalid or expired payment proof reference for employee {}",
+                    i
+                );
+            }
+
+            commitment_client.record_nullifier(&nullifier);
+
+            token_client.transfer(&addrs.treasury, &employee, &amount);
+
+            commitment_client.lock_commitment_updates(&employee);
+
+            Self::record_employee_paid(&e, run_id, commitment);
+
+            payroll_events::emit_payment_executed(&e, employee.clone(), amount);
+        }
+
+        let run = PayrollRun {
+            run_id,
+            executed_at: e.ledger().timestamp(),
+            admin: addrs.admin.clone(),
+            total_amount: expected_total_spend,
+            employee_count: count,
+            draft_hash: resolved_draft_hash,
+            nonce: nonce.clone(),
+            reconciliation_status: ReconciliationStatus::Unreconciled,
+            metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
+            note_hash: BytesN::from_array(&e, &[0u8; 32]),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::PayrollRun(run_id), &run);
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::ReconciliationRequired);
+
+        Self::record_payroll_run_status(
+            &e,
+            run_id,
+            PayrollRunStatusKind::Completed,
+            count,
+            expected_total_spend,
+        );
+
+        Self::set_metadata_version(&e, run_id, 1u32, BytesN::from_array(&e, &[0u8; 32]));
+
+        payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
+
+        run_id
+    }
+
+    // ── Issue #509 / #521: failure reason codes + dry-run preflight ──────────
+
+    /// Read-only preflight for `batch_process_payroll`: reports every
+    /// blocking precondition it can find without moving funds, verifying
+    /// proofs, or writing any storage (issue #521).
+    ///
+    /// Runs the same checks `batch_process_payroll` performs, in the same
+    /// order, EXCEPT: it never calls `token_client.transfer`, never calls
+    /// `verifier.verify_payment_proof` (proof correctness cannot be checked
+    /// without either duplicating verifier internals or accepting a
+    /// dependency this preflight does not want; a `MissingProof` /
+    /// `ArrayLengthMismatch` shape check on `proof_count` is still
+    /// performed), and never writes `DataKey::RunNonce`,
+    /// `DataKey::PeriodUsage`, `DataKey::EmployerNonceSequence`, or any
+    /// other run/nonce/capacity state. A `draft_hash` pre-commitment is
+    /// checked for existence but never consumed.
+    ///
+    /// Unlike `batch_process_payroll`, which panics on the FIRST failing
+    /// check, this collects every blocker it finds into one report — the
+    /// main reason a dry-run is more useful than reading the panic message
+    /// from a real (reverted) call.
+    ///
+    /// Still gated the same way the real call effectively is: nothing here
+    /// discloses salary amounts, employee identities, or proof material
+    /// beyond what the caller already supplied as arguments.
+    pub fn dry_run_batch_process_payroll(e: Env, args: DryRunArgs) -> PayrollDryRunReport {
+        let mut report = PayrollDryRunReport::empty(&e);
+
+        if !Self::company_is_active(&e) {
+            report.push(PayrollFailureReason::CompanyNotActive);
+        }
+
+        // Validate import source
+        if let Some(ref source) = args.source_address {
+            if let Err(reason) = validate_source_for_report(&e, source) {
+                report.push(reason);
+            }
+        }
+
+        let count = args.proof_count;
+        if count == 0 {
+            report.push(PayrollFailureReason::MissingProof);
+        }
+        if args.amounts.len() != count || args.employees.len() != count {
+            report.push(PayrollFailureReason::ArrayLengthMismatch);
+        }
+        if count > MAX_BATCH {
+            report.push(PayrollFailureReason::BatchTooLarge);
+        }
+
+        let nonce_key = DataKey::RunNonce(args.nonce.clone());
+        if e.storage().persistent().has(&nonce_key) {
+            report.push(PayrollFailureReason::DuplicateRunNonce);
+        }
+
+        if let Some(ref dh) = args.draft_hash {
+            let commit_key = DataKey::DraftCommitment(dh.clone());
+            if !e.storage().persistent().has(&commit_key) {
+                report.push(PayrollFailureReason::DraftNotPreCommitted);
+            }
+        }
+
+        if Self::has_duplicate_employees(&args.employees) {
+            report.push(PayrollFailureReason::DuplicateEmployee);
+        }
+
+        let mut total: i128 = 0;
+        let mut any_non_positive = false;
+        for i in 0..args.amounts.len() {
+            let amt = args.amounts.get(i).unwrap();
+            if amt <= 0 {
+                any_non_positive = true;
+            } else {
+                total += amt;
+            }
+        }
+        if any_non_positive {
+            report.push(PayrollFailureReason::NonPositiveAmount);
+        }
+
+        // #514 - validate minimum payout amount threshold in dry run
+        let minimum: i128 = match e.storage().persistent().get(&DataKey::MinimumPayoutAmount) {
+            Some(min) => min,
+            None => 0, // No threshold configured
+        };
+
+        if minimum > 0 {
+            let mut any_below_minimum = false;
+            for i in 0..args.amounts.len() {
+                let amt = args.amounts.get(i).unwrap();
+                if amt < minimum {
+                    any_below_minimum = true;
+                    break;
+                }
+            }
+            if any_below_minimum {
+                report.push(PayrollFailureReason::AmountBelowMinimum);
+            }
+        }
+
+        if total != args.expected_total_spend {
+            report.push(PayrollFailureReason::ExpectedSpendMismatch);
+        }
+
+        if let Some(addrs) = e
+            .storage()
+            .persistent()
+            .get::<_, ContractAddresses>(&DataKey::Addresses)
+        {
+            if Self::nonce_is_stale(&e, &addrs.admin, &args.nonce) {
+                report.push(PayrollFailureReason::NonceNotMonotonic);
+            }
+
+            if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+                report.push(PayrollFailureReason::AssetNotAllowed);
+            }
+
+            if e.storage().persistent().has(&DataKey::PauseManager) {
+                let pm_addr: Address = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PauseManager)
+                    .unwrap();
+                let pm_client = PauseManagerClient::new(&e, &pm_addr);
+                if pm_client.is_paused() {
+                    report.push(PayrollFailureReason::SystemPaused);
+                }
+            }
+
+            for detail in Self::would_exceed_capacity(&e, count, args.expected_total_spend) {
+                report.push_capacity(detail);
+            }
+
+            if Self::settlement_window_would_reject(&e) {
+                report.push(PayrollFailureReason::SettlementWindowNotOpen);
+            }
+
+            let token_client = soroban_token::Client::new(&e, &addrs.token);
+            let treasury_balance = token_client.balance(&addrs.treasury);
+            if treasury_balance < args.expected_total_spend {
+                report.push(PayrollFailureReason::InsufficientTreasuryBalance);
+            }
+        }
+
+        report
+    }
+
+    /// Read-only equivalent of `require_company_active`: returns `false`
+    /// instead of panicking. Absent state defaults to `Active`, matching
+    /// `require_company_active`'s own default.
+    fn company_is_active(e: &Env) -> bool {
+        match e
+            .storage()
+            .persistent()
+            .get::<_, CompanyState>(&DataKey::CompanyState)
+        {
+            Some(CompanyState::Active) | None => true,
+            Some(_) => false,
+        }
+    }
+
+    /// Read-only equivalent of the duplicate-employee check inside
+    /// `validate_no_duplicate_employees`, without panicking.
+    fn has_duplicate_employees(employees: &Vec<Address>) -> bool {
+        let count = employees.len();
+        for i in 0..count {
+            let current = employees.get(i).unwrap();
+            for j in (i + 1)..count {
+                if current == employees.get(j).unwrap() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Read-only equivalent of `validate_nonce_monotonicity`: returns
+    /// `true` if the given nonce would be rejected (a replay or a
+    /// non-strictly-increasing value), without panicking or writing state.
+    fn nonce_is_stale(env: &Env, employer: &Address, nonce: &BytesN<32>) -> bool {
+        let sequence_key = DataKey::EmployerNonceSequence(employer.clone());
+        if let Some(sequence_state) = env
+            .storage()
+            .persistent()
+            .get::<_, EmployerNonceSequenceState>(&sequence_key)
+        {
+            if nonce == &sequence_state.last_nonce {
+                return true;
+            }
+            let new_nonce_value = Self::nonce_to_u256(env, nonce);
+            let last_nonce_value = Self::nonce_to_u256(env, &sequence_state.last_nonce);
+            if new_nonce_value <= last_nonce_value {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Read-only equivalent of `enforce_and_record_capacity`: returns which
+    /// capacity dimensions (if any) executing this batch would exceed,
+    /// without writing `DataKey::PeriodUsage` or emitting the enforcement
+    /// events `enforce_and_record_capacity` emits on success.
+    fn would_exceed_capacity(
+        e: &Env,
+        employee_count: u32,
+        batch_value: i128,
+    ) -> Vec<CapacityLimitKind> {
+        let mut exceeded = Vec::new(e);
+        let limits: CapacityLimits = match e.storage().persistent().get(&DataKey::CapacityLimits) {
+            Some(limits) => limits,
+            None => return exceeded,
+        };
+        let period: Symbol = match e.storage().persistent().get(&DataKey::CurrentPeriod) {
+            Some(period) => period,
+            None => return exceeded,
+        };
+
+        let usage: PeriodUsage = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PeriodUsage(period))
+            .unwrap_or(PeriodUsage {
+                batch_count: 0,
+                employee_count: 0,
+                total_value: 0,
+            });
+
+        if usage.batch_count + 1 > limits.max_batches {
+            exceeded.push_back(CapacityLimitKind::BatchCount);
+        }
+        if usage.employee_count + employee_count > limits.max_employees {
+            exceeded.push_back(CapacityLimitKind::EmployeeCount);
+        }
+        if usage.total_value + batch_value > limits.max_total_value {
+            exceeded.push_back(CapacityLimitKind::TotalValue);
+        }
+        exceeded
+    }
+
+    /// Read-only equivalent of `enforce_settlement_window_for_current_period`:
+    /// returns `true` if the current period's settlement window (if any) is
+    /// not open for execution right now, without emitting the rejection
+    /// event the real enforcement path emits.
+    fn settlement_window_would_reject(e: &Env) -> bool {
+        let period: Symbol = match e.storage().persistent().get(&DataKey::CurrentPeriod) {
+            Some(period) => period,
+            None => return false,
+        };
+        let window: SettlementWindow = match e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period))
+        {
+            Some(window) => window,
+            None => return true,
+        };
+        let now = e.ledger().timestamp();
+        Self::classify_settlement_window(&window, now) != SettlementWindowStatus::Executable
+    }
+
+    // ── Issue #475: Bounded batch processing for employee payments ────────────
+
     /// Bounded batch processing for large payroll runs (#475).
     ///
     /// Accepts a configurable `batch_size` parameter bounded by a hard cap (MAX_BATCH = 50).
@@ -3355,6 +4802,8 @@ impl Payroll {
         draft_hash: Option<BytesN<32>>,
         batch_size: u32,
     ) -> u64 {
+        // Issue #620: authorize the execution initiator before any other work.
+        Self::require_execution_initiator(&e);
         Self::require_company_active(&e);
 
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll_bounded");
@@ -3403,7 +4852,8 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
 
-        addrs.admin.require_auth();
+        // Issue #620: `addrs.admin` was already authorized as the execution
+        // initiator at the top of this function.
 
         let batch_root = draft_hash.clone().unwrap_or_else(|| nonce.clone());
         let checkpoint_key = DataKey::BatchCheckpoint(
@@ -3414,13 +4864,28 @@ impl Payroll {
         );
 
         let mut checkpoint: BatchCheckpoint = if e.storage().persistent().has(&checkpoint_key) {
-            let cp: BatchCheckpoint = e.storage().persistent().get(&checkpoint_key).unwrap();
+            let mut cp: BatchCheckpoint = e.storage().persistent().get(&checkpoint_key).unwrap();
             if cp.completed {
                 panic!("Payroll batch already completed");
             }
             if cp.failed {
-                panic!("Failed payout retry requires an eligibility check and explicit resume");
+                panic!(
+                    "Failed payroll batch is not resumable: call resume_payroll_batch first (issue #611)"
+                );
             }
+            // Issue #611: a resubmission must replay the same batch shape. A
+            // persisted cursor beyond the submitted payment count means this
+            // call is not the original batch (or its size changed), which
+            // would silently skip or double-count payouts.
+            if cp.last_checkpoint_index > count {
+                panic!(
+                    "Batch identity mismatch: checkpoint progress {} exceeds submitted payment count {}",
+                    cp.last_checkpoint_index, count
+                );
+            }
+            // Issue #611: keep the recorded batch size aligned with the
+            // replayed payment count so progress reporting stays truthful.
+            cp.total_checkpoints = count;
             payroll_events::emit_batch_checkpoint_resumed(
                 &e,
                 addrs.admin.clone(),
@@ -3566,6 +5031,9 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
+
+        // Issue #471: a frozen period cannot receive new drafts.
+        Self::require_period_not_frozen(&e, &period_label);
 
         if total_amount <= 0 {
             panic!("total_amount must be positive");
@@ -3789,17 +5257,31 @@ impl Payroll {
         draft.updated_at
     }
 
-    /// Set or replace the human-readable description of a run draft (#474).
+    /// Return the owner/admin who holds the lock on a payroll draft (Issue #556).
     ///
-    /// Only the admin may change a description, and only while the draft is
-    /// still `Pending`. Descriptions are length-limited and must contain
-    /// non-whitespace content.
-    pub fn set_run_draft_description(
-        e: Env,
-        admin: Address,
-        draft_id: u64,
-        description: soroban_sdk::String,
-    ) {
+    /// A draft is considered in a locked state when it has reached a finalized
+    /// review or submission state (`RunDraftState::Finalized` or `RunDraftState::Submitted`).
+    /// - If the draft exists and is locked (`Finalized` or `Submitted`), returns `Some(draft.admin)`.
+    /// - If the draft exists but is in an unlocked state (`Pending`) or terminal non-locked state (`Cancelled`, `Expired`), returns `None`.
+    /// - If the draft does not exist, returns `None`.
+    ///
+    /// Exposes only the lock owner address metadata without revealing confidential
+    /// employee addresses or salary figures.
+    pub fn get_draft_lock_owner(e: Env, draft_id: u64) -> Option<Address> {
+        Self::validate_draft_id(draft_id);
+        let draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))?;
+        if matches!(draft.state, RunDraftState::Finalized | RunDraftState::Submitted) {
+            Some(draft.admin)
+        } else {
+            None
+        }
+    }
+
+    /// Set or update the description for a draft in Pending state.
+    pub fn set_run_draft_description(e: Env, admin: Address, draft_id: u64, description: String) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
             .storage()
@@ -3811,15 +5293,30 @@ impl Payroll {
         }
         admin.require_auth();
 
-        Self::validate_draft_description(&description);
-
+        Self::validate_draft_id(draft_id);
         let draft: PayrollRunDraft = e
             .storage()
             .persistent()
             .get(&DataKey::RunDraft(draft_id))
             .expect("Draft not found");
         if draft.state != RunDraftState::Pending {
-            panic!("Draft is already finalized");
+            panic!("Only pending drafts can be updated");
+        }
+        let len = description.len();
+        if len == 0 || len > 256 {
+            panic!("Description length must be between 1 and 256 characters");
+        }
+        let mut all_spaces = true;
+        let mut buf = [0u8; 256];
+        description.copy_into_slice(&mut buf[..len as usize]);
+        for &b in &buf[..len as usize] {
+            if b != b' ' && b != b'\t' && b != b'\n' && b != b'\r' {
+                all_spaces = false;
+                break;
+            }
+        }
+        if all_spaces {
+            panic!("Description cannot be empty or blank");
         }
 
         e.storage()
@@ -3827,8 +5324,9 @@ impl Payroll {
             .set(&DataKey::DraftDescription(draft_id), &description);
     }
 
-    /// Retrieve the optional description of a run draft.
-    pub fn get_run_draft_description(e: Env, draft_id: u64) -> Option<soroban_sdk::String> {
+    /// Retrieve the description for a draft by ID.
+    pub fn get_run_draft_description(e: Env, draft_id: u64) -> Option<String> {
+        Self::validate_draft_id(draft_id);
         e.storage()
             .persistent()
             .get(&DataKey::DraftDescription(draft_id))
@@ -3889,9 +5387,16 @@ impl Payroll {
 
         // Issue #471: the period is now final — auto-freeze it so no further
         // payroll edits can slip in after submission without an explicit
-        // authorized unfreeze.
-        let freeze_key = DataKey::PeriodFreeze(draft.period_label.clone());
+        // authorized unfreeze. Both the configuration freeze marker (#248)
+        // and the #471 freeze record (reason = "finalized") are written so
+        // `is_period_frozen` / `get_period_freeze` / `unfreeze_payroll_period`
+        // observe the freeze consistently.
+        let freeze_key = DataKey::PeriodConfigFrozen(draft.period_label.clone());
         if !e.storage().persistent().has(&freeze_key) {
+            e.storage().persistent().set(&freeze_key, &true);
+        }
+        let finalized_key = DataKey::PeriodFreeze(draft.period_label.clone());
+        if !e.storage().persistent().has(&finalized_key) {
             let freeze = PeriodFreeze {
                 period_label: draft.period_label.clone(),
                 frozen_by: admin.clone(),
@@ -3899,14 +5404,7 @@ impl Payroll {
                 reason: Symbol::new(&e, "finalized"),
                 runs_count: Self::count_runs_for_period(&e, &draft.period_label),
             };
-            e.storage().persistent().set(&freeze_key, &freeze);
-
-            payroll_events::emit_period_frozen(
-                &e,
-                draft.period_label.clone(),
-                admin.clone(),
-                Symbol::new(&e, "finalized"),
-            );
+            e.storage().persistent().set(&finalized_key, &freeze);
         }
 
         payroll_events::emit_draft_submitted(&e, draft_id, admin);
@@ -3991,6 +5489,188 @@ impl Payroll {
             .remove(&DataKey::ActiveDraftForPeriod(draft.period_label.clone()));
 
         payroll_events::emit_draft_expired(&e, draft_id, admin);
+    }
+
+    // ── Issue #471 / #484: payroll period freeze and reopening guard ─────────
+
+    /// Panic if the given payroll period is frozen under either freeze
+    /// system (#248 config-freeze, #471 draft/finalized-freeze).
+    ///
+    /// Called by every state-mutating payroll edit path that must be blocked
+    /// once a period has been finalized (draft creation, amendment,
+    /// draft finalization, and draft submission).
+    fn require_period_not_frozen(e: &Env, period_label: &Symbol) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label.clone()))
+            || e.storage()
+                .persistent()
+                .has(&DataKey::PeriodConfigFrozen(period_label.clone()))
+        {
+            panic!("Payroll period is frozen: it has been finalized and can no longer be edited");
+        }
+    }
+
+    /// Freeze a payroll period.
+    ///
+    /// Once frozen, no new drafts can be created for `period_label`, and
+    /// existing pending/finalized drafts for the period can no longer be
+    /// amended, finalized, or submitted. Cancelling or expiring a
+    /// draft remains possible as an operator escape hatch — those paths
+    /// remove pending payroll work instead of adding or changing it.
+    ///
+    /// Only the `admin` may freeze. Freezing an already-frozen period is
+    /// rejected so the audit trail stays unambiguous; use `unfreeze` first.
+    ///
+    /// Emits `period_frozen`.
+    pub fn freeze_payroll_period(e: Env, admin: Address, period_label: Symbol, reason: Symbol) {
+        Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        Self::validate_symbol_not_empty(&e, &reason, "reason");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let freeze_key = DataKey::PeriodFreeze(period_label.clone());
+        if e.storage().persistent().has(&freeze_key) {
+            panic!("Payroll period is already frozen");
+        }
+
+        let freeze = PeriodFreeze {
+            period_label: period_label.clone(),
+            frozen_by: admin.clone(),
+            frozen_at: e.ledger().timestamp(),
+            reason: reason.clone(),
+            runs_count: Self::count_runs_for_period(&e, &period_label),
+        };
+        e.storage().persistent().set(&freeze_key, &freeze);
+
+        payroll_events::emit_period_frozen(&e, period_label, admin, reason);
+    }
+
+    /// Lift the freeze on a finalized payroll period (reopen finalized period).
+    ///
+    /// Only the `admin` may unfreeze/reopen (#484). This is the sole path back to editing
+    /// after a period has been finalized; the unfreeze event preserves the full audit trail.
+    ///
+    /// Enforces cooldown between successive reopens to prevent rapid unfreezes that could
+    /// expose the period to uncontrolled edits. If a cooldown is configured and insufficient
+    /// time has passed since the last reopen, this panics with a privacy-safe error.
+    ///
+    /// Emits `period_unfrozen`.
+    pub fn unfreeze_payroll_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let freeze_key = DataKey::PeriodFreeze(period_label.clone());
+        if !e.storage().persistent().has(&freeze_key) {
+            panic!("Payroll period is not frozen");
+        }
+
+        // Validate cooldown before allowing reopen
+        let cooldown_key = DataKey::PeriodReopenCooldown(period_label.clone());
+        if let Some(cooldown) = e
+            .storage()
+            .persistent()
+            .get::<_, PeriodReopenCooldown>(&cooldown_key)
+        {
+            if cooldown.cooldown_seconds > 0 {
+                let now = e.ledger().timestamp();
+                let elapsed = now.saturating_sub(cooldown.last_reopen_at);
+                if elapsed < cooldown.cooldown_seconds {
+                    panic!(
+                        "Period reopen cooldown active: cannot reopen until {} seconds have elapsed",
+                        cooldown.cooldown_seconds.saturating_sub(elapsed)
+                    );
+                }
+            }
+
+            // Update last reopen timestamp
+            let updated = PeriodReopenCooldown {
+                cooldown_seconds: cooldown.cooldown_seconds,
+                last_reopen_at: e.ledger().timestamp(),
+            };
+            e.storage().persistent().set(&cooldown_key, &updated);
+        }
+
+        e.storage().persistent().remove(&freeze_key);
+
+        payroll_events::emit_period_unfrozen(&e, period_label, admin);
+    }
+
+    /// Explicit alias for `unfreeze_payroll_period` to reopen a finalized payroll period (#484).
+    ///
+    /// Only the contract admin can call this entrypoint.
+    pub fn reopen_payroll_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::unfreeze_payroll_period(e, admin, period_label);
+    }
+
+    /// Return the freeze record for a period, if it is frozen.
+    pub fn get_period_freeze(e: Env, period_label: Symbol) -> Option<PeriodFreeze> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PeriodFreeze(period_label))
+    }
+
+    /// Return `true` if the payroll period is currently frozen.
+    pub fn is_period_frozen(e: Env, period_label: Symbol) -> bool {
+        e.storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label))
+    }
+
+    /// Set the cooldown duration for period reopens.
+    ///
+    /// Only the admin may configure the cooldown. Setting `cooldown_seconds` to 0
+    /// disables the cooldown entirely (no minimum reopen delay).
+    pub fn set_period_reopen_cooldown(
+        e: Env,
+        admin: Address,
+        period_label: Symbol,
+        cooldown_seconds: u64,
+    ) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let cooldown_key = DataKey::PeriodReopenCooldown(period_label.clone());
+        let cooldown = PeriodReopenCooldown {
+            cooldown_seconds,
+            last_reopen_at: 0,
+        };
+        e.storage().persistent().set(&cooldown_key, &cooldown);
+    }
+
+    /// Get the reopen cooldown configuration for a period.
+    pub fn get_period_reopen_cooldown(
+        e: Env,
+        period_label: Symbol,
+    ) -> Option<PeriodReopenCooldown> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PeriodReopenCooldown(period_label))
     }
 
     // ?? Issue #91: privileged-role rotation ??????????????????????????????????
@@ -4348,8 +6028,7 @@ impl Payroll {
     }
 
     pub fn add_locked_funds(e: &Env, asset: Address, amount: i128) {
-        Self::validate_treasury_asset(e.clone(), asset.clone())
-            .expect("Cross-asset treasury mismatch");
+        Self::require_active_treasury_asset(e, asset.clone());
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_add(amount).expect("Locked funds overflow");
@@ -4358,8 +6037,7 @@ impl Payroll {
     }
 
     pub fn subtract_locked_funds(e: &Env, asset: Address, amount: i128) {
-        Self::validate_treasury_asset(e.clone(), asset.clone())
-            .expect("Cross-asset treasury mismatch");
+        Self::require_active_treasury_asset(e, asset.clone());
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_sub(amount).expect("Locked funds underflow");
@@ -4399,9 +6077,18 @@ impl Payroll {
         if signers.len() < required_quorum {
             panic!("Insufficient signer quorum");
         }
+        // Issue #555: concurrent approval attempts must not be able to satisfy a
+        // multi-signer quorum. A repeated signer is a duplicate approval attempt
+        // rather than an additional approval, so reject it before counting and
+        // before any quorum reference is consumed.
+        let mut unique_signers: Vec<Address> = Vec::new(&e);
         for i in 0..signers.len() {
             let s = signers.get(i).unwrap();
+            if unique_signers.first_index_of(s.clone()).is_some() {
+                panic!("Duplicate signer in quorum approval");
+            }
             s.require_auth();
+            unique_signers.push_back(s);
         }
 
         let addrs: ContractAddresses = e
@@ -4474,6 +6161,119 @@ impl Payroll {
         run.metadata_hash == expected_hash
     }
 
+    // ?? Issue #617: payroll note hash verification ??????????????????????????
+
+    /// Pre-commit an off-chain payroll note hash (e.g. a payslip or payment
+    /// receipt document issued to an employee outside the contract) that
+    /// will later be bound to a payroll run.
+    ///
+    /// Same one-time-use commit-then-bind pattern already used for
+    /// `metadata_hash` (#177) and `draft_hash` (#102): the hash is recorded
+    /// here first, then consumed by `set_run_note_hash`. Kept in its own
+    /// `NoteCommitment` keyspace rather than reusing `DraftCommitment`, so a
+    /// note hash can never be mistaken for, or collide in storage with, an
+    /// unrelated draft or metadata commitment.
+    ///
+    /// Only the admin may call.
+    pub fn commit_payroll_note_hash(e: Env, admin: Address, note_hash: BytesN<32>) {
+        Self::require_not_paused(&e);
+        Self::validate_non_zero_digest(&e, &note_hash, "note_hash");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::NoteCommitment(note_hash.clone());
+        if e.storage().persistent().has(&key) {
+            panic!("Note hash already committed");
+        }
+        e.storage().persistent().set(&key, &true);
+
+        payroll_events::emit_note_committed(&e, note_hash);
+    }
+
+    /// Bind a pre-committed payroll note hash to an existing payroll run.
+    /// Consumes the commitment so it cannot be reused. Only the admin may
+    /// call.
+    ///
+    /// Must be called with a note hash that was previously committed via
+    /// `commit_payroll_note_hash`. Fails if the hash has not been
+    /// pre-committed, mirroring `set_run_metadata`'s behavior for
+    /// `metadata_hash`.
+    pub fn set_run_note_hash(e: Env, admin: Address, run_id: u64, note_hash: BytesN<32>) {
+        Self::require_not_paused(&e);
+        Self::validate_run_id(run_id);
+        Self::validate_non_zero_digest(&e, &note_hash, "note_hash");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let commit_key = DataKey::NoteCommitment(note_hash.clone());
+        if !e.storage().persistent().has(&commit_key) {
+            panic!("Note hash not pre-committed: call commit_payroll_note_hash first");
+        }
+        e.storage().persistent().remove(&commit_key);
+
+        let run_key = DataKey::PayrollRun(run_id);
+        let mut run: PayrollRun = e
+            .storage()
+            .persistent()
+            .get(&run_key)
+            .expect("Run not found");
+        run.note_hash = note_hash.clone();
+        e.storage().persistent().set(&run_key, &run);
+
+        payroll_events::emit_note_bound(&e, run_id, note_hash);
+    }
+
+    /// Return the payroll note hash bound to a completed payroll run.
+    ///
+    /// Returns the raw `BytesN<32>` stored in the run record. The zero hash
+    /// indicates no note has been bound yet.
+    pub fn get_payroll_note_hash(e: Env, run_id: u64) -> BytesN<32> {
+        Self::validate_run_id(run_id);
+        let run: PayrollRun = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollRun(run_id))
+            .expect("Run not found");
+        run.note_hash
+    }
+
+    /// Verify that the payroll note hash stored on-chain for a payroll run
+    /// matches the expected value.
+    ///
+    /// Read-only: retrieves `note_hash` from the completed `PayrollRun`
+    /// record and compares it byte-for-byte against `expected_hash`.
+    /// Returns `true` if they match, `false` otherwise (including when no
+    /// note has been bound yet, since the stored value is then the zero
+    /// hash, which a real note content hash should never equal).
+    ///
+    /// Use case: an employee or auditor holding the off-chain note document
+    /// can hash it locally and call this to confirm it is the exact
+    /// document the payroll admin committed on-chain for this run, without
+    /// the note's actual content ever being exposed on-chain.
+    pub fn verify_payroll_note_hash(e: Env, run_id: u64, expected_hash: BytesN<32>) -> bool {
+        Self::validate_run_id(run_id);
+        let run: PayrollRun = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PayrollRun(run_id))
+            .expect("Run not found");
+        run.note_hash == expected_hash
+    }
+
     // ?? Issue #147: company state management ?????????????????????????????????
 
     /// Set the company lifecycle state.
@@ -4524,7 +6324,8 @@ impl Payroll {
             .unwrap_or(CompanyState::Active)
     }
 
-    // ── Issue #338: per-period payroll capacity limits ───────────────
+    // ── Issue #338: per-period payroll capacity limits ───────────────────────
+
     /// Set (or replace) the employer's per-period capacity policy. Only the
     /// admin may call. Passing this once opts every subsequent period into
     /// capacity enforcement; there is no policy prior to the first call.
@@ -4573,6 +6374,77 @@ impl Payroll {
     /// Return the currently configured capacity policy, if any.
     pub fn get_capacity_limits(e: Env) -> Option<CapacityLimits> {
         e.storage().persistent().get(&DataKey::CapacityLimits)
+    }
+
+    // ── Issue #514: Minimum payout amount threshold ─────────────────────────
+
+    /// Set the minimum payout amount threshold for payroll batches.
+    ///
+    /// Only the admin may call. Once set, any individual payout amount in a
+    /// payroll batch must be greater than or equal to this threshold.
+    /// Setting to 0 disables the threshold check (backward compatible default).
+    ///
+    /// # Errors
+    /// - Panics if called by non-admin
+    /// - Panics if threshold is negative
+    pub fn set_minimum_payout_amount(e: Env, admin: Address, minimum_amount: i128) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if minimum_amount < 0 {
+            panic!("Minimum payout amount cannot be negative");
+        }
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::MinimumPayoutAmount, &minimum_amount);
+
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "min_payout_set")),
+            (minimum_amount, e.ledger().timestamp()),
+        );
+    }
+
+    /// Return the currently configured minimum payout amount threshold.
+    /// Returns 0 if no threshold has been set (disabled).
+    pub fn get_minimum_payout_amount(e: Env) -> i128 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::MinimumPayoutAmount)
+            .unwrap_or(0i128)
+    }
+
+    /// Validate that all payout amounts meet the minimum threshold, if configured.
+    ///
+    /// A no-op when no threshold has been configured (threshold = 0), preserving
+    /// backward compatibility.
+    fn validate_minimum_payout_amount(e: &Env, amounts: &Vec<i128>) {
+        let minimum: i128 = match e.storage().persistent().get(&DataKey::MinimumPayoutAmount) {
+            Some(min) => min,
+            None => return, // No threshold configured
+        };
+
+        if minimum == 0 {
+            return; // Threshold disabled
+        }
+
+        for i in 0..amounts.len() {
+            let amt = amounts.get(i).unwrap();
+            if amt < minimum {
+                e.events().publish(
+                    (symbol_short!("payroll"), Symbol::new(e, "min_payout_violation")),
+                    (minimum,),
+                );
+                panic!("Payout amount below minimum threshold");
+            }
+        }
     }
 
     /// Open a new payroll period for capacity accounting. Only the admin may
@@ -4690,7 +6562,43 @@ impl Payroll {
         );
     }
 
-    // ── Issue #316: settlement window enforcement ─────────────────────
+    // ── Issue #316: settlement window enforcement ─────────────────────────────
+
+    /// Reject a proposed inclusive calendar range that intersects another
+    /// configured period's range. Reconfiguration of the same label is allowed.
+    fn assert_no_settlement_window_overlap(
+        e: &Env,
+        period: &Symbol,
+        open_at: u64,
+        close_at: u64,
+    ) {
+        let periods: Vec<Symbol> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindowPeriods)
+            .unwrap_or(Vec::new(e));
+
+        for index in 0..periods.len() {
+            let existing_period = periods.get(index).unwrap();
+            if existing_period == *period {
+                continue;
+            }
+
+            let existing_window: Option<SettlementWindow> = e
+                .storage()
+                .persistent()
+                .get(&DataKey::SettlementWindow(existing_period));
+            if let Some(existing_window) = existing_window {
+                if open_at <= existing_window.close_at && existing_window.open_at <= close_at {
+                    panic!(
+                        "Settlement window overlaps another payroll period; choose a non-overlapping calendar range (error code {})",
+                        PaymentError::SettlementWindowOverlap as u32
+                    );
+                }
+            }
+        }
+    }
+
     /// Set (or replace) the settlement window for a payroll period. Only the
     /// admin may call, and the timestamps must be monotonically ordered:
     /// `open_at <= execution_start <= execution_end <= close_at`.
@@ -4735,6 +6643,8 @@ impl Payroll {
             );
         }
 
+        Self::assert_no_settlement_window_overlap(&e, &period, open_at, close_at);
+
         let window = SettlementWindow {
             open_at,
             execution_start,
@@ -4746,6 +6656,18 @@ impl Payroll {
         let window_key = DataKey::SettlementWindow(period.clone());
         let previous_ref = stored_ref(&e, &window_key);
         e.storage().persistent().set(&window_key, &window);
+
+        let mut periods: Vec<Symbol> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindowPeriods)
+            .unwrap_or(Vec::new(&e));
+        if periods.first_index_of(period.clone()).is_none() {
+            periods.push_back(period.clone());
+            e.storage()
+                .persistent()
+                .set(&DataKey::SettlementWindowPeriods, &periods);
+        }
 
         payroll_events::emit_settlement_window_set(
             &e,
@@ -4798,7 +6720,8 @@ impl Payroll {
         ))
     }
 
-    // ── Issue #248: payroll period configuration freeze guard ───────
+    // ── Issue #248: payroll period configuration freeze guard ───────────────
+
     /// Explicitly freeze a payroll period's configuration. Only the admin may
     /// call. Once frozen, `set_settlement_window` rejects further edits for the
     /// period, in addition to the implicit freeze applied once a payroll run is
@@ -4850,41 +6773,6 @@ impl Payroll {
         }
     }
 
-    /// Panic guard: reject the current operation when the period's
-    /// configuration is frozen (#471).
-    ///
-    /// # Panics
-    /// - If the period is frozen (`is_period_config_frozen` returns `true`).
-    fn require_period_not_frozen(e: &Env, period: &Symbol) {
-        if Self::is_period_config_frozen(e.clone(), period.clone()) {
-            panic!("Period configuration is frozen");
-        }
-    }
-
-    /// Count finalized payroll runs associated with a period (#471).
-    ///
-    /// A run is associated with a period when it was prepared while the
-    /// period label was recorded for it (`PendingRunPeriod`). Executed runs
-    /// are counted from their archived state; only non-pruned records are
-    /// included.
-    fn count_runs_for_period(e: &Env, period: &Symbol) -> u32 {
-        let mut count = 0u32;
-        let total_runs = Self::get_run_counter(e.clone());
-        let mut run_id = 1u64;
-        while run_id <= total_runs {
-            if e.storage()
-                .persistent()
-                .get::<_, Symbol>(&DataKey::PendingRunPeriod(run_id))
-                .map(|p| p == *period)
-                .unwrap_or(false)
-            {
-                count += 1;
-            }
-            run_id += 1;
-        }
-        count
-    }
-
     /// Whether configuration edits for a period must be rejected.
     ///
     /// A period is frozen when any of the following holds:
@@ -4913,6 +6801,139 @@ impl Payroll {
         }
 
         false
+    }
+
+    // ── Issue #552: Expose payroll period health summary ──────────────────────────
+
+    /// Return the operational health summary for a given payroll period (#552).
+    ///
+    /// Validates period label, checks pause state, settlement window state, freeze guard,
+    /// active drafts, and capacity limits to provide actionable operational health
+    /// diagnostics without disclosing sensitive employee identities or individual salaries.
+    pub fn get_period_health_summary(e: Env, period: Symbol) -> PeriodHealthSummary {
+        Self::validate_symbol_not_empty(&e, &period, "period");
+
+        let is_paused = if e.storage().persistent().has(&DataKey::PauseManager) {
+            let pm_addr: Address = e
+                .storage()
+                .persistent()
+                .get(&DataKey::PauseManager)
+                .unwrap();
+            let pm_client = PauseManagerClient::new(&e, &pm_addr);
+            pm_client.is_paused()
+        } else {
+            false
+        };
+
+        let current_period: Option<Symbol> = e.storage().persistent().get(&DataKey::CurrentPeriod);
+        let is_current_period = current_period.map(|cp| cp == period).unwrap_or(false);
+
+        let has_active_draft = e
+            .storage()
+            .persistent()
+            .has(&DataKey::ActiveDraftForPeriod(period.clone()));
+
+        let is_frozen = Self::is_period_config_frozen(e.clone(), period.clone());
+
+        let window_status_enum = Self::get_settlement_window_status(e.clone(), period.clone());
+        let window_status = window_status_enum.map(|s| s as u32);
+
+        let usage = Self::get_period_usage(e.clone(), period.clone());
+        let limits = Self::get_capacity_limits(e.clone());
+        let mut capacity_configured = false;
+        let mut capacity_exceeded = false;
+        let mut capacity_reason = None;
+
+        if let Some(limits) = limits {
+            capacity_configured = true;
+            if usage.batch_count >= limits.max_batches {
+                capacity_exceeded = true;
+                capacity_reason = Some(PeriodHealthReason::BatchCapacityExceeded);
+            } else if usage.employee_count >= limits.max_employees {
+                capacity_exceeded = true;
+                capacity_reason = Some(PeriodHealthReason::EmployeeCapacityExceeded);
+            } else if usage.total_value >= limits.max_total_value {
+                capacity_exceeded = true;
+                capacity_reason = Some(PeriodHealthReason::ValueCapacityExceeded);
+            }
+        }
+
+        let window_allows_execution = match window_status_enum {
+            None => true,
+            Some(SettlementWindowStatus::Executable) => true,
+            _ => false,
+        };
+
+        let can_execute = !is_paused && window_allows_execution && !capacity_exceeded;
+
+        let (status, reason) = if is_paused {
+            (
+                PeriodHealthStatus::Blocked,
+                PeriodHealthReason::ContractPaused,
+            )
+        } else if let Some(ws) = window_status_enum {
+            match ws {
+                SettlementWindowStatus::PreOpen => {
+                    (PeriodHealthStatus::Blocked, PeriodHealthReason::PreOpen)
+                }
+                SettlementWindowStatus::Closed => (
+                    PeriodHealthStatus::Blocked,
+                    PeriodHealthReason::WindowClosed,
+                ),
+                SettlementWindowStatus::Grace => {
+                    (PeriodHealthStatus::Warning, PeriodHealthReason::GracePeriod)
+                }
+                SettlementWindowStatus::Executable => {
+                    if capacity_exceeded {
+                        (
+                            PeriodHealthStatus::Blocked,
+                            capacity_reason.unwrap_or(PeriodHealthReason::BatchCapacityExceeded),
+                        )
+                    } else if is_frozen {
+                        (
+                            PeriodHealthStatus::Warning,
+                            PeriodHealthReason::PeriodFrozen,
+                        )
+                    } else {
+                        (PeriodHealthStatus::Healthy, PeriodHealthReason::Normal)
+                    }
+                }
+            }
+        } else if capacity_exceeded {
+            (
+                PeriodHealthStatus::Blocked,
+                capacity_reason.unwrap_or(PeriodHealthReason::BatchCapacityExceeded),
+            )
+        } else if is_frozen {
+            (
+                PeriodHealthStatus::Warning,
+                PeriodHealthReason::PeriodFrozen,
+            )
+        } else {
+            (PeriodHealthStatus::Healthy, PeriodHealthReason::Normal)
+        };
+
+        PeriodHealthSummary {
+            period,
+            status,
+            reason,
+            is_current_period,
+            can_execute,
+            is_frozen,
+            is_paused,
+            has_active_draft,
+            window_status,
+            capacity_configured,
+            batch_count: usage.batch_count,
+            employee_count: usage.employee_count,
+            capacity_exceeded,
+        }
+    }
+
+    /// Count executed runs recorded for a given period.
+    fn count_runs_for_period(e: &Env, period: &Symbol) -> u32 {
+        let usage = Self::get_period_usage(e.clone(), period.clone());
+        usage.batch_count
     }
 
     /// Panic when a period's configuration is frozen and must not be edited.
@@ -5044,6 +7065,11 @@ impl Payroll {
         );
 
         payroll_events::emit_settlement_window_expired(&e, run_id, period, now);
+        Self::emit_treasury_balance_snapshot(
+            &e,
+            addrs.token,
+            Symbol::new(&e, "run_expired"),
+        );
     }
 
     // ?? Issue #146: archived payroll run queries ??????????????????????????????
@@ -5340,7 +7366,8 @@ impl Payroll {
         );
     }
 
-    // ── Issue #342: dispute freeze/thaw controls ─────────────────────
+    // ── Issue #342: dispute freeze/thaw controls ─────────────────────────────
+
     /// Grant dispute-authority permission to an address. Only the admin may call.
     ///
     /// Dispute authorities may open and resolve disputes in addition to the
@@ -5570,6 +7597,13 @@ impl Payroll {
     // ?? Reviewer Authorization & Run Review Entrypoints ?????????????????????
 
     /// Grant reviewer authorization to an address. Only the admin may call.
+    ///
+    /// Rejected once the number of currently authorized reviewers would
+    /// exceed the employer's configured `MaxReviewers` policy, if any has
+    /// been set via `set_max_reviewers` (#539). Re-adding an address that is
+    /// already authorized is a no-op with respect to the cap: it does not
+    /// increment the reviewer count and is never rejected for being "over
+    /// the limit" on its own.
     pub fn add_reviewer(e: Env, admin: Address, reviewer: Address) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
@@ -5582,18 +7616,49 @@ impl Payroll {
         }
         admin.require_auth();
 
+        Self::grant_reviewer_internal(&e, &admin, &reviewer);
+    }
+
+    /// Shared core of `add_reviewer` / `signed_add_reviewer`: enforce the
+    /// `MaxReviewers` cap (#539), grant the reviewer role, and publish the
+    /// usual `reviewer_added` event + config-audit record. Callers are
+    /// responsible for their own authorization check before calling this —
+    /// it performs none itself.
+    fn grant_reviewer_internal(e: &Env, actor: &Address, reviewer: &Address) {
         let reviewer_key = DataKey::AuthorizedReviewer(reviewer.clone());
-        let previous_ref = stored_ref(&e, &reviewer_key);
+        let previous_ref = stored_ref(e, &reviewer_key);
+        let already_authorized = e.storage().persistent().has(&reviewer_key);
+
+        if !already_authorized {
+            let current_count: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::ReviewerCount)
+                .unwrap_or(0);
+            if let Some(max_reviewers) = e
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::MaxReviewers)
+            {
+                if current_count >= max_reviewers {
+                    panic!("Reviewer limit reached");
+                }
+            }
+            e.storage()
+                .persistent()
+                .set(&DataKey::ReviewerCount, &(current_count + 1));
+        }
+
         e.storage().persistent().set(&reviewer_key, &true);
 
-        payroll_events::emit_reviewer_added(&e, reviewer.clone());
+        payroll_events::emit_reviewer_added(e, reviewer.clone());
         record_config_change(
-            &e,
-            &admin,
+            e,
+            actor,
             config_keys::REVIEWER,
-            value_ref(&e, &reviewer),
+            value_ref(e, reviewer),
             previous_ref,
-            stored_ref(&e, &reviewer_key),
+            stored_ref(e, &reviewer_key),
         );
     }
 
@@ -5612,7 +7677,19 @@ impl Payroll {
 
         let reviewer_key = DataKey::AuthorizedReviewer(reviewer.clone());
         let previous_ref = stored_ref(&e, &reviewer_key);
+        let was_authorized = e.storage().persistent().has(&reviewer_key);
         e.storage().persistent().remove(&reviewer_key);
+
+        if was_authorized {
+            let current_count: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::ReviewerCount)
+                .unwrap_or(0);
+            e.storage()
+                .persistent()
+                .set(&DataKey::ReviewerCount, &current_count.saturating_sub(1));
+        }
 
         payroll_events::emit_reviewer_removed(&e, reviewer.clone());
         record_config_change(
@@ -5631,6 +7708,188 @@ impl Payroll {
             .persistent()
             .get(&DataKey::AuthorizedReviewer(reviewer))
             .unwrap_or(false)
+    }
+
+    // ── Issue #539: delegated approver (reviewer) assignment limits ─────────
+
+    /// Set (or replace) the maximum number of concurrently authorized
+    /// reviewers. Only the admin may call. Opt-in, mirroring
+    /// `set_capacity_limits`: absent a policy, `add_reviewer` is unlimited,
+    /// exactly as before this feature existed. Lowering the cap below the
+    /// current reviewer count is allowed (it only blocks further additions;
+    /// it never revokes existing reviewers).
+    pub fn set_max_reviewers(e: Env, admin: Address, max_reviewers: u32) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if max_reviewers == 0 {
+            panic!("Reviewer limit must be positive");
+        }
+
+        let previous_ref = stored_ref(&e, &DataKey::MaxReviewers);
+        e.storage()
+            .persistent()
+            .set(&DataKey::MaxReviewers, &max_reviewers);
+
+        payroll_events::emit_max_reviewers_set(&e, max_reviewers);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::MAX_REVIEWERS,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::MaxReviewers),
+        );
+    }
+
+    /// Return the currently configured reviewer cap, if any.
+    pub fn get_max_reviewers(e: Env) -> Option<u32> {
+        e.storage().persistent().get(&DataKey::MaxReviewers)
+    }
+
+    /// Return the number of currently authorized reviewers.
+    pub fn get_reviewer_count(e: Env) -> u32 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ReviewerCount)
+            .unwrap_or(0)
+    }
+
+    // ── Issue #519: signed, expiring operator authorizations ────────────────
+
+    /// Register (or replace) the ed25519 public key that signs off-chain
+    /// operator authorizations. Only the admin may call. There is at most
+    /// one operator key at a time; registering a new one immediately
+    /// invalidates the ability to submit authorizations signed by the old
+    /// key (already-consumed authorizations remain consumed either way).
+    pub fn register_operator_key(e: Env, admin: Address, operator_key: BytesN<32>) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let previous_ref = stored_ref(&e, &DataKey::OperatorKey);
+        e.storage()
+            .persistent()
+            .set(&DataKey::OperatorKey, &operator_key);
+
+        payroll_events::emit_operator_key_registered(&e);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::OPERATOR_KEY,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::OperatorKey),
+        );
+    }
+
+    /// Revoke the currently registered operator key. Only the admin may
+    /// call. After revocation, `signed_add_reviewer` is unusable until a new
+    /// key is registered.
+    pub fn revoke_operator_key(e: Env, admin: Address) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let previous_ref = stored_ref(&e, &DataKey::OperatorKey);
+        e.storage().persistent().remove(&DataKey::OperatorKey);
+
+        payroll_events::emit_operator_key_revoked(&e);
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::OPERATOR_KEY,
+            no_value_ref(&e),
+            previous_ref,
+            stored_ref(&e, &DataKey::OperatorKey),
+        );
+    }
+
+    /// Return the currently registered operator public key, if any.
+    pub fn get_operator_key(e: Env) -> Option<BytesN<32>> {
+        e.storage().persistent().get(&DataKey::OperatorKey)
+    }
+
+    /// Grant reviewer authorization using a signed, expiring off-chain
+    /// operator authorization instead of the admin's own `require_auth()`
+    /// (issue #519). Callable by ANYONE holding a validly signed payload —
+    /// the ed25519 signature over `payload` by the registered operator key
+    /// IS the authorization; the submitter needs no role of their own.
+    ///
+    /// Rejected when:
+    /// - No operator key is registered (`register_operator_key` first).
+    /// - `payload.action` is not `AddReviewer(reviewer)` for the given
+    ///   `reviewer` argument (prevents submitting a payload signed for a
+    ///   different action/target against this entrypoint).
+    /// - `signature` does not verify against the registered operator key
+    ///   for `payload`'s exact XDR-encoded bytes.
+    /// - `payload.expires_at_ledger` is at or before the current ledger
+    ///   (`ReplayError::AuthorizationExpired`), or its lifetime at signing
+    ///   time exceeded `MAX_AUTHORIZATION_TTL_LEDGERS`.
+    /// - This exact payload (by its hashed XDR encoding) has already been
+    ///   consumed by a prior call — the same protection `commit_draft`/
+    ///   `RunNonce` give against replay elsewhere in this contract.
+    ///
+    /// Otherwise behaves exactly like `add_reviewer`, including the
+    /// `MaxReviewers` cap (#539) and the `reviewer_added` +
+    /// `config_changed` events.
+    pub fn signed_add_reviewer(
+        e: Env,
+        reviewer: Address,
+        payload: SignedOperatorPayload,
+        signature: BytesN<64>,
+    ) {
+        Self::require_not_paused(&e);
+
+        match &payload.action {
+            SignedOperatorAction::AddReviewer(authorized_reviewer) => {
+                if authorized_reviewer != &reviewer {
+                    panic!("Signed payload action does not match the supplied reviewer");
+                }
+            }
+        }
+
+        let operator_key: BytesN<32> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::OperatorKey)
+            .expect("No operator key registered");
+
+        let message = require_not_expired(&e, &payload);
+        e.crypto()
+            .ed25519_verify(&operator_key, &message, &signature);
+
+        let consume_key = DataKey::ConsumedOperatorAuth(consumed_key(&e, &payload));
+        if e.storage().persistent().has(&consume_key) {
+            panic!("Signed operator authorization already consumed");
+        }
+        e.storage().persistent().set(&consume_key, &true);
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        Self::grant_reviewer_internal(&e, &addrs.admin, &reviewer);
     }
 
     /// Approve a payroll run as an authorized reviewer.
@@ -5703,116 +7962,6 @@ impl Payroll {
     pub fn get_run_review(e: Env, run_id: u64) -> Option<RunReview> {
         e.storage().persistent().get(&DataKey::RunReview(run_id))
     }
-
-    /// Withdraw a previously granted payroll run approval (issue #522).
-    ///
-    /// Only the reviewer that recorded the currently active `Approved`
-    /// decision may withdraw it, and a non-empty reason is mandatory. The
-    /// stored review transitions to `ReviewDecision::Withdrawn` so the audit
-    /// trail stays intact while expiry validation (#403) and any consumer
-    /// treating the run as approved no longer observe an active approval.
-    ///
-    /// Privacy-safe: events carry only the opaque run id, the withdrawing
-    /// reviewer, and the reason symbol — never salary values or employee
-    /// data.
-    ///
-    /// # Panics
-    /// * `"Invalid payroll run ID"` — reserved sentinel run id.
-    /// * `"Symbol cannot be empty"` — empty withdrawal reason.
-    /// * `"Unauthorized: caller is not an authorized reviewer"` — caller is
-    ///   not an authorized reviewer.
-    /// * `"Run review not found"` — no review exists for `run_id`.
-    /// * `"No active approval to withdraw"` — the stored review is not
-    ///   `Approved` (already withdrawn, rejected, or changes requested).
-    /// * `"Only the approving reviewer may withdraw an approval"` — a
-    ///   different reviewer attempted the withdrawal.
-    pub fn withdraw_approval(e: Env, reviewer: Address, run_id: u64, reason: Symbol) {
-        Self::validate_run_id(run_id);
-        Self::validate_symbol_not_empty(&e, &reason, "reason");
-        if !Self::is_reviewer(e.clone(), reviewer.clone()) {
-            panic!("Unauthorized: caller is not an authorized reviewer");
-        }
-        reviewer.require_auth();
-
-        let review: RunReview = e
-            .storage()
-            .persistent()
-            .get(&DataKey::RunReview(run_id))
-            .expect("Run review not found");
-        if review.decision != ReviewDecision::Approved {
-            panic!("No active approval to withdraw");
-        }
-        if review.reviewer != reviewer {
-            panic!("Only the approving reviewer may withdraw an approval");
-        }
-
-        let withdrawn = RunReview {
-            run_id,
-            reviewer: reviewer.clone(),
-            decision: ReviewDecision::Withdrawn,
-            reason: reason.clone(),
-            reviewed_at: e.ledger().timestamp(),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::RunReview(run_id), &withdrawn);
-
-        payroll_events::emit_run_approval_withdrawn(&e, run_id, reviewer, reason);
-    }
-
-    /// Supersede an existing payroll approval as a different authorized
-    /// reviewer (issue #522).
-    ///
-    /// The active approval must have been recorded by a *different*
-    /// reviewer; re-approving one's own approval is a no-op and rejected so
-    /// the supersession event always names a genuine handover. On success
-    /// the stored review is re-pointed at the new reviewer with a fresh
-    /// timestamp (which also restarts the #403 expiry window), and an audit
-    /// event names both the previous and the new reviewer so accountability
-    /// for the active approval is always explicit.
-    ///
-    /// # Panics
-    /// * `"Invalid payroll run ID"` — reserved sentinel run id.
-    /// * `"Unauthorized: caller is not an authorized reviewer"` — caller is
-    ///   not an authorized reviewer.
-    /// * `"Run review not found"` — no review exists for `run_id`.
-    /// * `"No active approval to supersede"` — the stored review is not
-    ///   `Approved`.
-    /// * `"Superseding reviewer must differ from the current approver"` —
-    ///   the current approver attempted to supersede themselves.
-    pub fn supersede_approval(e: Env, reviewer: Address, run_id: u64) {
-        Self::validate_run_id(run_id);
-        if !Self::is_reviewer(e.clone(), reviewer.clone()) {
-            panic!("Unauthorized: caller is not an authorized reviewer");
-        }
-        reviewer.require_auth();
-
-        let review: RunReview = e
-            .storage()
-            .persistent()
-            .get(&DataKey::RunReview(run_id))
-            .expect("Run review not found");
-        if review.decision != ReviewDecision::Approved {
-            panic!("No active approval to supersede");
-        }
-        if review.reviewer == reviewer {
-            panic!("Superseding reviewer must differ from the current approver");
-        }
-
-        let superseding = RunReview {
-            run_id,
-            reviewer: reviewer.clone(),
-            decision: ReviewDecision::Approved,
-            reason: Symbol::new(&e, "approved"),
-            reviewed_at: e.ledger().timestamp(),
-        };
-        e.storage()
-            .persistent()
-            .set(&DataKey::RunReview(run_id), &superseding);
-
-        payroll_events::emit_run_approval_superseded(&e, run_id, review.reviewer, reviewer);
-    }
-
     /// Read contract dependency addresses configured during initialization.
     pub fn get_addresses(e: Env) -> ContractAddresses {
         e.storage()
@@ -6117,81 +8266,114 @@ impl Payroll {
             .get(&DataKey::ArchiveMarker(run_id))
     }
 
-    // ?? Issue #401: Batch Lock Timestamp Query Helper ????????????????????????
-
-    /// Return the timestamp at which a payroll batch reached locked state (#401).
+    /// Validate that a period is suitable for cloning/templating.
     ///
-    /// A batch is in a locked state when funds have been reserved and it is awaiting
-    /// execution or has already been executed.
-    /// - If the batch is in a pending run state (`PendingRun(run_id)`), its `prepared_at` timestamp is returned.
-    /// - If the batch has been executed (`PayrollRun(run_id)`), its `executed_at` timestamp is returned.
-    /// - If the batch does not exist or has not been locked, `None` is returned.
-    pub fn get_batch_lock_timestamp(e: Env, run_id: u64) -> Option<u64> {
-        if let Some(pending) = e
+    /// Checks:
+    /// - Period configuration is not frozen
+    /// - Settlement window exists
+    ///
+    /// Returns Ok(()) if valid, panics with actionable message otherwise.
+    /// Privacy-safe: does not expose salary amounts or employee data.
+    fn validate_period_for_cloning(e: Env, period: Symbol) -> Result<(), ()> {
+        Self::validate_symbol_not_empty(&e, &period, "period");
+
+        // Check if period is frozen
+        if Self::is_period_config_frozen(e.clone(), period.clone()) {
+            panic!("Source period is frozen and cannot be used as a template");
+        }
+
+        // Verify settlement window exists
+        if !e
             .storage()
             .persistent()
-            .get::<_, PendingPayrollRun>(&DataKey::PendingRun(run_id))
+            .has(&DataKey::SettlementWindow(period.clone()))
         {
-            return Some(pending.prepared_at);
+            panic!("Source period has no settlement window configured");
         }
-        if let Some(run) = e
-            .storage()
-            .persistent()
-            .get::<_, PayrollRun>(&DataKey::PayrollRun(run_id))
-        {
-            return Some(run.executed_at);
-        }
-        None
+
+        Ok(())
     }
 
-    // ?? Issue #402: Safe Treasury Balance Summary View ???????????????????????
-
-    /// Return aggregate treasury balance summary for a given asset token (#402).
+    // ────────────────────────────────────────────────────────────    // Issue #512: Draft Checksum Verification Enhancement
+    // ────────────────────────────────────────────────────────────
+    /// Verify draft checksum matches between preparation and finalization.
     ///
     /// Returns the total balance held at the treasury address, the reserved/locked
     /// balance allocated to pending payroll runs, blocked balances, and the net
     /// available balance without disclosing individual salary rows.
     pub fn get_safe_treasury_summary(e: Env, asset: Address) -> SafeTreasurySummary {
-        Self::validate_treasury_asset(e.clone(), asset.clone())
-            .expect("Cross-asset treasury mismatch");
+        Self::require_active_treasury_asset(&e, asset.clone());
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
-            .get(&DataKey::Addresses)
-            .expect("Not initialized");
-        let total_balance = soroban_token::Client::new(&e, &asset).balance(&addrs.treasury);
-        let reserved_balance = Self::get_locked_funds(e.clone(), asset.clone());
-        let blocked_balance = 0i128;
-        let available_balance = total_balance
-            .checked_sub(reserved_balance)
-            .unwrap_or(0i128)
-            .checked_sub(blocked_balance)
-            .unwrap_or(0i128);
+            .get(&DataKey::PendingRun(run_id))
+            .expect("Pending run not found");
 
-        SafeTreasurySummary {
-            asset,
-            total_balance,
+        if pending_run.draft_hash != provided_hash {
+            panic!("Draft checksum mismatch: payroll data was modified after review");
+        }
+    }
+
+    /// Check whether the configured contract funding source can cover a spend
+    /// without executing a transfer or changing payroll state (#605).
+    ///
+    /// Readiness requires a positive `required_amount`, an initialized and
+    /// allowlisted canonical token, a responding SEP-41 balance query, and
+    /// enough unreserved treasury balance. The returned blocker gives SDKs an
+    /// actionable reason when any prerequisite is missing.
+    pub fn check_funding_source_readiness(
+        e: Env,
+        required_amount: i128,
+    ) -> FundingSourceReadiness {
+        let blocked = |blocker, available_balance| FundingSourceReadiness {
+            ready: false,
+            blocker,
+            required_amount,
             available_balance,
-            reserved_balance,
-            blocked_balance,
+        };
+
+        if required_amount <= 0 {
+            return blocked(FundingSourceBlocker::InvalidRequiredAmount, None);
+        }
+
+        let Some(addrs) = e
+            .storage()
+            .persistent()
+            .get::<_, ContractAddresses>(&DataKey::Addresses)
+        else {
+            return blocked(FundingSourceBlocker::NotInitialized, None);
+        };
+
+        if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
+            return blocked(FundingSourceBlocker::AssetNotAllowed, None);
+        }
+
+        let token_client = soroban_token::Client::new(&e, &addrs.token);
+        let total_balance = match token_client.try_balance(&addrs.treasury) {
+            Ok(Ok(balance)) => balance,
+            _ => return blocked(FundingSourceBlocker::TokenUnavailable, None),
+        };
+        let reserved_balance = Self::get_locked_funds(e, addrs.token);
+        let available_balance = total_balance.saturating_sub(reserved_balance);
+
+        if available_balance < required_amount {
+            return blocked(
+                FundingSourceBlocker::InsufficientFunds,
+                Some(available_balance),
+            );
+        }
+
+        FundingSourceReadiness {
+            ready: true,
+            blocker: FundingSourceBlocker::NotBlocked,
+            required_amount,
+            available_balance: Some(available_balance),
         }
     }
 
     // ?? Issue #403: Payroll Approval Expiry Validation ???????????????????????
 
-    /// Check whether an approval for a payroll run has expired (#403).
-    ///
-    /// Returns `true` if a review exists with decision `Approved` but `current_timestamp > reviewed_at + max_age_seconds`.
-    /// Returns `false` if the approval is within the validity window or if no approval exists.
-    pub fn is_payroll_approval_expired(e: Env, run_id: u64, max_age_seconds: u64) -> bool {
-        if let Some(review) = Self::get_run_review(e.clone(), run_id) {
-            if review.decision == ReviewDecision::Approved {
-                let current_time = e.ledger().timestamp();
-                let expiry_time = review.reviewed_at.saturating_add(max_age_seconds);
-                return current_time > expiry_time;
-            }
-        }
-        false
+        Ok(())
     }
 
     /// Validate that a payroll run approval is active and not expired (#403).
@@ -6202,6 +8384,116 @@ impl Payroll {
         if Self::is_payroll_approval_expired(e.clone(), run_id, max_age_seconds) {
             panic!("Payroll approval expired: approval record exceeds maximum allowed age");
         }
+    }
+
+    // ?? Issue #548: Stale Approval Cleanup ??????????????????????????????????????
+
+    /// Permanently remove an expired approval record for a single payroll run
+    /// (#548).
+    ///
+    /// An approval is *stale* when it is an `Approved` decision whose
+    /// `reviewed_at` is older than `max_age_seconds` — exactly the condition
+    /// `is_payroll_approval_expired` reports. Removing it is safe because
+    /// `finalize_payroll_run` already refuses to settle an expired approval, so
+    /// a stale record can never authorize a payout: this only reclaims the
+    /// ledger entry it occupies. An approval that is still inside its validity
+    /// window is left untouched.
+    ///
+    /// Records with a `Rejected` or `ChangesRequested` decision are never
+    /// stale under this definition and are never removed, so cleanup cannot
+    /// erase a reviewer's non-approval decision.
+    ///
+    /// `run_id` must be supplied explicitly because `RunReview` is keyed only by
+    /// `run_id` with no enumerable index; a sweep over all approvals is not
+    /// possible in bounded contract execution. Callers should drive this from
+    /// their own run index (for example the finalized/archived run set).
+    ///
+    /// # Panics
+    /// - `"Unauthorized"` if `admin` is not the registered payroll admin.
+    /// - `"No approval exists for this payroll run"` if there is no review.
+    /// - `"Record is not an approval: nothing stale to clean up"` if the
+    ///   review is a `Rejected` or `ChangesRequested` decision.
+    /// - `"Approval is not stale: still within its validity window"` if the
+    ///   approval has not yet expired.
+    ///
+    /// The returned struct and the emitted event carry only the `run_id`, the
+    /// review timestamp, and the record type. No reviewer address, salary,
+    /// employee count, or other payroll value is disclosed.
+    pub fn cleanup_stale_approval(
+        e: Env,
+        admin: Address,
+        run_id: u64,
+        max_age_seconds: u64,
+    ) -> StaleApprovalCleanupResult {
+        Self::require_not_paused(&e);
+        Self::validate_run_id(run_id);
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let review: RunReview = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunReview(run_id))
+            .expect("No approval exists for this payroll run");
+
+        // Reuse the single definition of staleness so cleanup and the
+        // finalize-time guard can never disagree about the cutoff.
+        if review.decision != ReviewDecision::Approved {
+            panic!("Record is not an approval: nothing stale to clean up");
+        }
+        let expiry_time = review.reviewed_at.saturating_add(max_age_seconds);
+        if e.ledger().timestamp() <= expiry_time {
+            panic!("Approval is not stale: still within its validity window");
+        }
+
+        e.storage().persistent().remove(&DataKey::RunReview(run_id));
+
+        // Reuse the existing retention-prune event; `record_type` identifies
+        // the kind of record without naming the reviewer.
+        payroll_events::emit_retention_pruned(
+            &e,
+            Symbol::new(&e, "run_approval"),
+            run_id,
+            admin.clone(),
+        );
+
+        StaleApprovalCleanupResult {
+            run_id,
+            removed: true,
+            reviewed_at: review.reviewed_at,
+            expired_at: expiry_time,
+        }
+    }
+
+    /// Read-only preview of whether a payroll run holds a stale approval (#548).
+    ///
+    /// Returns `None` when no review exists. The result is safe to log: it
+    /// exposes no reviewer identity and no payroll amounts.
+    pub fn get_stale_approval_status(
+        e: Env,
+        run_id: u64,
+        max_age_seconds: u64,
+    ) -> Option<StaleApprovalStatus> {
+        Self::validate_run_id(run_id);
+        let review: RunReview = e.storage().persistent().get(&DataKey::RunReview(run_id))?;
+        if review.decision != ReviewDecision::Approved {
+            return None;
+        }
+        let expiry_time = review.reviewed_at.saturating_add(max_age_seconds);
+        Some(StaleApprovalStatus {
+            run_id,
+            is_stale: e.ledger().timestamp() > expiry_time,
+            reviewed_at: review.reviewed_at,
+            expires_at: expiry_time,
+        })
     }
 
     // ?? Issue #404: Cancelled Batch Read Status Helper ???????????????????????
@@ -6300,7 +8592,8 @@ impl Payroll {
         }
     }
 
-    // ── Issue #482: Duplicate employee validation ────────────────────
+    // ── Issue #482: Duplicate employee validation ────────────────────────────
+
     /// Validate that the same employee (by commitment hash) has not already been
     /// paid in this run. This prevents accidental re-payment of an employee.
     ///
@@ -6357,7 +8650,8 @@ impl Payroll {
         env.storage().persistent().set(&tracker_key, &tracker);
     }
 
-    // ── Issue #485: Payroll run status query helper ───────────────────
+    // ── Issue #485: Payroll run status query helper ───────────────────────────
+
     /// Get a concise status view of a payroll run without exposing sensitive data.
     ///
     /// Returns a PayrollRunStatus struct with the current state, timestamps, and counts.
@@ -6391,12 +8685,10 @@ impl Payroll {
                     }
                     PayrollRunState::Confirming => PayrollRunStatusKind::Executing,
                     PayrollRunState::Completed => PayrollRunStatusKind::Completed,
-                    PayrollRunState::Failed | PayrollRunState::ReconciliationRequired => {
-                        PayrollRunStatusKind::Failed
-                    }
+                    PayrollRunState::Failed
+                    | PayrollRunState::ReconciliationRequired
+                    | PayrollRunState::Expired => PayrollRunStatusKind::Failed,
                     PayrollRunState::Cancelled => PayrollRunStatusKind::Failed,
-                    // Expired runs are terminal, like cancelled runs (#474).
-                    PayrollRunState::Expired => PayrollRunStatusKind::Failed,
                 };
 
                 return Some(PayrollRunStatus {
@@ -6434,7 +8726,8 @@ impl Payroll {
             .set(&DataKey::PayrollRunStatus(run_id), &status_record);
     }
 
-    // ── Issue #478: Payroll run metadata versioning ────────────────────
+    // ── Issue #478: Payroll run metadata versioning ────────────────────────────
+
     /// Set metadata version for a payroll run to track schema evolution.
     ///
     /// # Arguments
@@ -6474,7 +8767,8 @@ impl Payroll {
             .get(&DataKey::PayrollRunMetadataVersion(run_id))
     }
 
-    // ── Issue #476: Contract-level payroll currency validation ──────────
+    // ── Issue #476: Contract-level payroll currency validation ──────────────────
+
     /// Set the payroll contract's currency configuration.
     ///
     /// This ensures all payroll runs use the configured asset and provides
@@ -6557,15 +8851,18 @@ impl Payroll {
         Ok(())
     }
 
+    // ────────────────────────────────────────────────────────────────────────────
+    // Issue #515: Period Cloning Validation
+    // ────────────────────────────────────────────────────────────────────────────
+
     /// Validate that a period is suitable for cloning/templating.
     ///
-    /// Checks:
-    /// - Period configuration is not frozen
-    /// - Settlement window exists
-    ///
-    /// Returns Ok(()) if valid, panics with actionable message otherwise.
-    /// Privacy-safe: does not expose salary amounts or employee data.
-    fn validate_period_for_cloning(e: Env, period: Symbol) -> Result<(), ()> {
+    /// Panics (rather than returning `Result`) on every failure path, so the
+    /// return type is `()`: a `Result<(), ()>` here previously broke
+    /// `#[contractimpl]`'s cross-contract client generation, since `()`
+    /// cannot implement the conversions Soroban requires for a contract
+    /// error type - and no path ever actually returned `Err(())` anyway.
+    pub fn validate_period_for_cloning(e: Env, period: Symbol) {
         Self::validate_symbol_not_empty(&e, &period, "period");
 
         // Check if period is frozen
@@ -6581,19 +8878,17 @@ impl Payroll {
         {
             panic!("Source period has no settlement window configured");
         }
-
-        Ok(())
     }
 
-    // ────────────────────────────────────────────────────────────    // Issue #512: Draft Checksum Verification Enhancement
-    // ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────────────
+    // Issue #512: Draft Checksum Verification Enhancement
+    // ────────────────────────────────────────────────────────────────────────────
+
     /// Verify draft checksum matches between preparation and finalization.
     ///
-    /// This prevents tampering with draft data after review but before execution.
-    /// The draft_hash is computed at prepare time and stored in PendingPayrollRun.
-    ///
-    /// Privacy-safe: uses cryptographic hash, doesn't expose salary data.
-    fn verify_draft_checksum(e: &Env, run_id: u64, provided_hash: BytesN<32>) -> Result<(), ()> {
+    /// See [`validate_period_for_cloning`](Self::validate_period_for_cloning)
+    /// for why this returns `()` rather than `Result<(), ()>`.
+    pub fn verify_draft_checksum(e: &Env, run_id: u64, provided_hash: BytesN<32>) {
         let pending_run: PendingPayrollRun = e
             .storage()
             .persistent()
@@ -6603,8 +8898,6 @@ impl Payroll {
         if pending_run.draft_hash != provided_hash {
             panic!("Draft checksum mismatch: payroll data was modified after review");
         }
-
-        Ok(())
     }
 }
 
@@ -6734,6 +9027,7 @@ mod tests {
     #[test]
     fn benchmark_50_batch_validations() {
         let env = Env::default();
+        env.budget().reset_unlimited();
         env.mock_all_auths();
         // A 50-employee batch plus its per-employee events exceeds the
         // mainnet-sized invocation resource limits enforced by default in the
@@ -7237,6 +9531,70 @@ mod tests {
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Submitted));
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Cancelled));
         assert!(payroll_client.is_draft_state_terminal(&RunDraftState::Expired));
+    }
+
+    #[test]
+    fn test_draft_lock_owner_query_lifecycle() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let draft_id = payroll_client.create_run_draft(
+            &admin,
+            &25_000i128,
+            &4u32,
+            &Symbol::new(&env, "LOCK_TEST"),
+        );
+
+        // 1. Pending draft is not locked -> returns None
+        assert_eq!(payroll_client.get_draft_lock_owner(&draft_id), None);
+
+        // 2. Finalized draft is locked -> returns Some(admin)
+        payroll_client.finalize_run_draft(&admin, &draft_id);
+        assert_eq!(payroll_client.get_draft_lock_owner(&draft_id), Some(admin.clone()));
+
+        // 3. Submitted draft remains locked -> returns Some(admin)
+        payroll_client.submit_run_draft(&admin, &draft_id);
+        assert_eq!(payroll_client.get_draft_lock_owner(&draft_id), Some(admin));
+
+        // 4. Non-existent draft returns None
+        assert_eq!(payroll_client.get_draft_lock_owner(&999_999u64), None);
+    }
+
+    #[test]
+    fn test_draft_lock_owner_cancelled_and_expired_return_none() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        // Cancelled draft
+        let id_cancel = payroll_client.create_run_draft(
+            &admin,
+            &15_000i128,
+            &2u32,
+            &Symbol::new(&env, "CANCEL_LOCK"),
+        );
+        payroll_client.cancel_run_draft(&admin, &id_cancel);
+        assert_eq!(payroll_client.get_draft_lock_owner(&id_cancel), None);
+
+        // Expired draft
+        let id_expire = payroll_client.create_run_draft(
+            &admin,
+            &12_000i128,
+            &2u32,
+            &Symbol::new(&env, "EXPIRE_LOCK"),
+        );
+        payroll_client.expire_run_draft(&admin, &id_expire);
+        assert_eq!(payroll_client.get_draft_lock_owner(&id_expire), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid draft ID: must be non-zero")]
+    fn test_draft_lock_owner_zero_id_panics() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+        payroll_client.get_draft_lock_owner(&0u64);
     }
 
     // ?? Issue #103: per-payroll run nonce uniqueness ???????????????????????????
@@ -8980,6 +11338,66 @@ mod tests {
         payroll_client.set_asset_allowed(&token_id, &false);
     }
 
+    #[test]
+    fn test_asset_deactivation_status_tracks_allowlist_changes() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        // Freshly initialized canonical asset is active, and therefore not deactivated.
+        assert!(payroll_client.is_asset_allowed(&token_id));
+        assert!(!payroll_client.is_asset_deactivated(&token_id));
+
+        // Deactivation is explicit and observable through a dedicated view.
+        payroll_client.set_asset_allowed(&token_id, &false);
+        assert!(!payroll_client.is_asset_allowed(&token_id));
+        assert!(payroll_client.is_asset_deactivated(&token_id));
+
+        // Reactivating the asset clears the deactivated state.
+        payroll_client.set_asset_allowed(&token_id, &true);
+        assert!(payroll_client.is_asset_allowed(&token_id));
+        assert!(!payroll_client.is_asset_deactivated(&token_id));
+
+        // A foreign asset is never reported as deactivated: it is simply not
+        // this contract's canonical treasury asset.
+        let foreign_asset = Address::generate(&env);
+        assert!(!payroll_client.is_asset_deactivated(&foreign_asset));
+        assert!(!payroll_client.is_asset_allowed(&foreign_asset));
+    }
+
+    #[test]
+    #[should_panic(expected = "Asset not allowed")]
+    fn test_deposit_fails_when_asset_deactivated() {
+        let env = Env::default();
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        payroll_client.set_asset_allowed(&token_id, &false);
+
+        payroll_client.deposit(&treasury, &1000, &test_nonce(&env, 250));
+    }
+
+    #[test]
+    fn test_deposit_resumes_after_asset_reactivated() {
+        let env = Env::default();
+        let (payroll_client, _admin, treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        payroll_client.set_asset_allowed(&token_id, &false);
+        let deposit_id = test_nonce(&env, 251);
+        let blocked = payroll_client.try_deposit(&treasury, &1000, &deposit_id);
+        assert!(blocked.is_err());
+
+        // A rejected deposit leaves no depositor accounting behind.
+        assert_eq!(payroll_client.get_treasury_balance(&treasury), 0);
+
+        // It also does not burn the deposit id, so the same retry succeeds once
+        // the admin reactivates the asset.
+        payroll_client.set_asset_allowed(&token_id, &true);
+        payroll_client.deposit(&treasury, &1000, &deposit_id);
+        assert_eq!(payroll_client.get_treasury_balance(&treasury), 1000);
+    }
+
     // ?? Reviewer Authorization & Run Review Tests ????????????????????????????
 
     #[test]
@@ -9714,6 +12132,102 @@ mod tests {
 
         // Required quorum is 2, but only 1 signer provided -> panics
         payroll_client.verify_and_consume_quorum(&payload, &signers, &2u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate signer in quorum approval")]
+    fn test_quorum_duplicate_signer_attempt_rejected() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        // One signer submitting the same approval twice looks like two
+        // approvals to a length-only check, so it must be rejected instead.
+        let signer = Address::generate(&env);
+        let mut signers = Vec::new(&env);
+        signers.push_back(signer.clone());
+        signers.push_back(signer);
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[3u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 57),
+            policy_version: 1,
+        };
+
+        payroll_client.verify_and_consume_quorum(&payload, &signers, &2u32);
+    }
+
+    #[test]
+    fn test_quorum_duplicate_signer_attempt_does_not_consume_payload() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let mut duplicate_signers = Vec::new(&env);
+        duplicate_signers.push_back(signer1.clone());
+        duplicate_signers.push_back(signer1.clone());
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[4u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 58),
+            policy_version: 1,
+        };
+        let q_hash = payroll_client.hash_quorum_payload(&payload);
+
+        // A rejected duplicate-signer attempt must not burn the reference...
+        let rejected =
+            payroll_client.try_verify_and_consume_quorum(&payload, &duplicate_signers, &2u32);
+        assert!(rejected.is_err());
+        assert!(!payroll_client.is_quorum_consumed(&q_hash));
+
+        // ...so a genuine quorum of distinct signers can still consume it once.
+        let mut distinct_signers = Vec::new(&env);
+        distinct_signers.push_back(signer1);
+        distinct_signers.push_back(signer2);
+        let consumed = payroll_client.verify_and_consume_quorum(&payload, &distinct_signers, &2u32);
+        assert_eq!(q_hash, consumed);
+        assert!(payroll_client.is_quorum_consumed(&q_hash));
+    }
+
+    #[test]
+    fn test_quorum_concurrent_attempts_consume_reference_once() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee, token_id) =
+            setup_payroll_with_token(&env);
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+
+        let payload = QuorumApprovalPayload {
+            batch_root: BytesN::from_array(&env, &[5u8; 32]),
+            employer: admin.clone(),
+            period: Symbol::new(&env, "Q1_2026"),
+            asset: token_id.clone(),
+            nonce: test_nonce(&env, 59),
+            policy_version: 1,
+        };
+        let q_hash = payroll_client.hash_quorum_payload(&payload);
+
+        // Three interleaved submissions of the same approval: exactly one wins.
+        assert!(payroll_client
+            .try_verify_and_consume_quorum(&payload, &signers, &2u32)
+            .is_ok());
+        assert!(payroll_client
+            .try_verify_and_consume_quorum(&payload, &signers, &2u32)
+            .is_err());
+        assert!(payroll_client
+            .try_verify_and_consume_quorum(&payload, &signers, &2u32)
+            .is_err());
+        assert!(payroll_client.is_quorum_consumed(&q_hash));
     }
 
     // ============================================================================
@@ -10609,5 +13123,63 @@ mod tests {
             Payroll::normalize_asset_symbol(&env, "  USDC  "),
             allowlist_symbol
         );
+    }
+
+    // ── Issue #544: Employee identifier normalization tests ──────────────────
+
+    #[test]
+    fn test_employee_identifier_normalization_mixed_case_and_whitespace() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let raw1 = String::from_str(&env, "  emp-1001 \t\n");
+        let expected1 = String::from_str(&env, "EMP-1001");
+        assert_eq!(
+            payroll_client.normalize_employee_identifier(&raw1),
+            expected1
+        );
+
+        let raw2 = String::from_str(&env, "emp_doe_john#42.dept/eng");
+        let expected2 = String::from_str(&env, "EMP_DOE_JOHN#42.DEPT/ENG");
+        assert_eq!(
+            payroll_client.normalize_employee_identifier(&raw2),
+            expected2
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Reference ID must be 1-256 characters")]
+    fn test_employee_identifier_normalization_rejects_empty_or_whitespace() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let blank = String::from_str(&env, "   \t \n ");
+        payroll_client.normalize_employee_identifier(&blank);
+    }
+
+    #[test]
+    #[should_panic(expected = "Reference ID must be 1-256 characters")]
+    fn test_employee_identifier_normalization_rejects_overlong() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let mut long_str = [b'A'; 257];
+        let long = String::from_str(&env, core::str::from_utf8(&long_str).unwrap());
+        payroll_client.normalize_employee_identifier(&long);
+    }
+
+    #[test]
+    #[should_panic(expected = "Employee identifier contains invalid characters: must be printable ASCII")]
+    fn test_employee_identifier_normalization_rejects_non_printable() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let bad_bytes = [b'E', b'M', b'P', 0x07, b'1']; // 0x07 is non-printable BEL
+        let bad = String::from_str(&env, core::str::from_utf8(&bad_bytes).unwrap());
+        payroll_client.normalize_employee_identifier(&bad);
     }
 }

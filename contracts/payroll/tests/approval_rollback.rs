@@ -8,7 +8,6 @@
 /// | `test_amend_draft_rolls_back_partial_approvals` | Protected field edits roll back approvals to 0 and emit rollback event |
 /// | `test_duplicate_signer_approval_rejected` | Duplicate approval from same signer panics |
 /// | `test_approval_after_lock_rejected` | Approval attempt after draft lock panics |
-
 use payroll::{signing::compute_protected_content_hash, Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -171,13 +170,7 @@ fn test_amend_draft_rolls_back_partial_approvals() {
         &meta1,
         &2u32,
     );
-    let hash1 = compute_protected_content_hash(
-        &ctx.env,
-        20_000i128,
-        4u32,
-        &root1,
-        &meta1,
-    );
+    let hash1 = compute_protected_content_hash(&ctx.env, 20_000i128, 4u32, &root1, &meta1);
 
     let signer1 = Address::generate(&ctx.env);
     ctx.payroll()

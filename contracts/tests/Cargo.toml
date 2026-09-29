@@ -23,3 +23,7 @@ path = "onboarding_duplicate_reference.rs"
 [[test]]
 name = "draft_updated_timestamp"
 path = "draft_updated_timestamp.rs"
+
+[[test]]
+name = "draft_lock_owner"
+path = "draft_lock_owner.rs"

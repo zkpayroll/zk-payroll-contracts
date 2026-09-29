@@ -4,7 +4,7 @@
 //! by exercising the real registry contract emitters on success and failure paths.
 
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
-use soroban_sdk::testutils::{Address as _, Events};
+use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::{Address, BytesN, Env, String, Symbol, TryIntoVal};
 
 const VALID_EMPLOYEE_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -35,7 +35,11 @@ fn employer_onboarding_success_emits_registry_events_in_order() {
     client.add_employee(&company_id, &employee, &commitment);
     let end = env.events().all().len();
 
-    assert_eq!(end - start, 2, "onboarding must emit company then employee events");
+    assert_eq!(
+        end - start,
+        2,
+        "onboarding must emit company then employee events"
+    );
     assert_eq!(
         event_topic0(&env, start),
         Symbol::new(&env, "CompanyRegistered")
