@@ -1241,7 +1241,10 @@ pub fn emit_obligation_snapshot_recorded(
     count: u32,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "obligation_snapshot_recorded")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "obligation_snapshot_recorded"),
+        ),
         (run_id, obligation_root, total_amount, count),
     );
 }
@@ -1254,7 +1257,10 @@ pub fn emit_obligation_snapshot_verified(
     step: Symbol,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "obligation_snapshot_verified")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "obligation_snapshot_verified"),
+        ),
         (run_id, snapshot_digest, step),
     );
 }
@@ -1287,12 +1293,7 @@ pub fn emit_approvals_rolled_back(
 }
 
 /// Emitted when a confidential audit marker is recorded (#415).
-pub fn emit_audit_marker(
-    e: &Env,
-    action_type: Symbol,
-    run_id: u64,
-    entity_hash: BytesN<32>,
-) {
+pub fn emit_audit_marker(e: &Env, action_type: Symbol, run_id: u64, entity_hash: BytesN<32>) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "audit_marker")),
         (action_type, run_id, entity_hash, e.ledger().timestamp()),
@@ -1309,7 +1310,10 @@ pub fn emit_reservation_checkpoint_recorded(
     is_reconciled: bool,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "reservation_checkpoint_recorded")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "reservation_checkpoint_recorded"),
+        ),
         (run_id, stage, expected_amount, actual_amount, is_reconciled),
     );
 }
@@ -1323,7 +1327,10 @@ pub fn emit_reservation_drift_detected(
     actual_amount: i128,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "reservation_drift_detected")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "reservation_drift_detected"),
+        ),
         (run_id, stage, expected_amount, actual_amount),
     );
 }

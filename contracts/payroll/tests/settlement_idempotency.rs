@@ -685,7 +685,8 @@ fn test_cancelled_run_not_marked_settled() {
         &None,
     );
 
-    ctx.payroll().cancel_payroll_run(&ctx.admin, &run_id);
+    ctx.payroll()
+        .cancel_payroll_run(&ctx.admin, &run_id, &Symbol::new(&ctx.env, "test_cancel"));
 
     assert!(
         !ctx.payroll().is_settled(&run_id),

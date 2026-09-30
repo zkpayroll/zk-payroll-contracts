@@ -22,7 +22,7 @@ fn supported_assets_tracks_additions_removals_and_duplicate_updates() {
 
     payroll.set_asset_allowed(&second_asset, &false);
     assert!(!payroll.is_asset_allowed(&second_asset));
-    assert_eq!(payroll.get_supported_assets().len(_), 1);
+    assert_eq!(payroll.get_supported_assets().len(), 1);
 }
 
 #[test]
@@ -51,14 +51,24 @@ fn asset_symbol_normalization_rejects_unapproved_symbols() {
 }
 
 #[test]
-fn asset_symbol_normalization_trims_whitespace() {
+fn asset_symbol_normalization_trims_whitespace_at_str_boundary() {
+    // `Symbol` values cannot contain whitespace: the host rejects the space
+    // byte, so "  usdc  " is not representable as a Symbol. Whitespace can
+    // therefore only enter through the `&str` boundary, where the shared
+    // normalizer trims and uppercases it. The Symbol-typed contract entrypoints
+    // canonicalize case so every casing of a symbol resolves to one entry.
     let env = Env::default();
     let (payroll, _, _) = common::setup(&env);
 
-    let whitespace = Symbol::new(&env, "  usdc  ");
+    assert_eq!(
+        common::normalize_asset_symbol("  usdc  "),
+        Ok("USDC".to_string())
+    );
+
     let canonical = Symbol::new(&env, "USDC");
+    let lowercase = Symbol::new(&env, "usdc");
 
     payroll.set_asset_allowed_by_symbol(&canonical, &true);
 
-    assert!(payroll.is_asset_allowed_by_symbol(&whitespace));
+    assert!(payroll.is_asset_allowed_by_symbol(&lowercase));
 }

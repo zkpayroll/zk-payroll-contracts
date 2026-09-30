@@ -18,7 +18,12 @@ pub fn record_audit_marker(
     entity_hash: BytesN<32>,
 ) -> ConfidentialAuditMarker {
     let timestamp = env.ledger().timestamp();
-    payroll_events::emit_audit_marker(env, action_type.clone(), run_or_draft_id, entity_hash.clone());
+    payroll_events::emit_audit_marker(
+        env,
+        action_type.clone(),
+        run_or_draft_id,
+        entity_hash.clone(),
+    );
     ConfidentialAuditMarker {
         action_type,
         run_or_draft_id,

@@ -208,6 +208,11 @@ pub enum RunDraftState {
 pub struct PayrollRunDraft {
     pub draft_id: u64,
     pub created_at: u64,
+    /// Ledger timestamp of the last successful modification (#439).
+    ///
+    /// Initialized to `created_at` and advanced by each successful
+    /// `amend_run_draft`; rejected amendments leave it unchanged.
+    pub updated_at: u64,
     pub admin: Address,
     pub total_amount: i128,
     pub employee_count: u32,
@@ -836,6 +841,16 @@ pub enum FeatureDataKey {
     PeriodCloseByLabel(Symbol),
     /// Auto-increment counter for period close records (#359).
     PeriodCloseCounter,
+    /// Settlement completion marker written atomically with the `PayrollRun`
+    /// record by `batch_process_payroll` (#358). Value is the settled-at
+    /// ledger timestamp.
+    SettledBatch(u64),
+    /// Settlement execution window configured for a capacity period (#316).
+    SettlementWindow(Symbol),
+    /// The capacity period currently governing settlement-window checks (#316).
+    CurrentCapacityPeriod,
+    /// Allowlist entry for an asset identified by its normalized symbol.
+    AllowedAssetSymbol(Symbol),
 }
 
 /// Storage version state for migration checks (#360).
@@ -991,6 +1006,35 @@ pub struct PeriodCloseRecord {
     pub closed_by: Address,
     pub run_count: u32,
     pub status: ReconciliationStatus,
+}
+
+// ── Issue #316: settlement window enforcement ─────────────────────────────
+
+/// Phase of a configured settlement window at the current ledger time.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementWindowStatus {
+    /// Ledger time is before the execution window opens.
+    PreOpen = 0,
+    /// Ledger time is inside the execution window; settlement is permitted.
+    Executable = 1,
+    /// Execution has ended but the period has not yet hard-closed: only
+    /// cancellation/expiry remain available.
+    Grace = 2,
+    /// Ledger time is at or past the hard close.
+    Closed = 3,
+}
+
+/// Configurable execution window for a capacity period (#316).
+///
+/// Timestamps must satisfy `open_at <= execute_start <= execute_end <= close_at`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SettlementWindow {
+    pub open_at: u64,
+    pub execute_start: u64,
+    pub execute_end: u64,
+    pub close_at: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1200,6 +1244,54 @@ impl Payroll {
         }
 
         let normalized_str = core::str::from_utf8(&normalized[..bytes.len()])
+            .expect("normalized asset symbol is valid UTF-8");
+        Symbol::new(e, normalized_str)
+    }
+
+    /// Normalize a `Symbol`-typed asset identifier to its canonical uppercase
+    /// form so that `"usdc"`, `"USDC"`, and `"Usdc"` resolve to one allowlist
+    /// entry.
+    ///
+    /// Soroban symbols cannot contain whitespace, so only ASCII case folding is
+    /// applied. The symbol's bytes are read from its XDR payload (the host
+    /// serializes the value for `ToXdr`), which is the only wasm-safe way to
+    /// inspect symbol bytes: `Symbol::to_string()` is unavailable on-chain.
+    ///
+    /// # Panics
+    /// - If the symbol payload is empty or longer than 32 bytes.
+    /// - If the payload contains non-ASCII bytes.
+    fn normalize_asset_symbol_value(e: &Env, symbol: &Symbol) -> Symbol {
+        use soroban_sdk::xdr::ToXdr;
+
+        let xdr = symbol.clone().to_xdr(e);
+        // `ScVal::Symbol` serializes as a 4-byte ScVal discriminant, a 4-byte
+        // big-endian payload length, then the raw symbol bytes (zero-padded to
+        // a 4-byte boundary).
+        const HEADER: u32 = 8;
+        if xdr.len() < HEADER {
+            panic!("Asset symbol cannot be empty");
+        }
+        let len = ((xdr.get(4).unwrap() as usize) << 24)
+            | ((xdr.get(5).unwrap() as usize) << 16)
+            | ((xdr.get(6).unwrap() as usize) << 8)
+            | (xdr.get(7).unwrap() as usize);
+        if len == 0 {
+            panic!("Asset symbol cannot be empty");
+        }
+        if len > 32 {
+            panic!("Asset symbol too long");
+        }
+
+        let mut normalized = [0u8; 32];
+        for i in 0..len {
+            let b = xdr.get(HEADER + i as u32).unwrap() as u8;
+            if !b.is_ascii() {
+                panic!("Asset symbol must be ASCII");
+            }
+            normalized[i] = if b.is_ascii_lowercase() { b - 32 } else { b };
+        }
+
+        let normalized_str = core::str::from_utf8(&normalized[..len])
             .expect("normalized asset symbol is valid UTF-8");
         Symbol::new(e, normalized_str)
     }
@@ -1798,6 +1890,37 @@ impl Payroll {
         e.storage()
             .persistent()
             .get(&DataKey::AllowedAsset(asset))
+            .unwrap_or(false)
+    }
+
+    /// Allow or disallow a payroll asset identified by its symbol.
+    ///
+    /// The symbol is normalized (uppercased) before storage, so callers may
+    /// pass `"usdc"`, `"USDC"`, or `"Usdc"` interchangeably.
+    pub fn set_asset_allowed_by_symbol(e: Env, symbol: Symbol, allowed: bool) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        addrs.admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
+
+        let canonical = Self::normalize_asset_symbol_value(&e, &symbol);
+        e.storage()
+            .persistent()
+            .set(&FeatureDataKey::AllowedAssetSymbol(canonical), &allowed);
+    }
+
+    /// Check whether an asset symbol is allowlisted for payroll payouts.
+    ///
+    /// Comparison is case-insensitive: the input symbol is normalized before
+    /// the allowlist lookup, so `"usdc"` and `"USDC"` produce the same result.
+    pub fn is_asset_allowed_by_symbol(e: Env, symbol: Symbol) -> bool {
+        let canonical = Self::normalize_asset_symbol_value(&e, &symbol);
+        e.storage()
+            .persistent()
+            .get(&FeatureDataKey::AllowedAssetSymbol(canonical))
             .unwrap_or(false)
     }
 
@@ -2548,6 +2671,9 @@ impl Payroll {
     ) -> u64 {
         Self::require_company_active(&e);
         Self::require_payer_account_active(&e);
+        // #316 - when a settlement window is configured for the current capacity
+        // period, prepares are only permitted inside the execution window.
+        Self::require_within_settlement_window(&e);
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "prepare_payroll_run");
 
@@ -3034,6 +3160,9 @@ impl Payroll {
     ) -> u64 {
         Self::require_company_active(&e);
         Self::require_payer_account_active(&e);
+        // #316 - when a settlement window is configured for the current capacity
+        // period, settlement is only permitted inside the execution window.
+        Self::require_within_settlement_window(&e);
 
         // #360 - validate storage version for sensitive operation
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll");
@@ -3153,10 +3282,17 @@ impl Payroll {
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
 
-            let mut nullifier_arr = [0u8; 32];
-            nullifier_arr[0] = (i % 256) as u8;
-            nullifier_arr[1] = (i / 256) as u8;
-            let nullifier = BytesN::from_array(&e, &nullifier_arr);
+            // Derive the nullifier from the payment itself: the proof, the
+            // employee's commitment, and the batch position. This keeps every
+            // batch entry unique — even when identical mock proofs are reused
+            // across employees — while replaying the same payment for the same
+            // commitment is still rejected as a double spend.
+            let commitment_bytes: [u8; 32] = (&commitment).into();
+            let mut nullifier_preimage = soroban_sdk::Bytes::new(&e);
+            nullifier_preimage.extend_from_array(&proof.to_array());
+            nullifier_preimage.extend_from_array(&commitment_bytes);
+            nullifier_preimage.extend_from_array(&i.to_le_bytes());
+            let nullifier: BytesN<32> = e.crypto().sha256(&nullifier_preimage).into();
             let recipient_hash = BytesN::from_array(&e, &[0u8; 32]);
 
             let mut public_inputs = Vec::new(&e);
@@ -3191,6 +3327,13 @@ impl Payroll {
             reconciliation_status: ReconciliationStatus::Unreconciled,
             metadata_hash: BytesN::from_array(&e, &[0u8; 32]),
         };
+        // #358 — write the settlement completion marker atomically with the run
+        // record. A Soroban transaction is atomic: if any step above panicked,
+        // neither write reaches persistent storage. Read-only `is_settled`
+        // consumers can therefore trust the marker as proof of settlement.
+        e.storage()
+            .persistent()
+            .set(&FeatureDataKey::SettledBatch(run_id), &run.executed_at);
         e.storage()
             .persistent()
             .set(&DataKey::PayrollRun(run_id), &run);
@@ -3266,9 +3409,11 @@ impl Payroll {
             .persistent()
             .set(&DataKey::RunDraftCounter, &draft_id);
 
+        let now = e.ledger().timestamp();
         let draft = PayrollRunDraft {
             draft_id,
-            created_at: e.ledger().timestamp(),
+            created_at: now,
+            updated_at: now,
             admin: admin.clone(),
             total_amount,
             employee_count,
@@ -3361,6 +3506,8 @@ impl Payroll {
         draft.total_amount = new_total_amount;
         draft.employee_count = new_employee_count;
         draft.amendment_count += 1;
+        // #439: every successful amendment advances the last-updated stamp.
+        draft.updated_at = e.ledger().timestamp();
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
@@ -3553,6 +3700,22 @@ impl Payroll {
             .persistent()
             .get(&DataKey::RunDraft(draft_id))
             .expect("Draft not found")
+    }
+
+    /// Return the ledger timestamp of a draft's last modification (#439).
+    ///
+    /// Exposes only time metadata — never amounts or employee identifiers.
+    ///
+    /// # Panics
+    /// - If the draft does not exist.
+    pub fn get_draft_updated_at(e: Env, draft_id: u64) -> u64 {
+        Self::validate_draft_id(draft_id);
+        let draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+        draft.updated_at
     }
 
     /// Return whether a draft transition is allowed by the draft state machine.
@@ -5829,9 +5992,10 @@ impl Payroll {
             asset,
         );
 
-        e.storage()
-            .persistent()
-            .set(&FeatureDataKey::ReservationCheckpoint(run_id, stage), &checkpoint);
+        e.storage().persistent().set(
+            &FeatureDataKey::ReservationCheckpoint(run_id, stage),
+            &checkpoint,
+        );
 
         payroll_events::emit_reservation_checkpoint_recorded(
             &e,
@@ -5885,12 +6049,7 @@ impl Payroll {
     // ── Issue #359: Period Close Reconciliation Markers ──────────────────────
 
     /// Register an open reservation against a period label before runs are executed.
-    pub fn register_period_reservation(
-        e: Env,
-        admin: Address,
-        period_label: Symbol,
-        note: Symbol,
-    ) {
+    pub fn register_period_reservation(e: Env, admin: Address, period_label: Symbol, note: Symbol) {
         Self::require_not_paused(&e);
         let addrs: ContractAddresses = e
             .storage()
@@ -5912,9 +6071,7 @@ impl Payroll {
             created_at: e.ledger().timestamp(),
             registered_by: admin.clone(),
         };
-        e.storage()
-            .persistent()
-            .set(&reservation_key, &reservation);
+        e.storage().persistent().set(&reservation_key, &reservation);
 
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "period_reserved")),
@@ -6055,6 +6212,245 @@ impl Payroll {
         e.storage()
             .persistent()
             .get(&FeatureDataKey::PeriodCloseRecord(close_id))
+    }
+
+    // ── Issue #358: Settlement Idempotency Lock ──────────────────────────────
+
+    /// Return `true` if the payroll batch identified by `run_id` has been
+    /// fully settled.
+    ///
+    /// A batch is considered settled once `batch_process_payroll` completed
+    /// without panic: both the `PayrollRun` record and the `SettledBatch`
+    /// marker are written atomically at that point.
+    ///
+    /// This is a read-only confirmation endpoint — it never mutates state and
+    /// is safe to call any number of times, including during retry flows.
+    pub fn is_settled(e: Env, run_id: u64) -> bool {
+        e.storage()
+            .persistent()
+            .has(&FeatureDataKey::SettledBatch(run_id))
+    }
+
+    /// Return the ledger timestamp at which `run_id` was settled, or `None`
+    /// if the batch has not yet completed settlement.
+    ///
+    /// Like `is_settled`, this is purely read-only and idempotent.
+    pub fn get_settled_at(e: Env, run_id: u64) -> Option<u64> {
+        e.storage()
+            .persistent()
+            .get(&FeatureDataKey::SettledBatch(run_id))
+    }
+
+    // ── Issue #316: Settlement Window Enforcement ────────────────────────────
+
+    /// Open a capacity period and make it the period governing settlement
+    /// window checks (#316).
+    ///
+    /// Opening a period alone never restricts execution: restrictions only
+    /// apply once a window is configured via `set_settlement_window`.
+    pub fn open_capacity_period(e: Env, admin: Address, period_label: Symbol) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        e.storage()
+            .persistent()
+            .set(&FeatureDataKey::CurrentCapacityPeriod, &period_label);
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "capacity_period_opened"),
+            ),
+            period_label,
+        );
+    }
+
+    /// Configure the settlement execution window for a period (#316).
+    ///
+    /// # Panics
+    /// - If the caller is not the contract admin.
+    /// - If the timestamps are not ordered
+    ///   `open_at <= execute_start <= execute_end <= close_at`.
+    pub fn set_settlement_window(
+        e: Env,
+        admin: Address,
+        period_label: Symbol,
+        open_at: u64,
+        execute_start: u64,
+        execute_end: u64,
+        close_at: u64,
+    ) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if open_at > execute_start || execute_start > execute_end || execute_end > close_at {
+            panic!("Invalid settlement window ordering");
+        }
+
+        let window = SettlementWindow {
+            open_at,
+            execute_start,
+            execute_end,
+            close_at,
+        };
+        e.storage().persistent().set(
+            &FeatureDataKey::SettlementWindow(period_label.clone()),
+            &window,
+        );
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "settlement_window_set"),
+            ),
+            (period_label, open_at, execute_start, execute_end, close_at),
+        );
+    }
+
+    /// Return the settlement window phase for a period, or `None` when no
+    /// window has been configured.
+    pub fn get_settlement_window_status(
+        e: Env,
+        period_label: Symbol,
+    ) -> Option<SettlementWindowStatus> {
+        let window: SettlementWindow = e
+            .storage()
+            .persistent()
+            .get(&FeatureDataKey::SettlementWindow(period_label))?;
+        let now = e.ledger().timestamp();
+        Some(if now < window.execute_start {
+            SettlementWindowStatus::PreOpen
+        } else if now <= window.execute_end {
+            SettlementWindowStatus::Executable
+        } else if now < window.close_at {
+            SettlementWindowStatus::Grace
+        } else {
+            SettlementWindowStatus::Closed
+        })
+    }
+
+    /// Reject execution when the current capacity period has a configured
+    /// settlement window and the ledger time is outside it (#316).
+    ///
+    /// Backward compatibility: when no capacity period is open, or the current
+    /// period has no window, execution is unrestricted.
+    fn require_within_settlement_window(e: &Env) {
+        let period: Symbol = match e
+            .storage()
+            .persistent()
+            .get(&FeatureDataKey::CurrentCapacityPeriod)
+        {
+            Some(p) => p,
+            None => return,
+        };
+        let window: SettlementWindow = match e
+            .storage()
+            .persistent()
+            .get(&FeatureDataKey::SettlementWindow(period))
+        {
+            Some(w) => w,
+            None => return,
+        };
+
+        let now = e.ledger().timestamp();
+        if now < window.execute_start || now > window.execute_end {
+            panic!("Settlement window not open: execution not permitted");
+        }
+    }
+
+    /// Expire a pending payroll run once its settlement window has fully
+    /// closed (#316).
+    ///
+    /// Requires the admin and a closed window. Mirrors cancellation cleanup:
+    /// the reservation is released, a cancellation record is written with the
+    /// `settlement_window_expired` reason, and the run state becomes
+    /// `Cancelled`.
+    ///
+    /// # Panics
+    /// - If the caller is not the contract admin.
+    /// - If the pending run does not exist (e.g. already finalized).
+    /// - If the current period's window has not yet reached `close_at`.
+    pub fn expire_pending_run(e: Env, admin: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let period: Symbol = e
+            .storage()
+            .persistent()
+            .get(&FeatureDataKey::CurrentCapacityPeriod)
+            .expect("No capacity period open");
+        let window: SettlementWindow = e
+            .storage()
+            .persistent()
+            .get(&FeatureDataKey::SettlementWindow(period))
+            .expect("No settlement window configured");
+
+        if e.ledger().timestamp() < window.close_at {
+            panic!("Settlement window not closed: expiry not permitted");
+        }
+
+        let pending_key = DataKey::PendingRun(run_id);
+        let pending_run: PendingPayrollRun = e
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .expect("Pending run not found");
+
+        // Release the locked funds reservation (#343).
+        Self::subtract_locked_funds(&e, addrs.token.clone(), pending_run.total_amount);
+
+        let reason = Symbol::new(&e, "settlement_window_expired");
+        let cancel_status = CancelledBatchStatus {
+            run_id,
+            cancelled_at: e.ledger().timestamp(),
+            cancelled_by: admin.clone(),
+            reason: reason.clone(),
+            employee_count: pending_run.employee_count,
+            total_amount: pending_run.total_amount,
+            draft_hash: pending_run.draft_hash.clone(),
+            is_cancelled: true,
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::CancelledBatchRecord(run_id), &cancel_status);
+
+        e.storage().persistent().remove(&pending_key);
+        Self::record_payroll_run_state(&e, run_id, PayrollRunState::Cancelled);
+
+        e.storage().persistent().set(
+            &DataKey::PendingRunCount,
+            &Self::pending_payroll_run_count(&e).saturating_sub(1),
+        );
+
+        e.events().publish(
+            (symbol_short!("payroll"), Symbol::new(&e, "run_expired")),
+            (run_id, reason.clone()),
+        );
+        payroll_events::emit_indexer_cancellation(&e, run_id, reason);
     }
 
     // ── Issue #357: Overpayment Review Subsystem ─────────────────────────────

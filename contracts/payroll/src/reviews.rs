@@ -28,7 +28,6 @@
 /// | `resolve_overpayment_review` | admin     | Close with mandatory reason; unblocks.   |
 /// | `get_overpayment_review`     | none      | Read current review for a run.           |
 /// | `has_open_review`            | none      | Guard helper — true if review is open.   |
-
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -122,7 +121,11 @@ pub fn open_overpayment_review(env: &Env, admin: &Address, run_id: u64) -> u64 {
     }
     admin.require_auth();
 
-    if !env.storage().persistent().has(&crate::DataKey::PayrollRun(run_id)) {
+    if !env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::PayrollRun(run_id))
+    {
         panic!("Run not found");
     }
 
@@ -166,10 +169,7 @@ pub fn open_overpayment_review(env: &Env, admin: &Address, run_id: u64) -> u64 {
         .set(&ReviewDataKey::OverpaymentReview(run_id), &review);
 
     env.events().publish(
-        (
-            symbol_short!("payroll"),
-            Symbol::new(env, "review_opened"),
-        ),
+        (symbol_short!("payroll"), Symbol::new(env, "review_opened")),
         (review_id, run_id, flagged_at),
     );
     // topics : ("payroll", "review_opened")
@@ -194,12 +194,7 @@ pub fn open_overpayment_review(env: &Env, admin: &Address, run_id: u64) -> u64 {
 /// # Events
 ///
 /// Emits `("payroll", "review_resolved")` with `(review_id, run_id, resolved_at)`.
-pub fn resolve_overpayment_review(
-    env: &Env,
-    admin: &Address,
-    run_id: u64,
-    reason: Symbol,
-) {
+pub fn resolve_overpayment_review(env: &Env, admin: &Address, run_id: u64, reason: Symbol) {
     let addrs: crate::ContractAddresses = env
         .storage()
         .persistent()
