@@ -35,6 +35,26 @@ use correction_authorization::{
 pub mod import_source;
 use import_source::{require_authorized_source, validate_source_for_report};
 
+pub mod payroll_period_ownership;
+pub use payroll_period_ownership::{
+    assert_payroll_period_owner, verify_payroll_period_owner, PayrollPeriodOwnership,
+};
+
+pub mod employee_record_version;
+pub use employee_record_version::{
+    detect_version_conflict, increment_employee_version, EmployeeRecord,
+};
+
+pub mod payment_instruction_expiry;
+pub use payment_instruction_expiry::{
+    enforce_payment_instruction_expiry, PaymentInstruction,
+};
+
+pub mod employee_suspension_rules;
+pub use employee_suspension_rules::{
+    evaluate_suspension_payout, EmployeeStatus, PayrollPayoutRule,
+};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
