@@ -1485,8 +1485,14 @@ mod tests {
 
         client.set_employee_reference_id(&employee, &reference_id);
 
-        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), reference_id);
-        assert_eq!(client.get_employee_by_reference_id(&reference_id).unwrap(), employee);
+        assert_eq!(
+            client.get_employee_reference_id(&employee).unwrap(),
+            reference_id
+        );
+        assert_eq!(
+            client.get_employee_by_reference_id(&reference_id).unwrap(),
+            employee
+        );
     }
 
     #[test]
@@ -1499,13 +1505,22 @@ mod tests {
         let new_ref_id = soroban_sdk::String::from_str(&env, "EMP-NEW");
 
         client.set_employee_reference_id(&employee, &old_ref_id);
-        assert_eq!(client.get_employee_by_reference_id(&old_ref_id).unwrap(), employee);
+        assert_eq!(
+            client.get_employee_by_reference_id(&old_ref_id).unwrap(),
+            employee
+        );
 
         client.set_employee_reference_id(&employee, &new_ref_id);
 
-        assert_eq!(client.get_employee_reference_id(&employee).unwrap(), new_ref_id);
-        assert_eq!(client.get_employee_by_reference_id(&new_ref_id).unwrap(), employee);
-        
+        assert_eq!(
+            client.get_employee_reference_id(&employee).unwrap(),
+            new_ref_id
+        );
+        assert_eq!(
+            client.get_employee_by_reference_id(&new_ref_id).unwrap(),
+            employee
+        );
+
         // Old reverse mapping should be cleared
         assert!(client.get_employee_by_reference_id(&old_ref_id).is_none());
     }
@@ -1543,10 +1558,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, SalaryCommitmentContract);
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
-        
+
         let unauthorized_user = Address::generate(&env);
         let employee = Address::generate(&env);
         let reference_id = soroban_sdk::String::from_str(&env, "EMP-999");
@@ -1560,7 +1575,7 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        
+
         client.set_employee_reference_id(&employee, &reference_id);
     }
 }

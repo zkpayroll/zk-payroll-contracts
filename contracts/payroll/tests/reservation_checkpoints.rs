@@ -6,7 +6,6 @@
 /// | `test_reservation_checkpoint_recording_and_reconciliation_success` | Record checkpoints across Lock, Execution, Cancellation, Expiry, Close stages without drift -> succeeds |
 /// | `test_reservation_drift_detected_panics` | Reservation amount mismatch sets `is_reconciled == false` and panics on reconcile |
 /// | `test_get_reservation_checkpoint_returns_none_for_unrecorded_stage` | Unrecorded stage query returns `None` |
-
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};

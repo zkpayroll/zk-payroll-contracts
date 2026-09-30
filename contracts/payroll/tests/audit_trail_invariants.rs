@@ -6,7 +6,6 @@
 /// | `test_audit_marker_emitted_for_lifecycle_action` | Lifecycle action emits safe audit marker event |
 /// | `test_audit_markers_never_expose_sensitive_salary_data` | Verifies event topics and payloads omit raw employee salary values |
 /// | `test_audit_marker_structure_and_timestamp` | Audit marker record matches ledger sequence and entity hash |
-
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -93,11 +92,9 @@ fn test_audit_marker_emitted_for_lifecycle_action() {
     let action_type = Symbol::new(&ctx.env, "lock_batch");
     let entity_hash = BytesN::from_array(&ctx.env, &[0x77; 32]);
 
-    let marker = ctx.payroll().record_confidential_audit_marker(
-        &action_type,
-        &run_id,
-        &entity_hash,
-    );
+    let marker =
+        ctx.payroll()
+            .record_confidential_audit_marker(&action_type, &run_id, &entity_hash);
 
     assert_eq!(marker.action_type, action_type);
     assert_eq!(marker.run_or_draft_id, run_id);
@@ -137,7 +134,9 @@ fn test_audit_markers_never_expose_sensitive_salary_data() {
     for (_, topics, _data) in events.iter() {
         // Assert namespace is payroll or topic symbol
         if let Some(t0) = topics.get(0) {
-            let _sym: Symbol = t0.try_into_val(&ctx.env).unwrap_or(Symbol::new(&ctx.env, "none"));
+            let _sym: Symbol = t0
+                .try_into_val(&ctx.env)
+                .unwrap_or(Symbol::new(&ctx.env, "none"));
         }
     }
 }
@@ -149,6 +148,8 @@ fn test_audit_marker_structure_and_timestamp() {
     let action = Symbol::new(&ctx.env, "reconcile");
     let entity_hash = BytesN::from_array(&ctx.env, &[0x99; 32]);
 
-    let marker = ctx.payroll().record_confidential_audit_marker(&action, &run_id, &entity_hash);
+    let marker = ctx
+        .payroll()
+        .record_confidential_audit_marker(&action, &run_id, &entity_hash);
     assert_eq!(marker.timestamp, ctx.env.ledger().timestamp());
 }

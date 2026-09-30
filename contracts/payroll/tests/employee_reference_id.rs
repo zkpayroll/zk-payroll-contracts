@@ -7,7 +7,7 @@ use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, BytesN, Env, Vec, String};
+use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
 fn mock_proof(env: &Env) -> BytesN<256> {
     BytesN::from_array(env, &[0u8; 256])
@@ -37,7 +37,16 @@ fn mock_vk(env: &Env) -> VerificationKey {
     }
 }
 
-fn setup_payroll_with_reference(env: &Env) -> (PayrollClient<'_>, SalaryCommitmentContractClient<'_>, Address, Address, Address, String) {
+fn setup_payroll_with_reference(
+    env: &Env,
+) -> (
+    PayrollClient<'_>,
+    SalaryCommitmentContractClient<'_>,
+    Address,
+    Address,
+    Address,
+    String,
+) {
     env.mock_all_auths();
 
     let verifier_id = env.register_contract(None, ProofVerifier);
@@ -80,7 +89,14 @@ fn setup_payroll_with_reference(env: &Env) -> (PayrollClient<'_>, SalaryCommitme
     let ref_id = String::from_str(env, "EMP-ZK-999");
     commitment_client.set_employee_reference_id(&employee, &ref_id);
 
-    (payroll_client, commitment_client, admin, employee, treasury, ref_id)
+    (
+        payroll_client,
+        commitment_client,
+        admin,
+        employee,
+        treasury,
+        ref_id,
+    )
 }
 
 fn single_payment_batch(
@@ -100,11 +116,14 @@ fn single_payment_batch(
 #[test]
 fn test_safe_lookup_and_batch_preparation() {
     let env = Env::default();
-    let (payroll, commitment, admin, original_employee, _treasury, ref_id) = setup_payroll_with_reference(&env);
+    let (payroll, commitment, admin, original_employee, _treasury, ref_id) =
+        setup_payroll_with_reference(&env);
 
     // 1. External system uses the safe reference ID to fetch the on-chain employee address
-    let resolved_employee = commitment.get_employee_by_reference_id(&ref_id).expect("Employee should exist");
-    
+    let resolved_employee = commitment
+        .get_employee_by_reference_id(&ref_id)
+        .expect("Employee should exist");
+
     // Verify it resolves correctly
     assert_eq!(resolved_employee, original_employee);
 
@@ -114,21 +133,16 @@ fn test_safe_lookup_and_batch_preparation() {
 
     // 3. Prepare the batch. This demonstrates the lookup flow correctly integrating with batch execution
     // without exposing private values tied to the reference ID directly.
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &10_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
     assert!(run_id > 0);
 
     // 4. Finalize the batch
     payroll.finalize_payroll_run(&admin, &run_id);
-    
+
     // Reverse check: Given an employee in a batch, can we get their reference ID safely?
-    let retrieved_ref_id = commitment.get_employee_reference_id(&resolved_employee).expect("Should have reference ID");
+    let retrieved_ref_id = commitment
+        .get_employee_reference_id(&resolved_employee)
+        .expect("Should have reference ID");
     assert_eq!(retrieved_ref_id, ref_id);
 }

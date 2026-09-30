@@ -32,6 +32,7 @@ Tracks off-chain preparation and admin draft management prior to processing:
 ## 3. Cancellation & State Cleanup Semantics
 
 - **Pending Run Cancellation**: Calling `cancel_payroll_run_with_reason` purges the transient `PendingRun` record from contract storage, records `PayrollRunState::Cancelled` in `PayrollState`, and keeps the batch nonce permanently consumed for audit trail integrity and replay prevention.
+- **Approved Run Protection (#616)**: Cancellation is rejected with `"Cannot cancel a payroll run that has been approved by a reviewer"` when a reviewer has already approved the run (`ReviewDecision::Approved` in `DataKey::RunReview`). Runs with `Rejected` or `ChangesRequested` decisions remain cancellable. An approval represents a commitment that cannot be unilaterally revoked via the cancellation path.
 - **Draft Cancellation**: Calling `cancel_run_draft` transitions the draft to terminal `Cancelled`, preserving historical amendment and creation metadata while blocking further modifications.
 - **Escape Hatch**: Run cancellation is explicitly allowed during emergency pause to empower admins to recover from invalid or compromised submissions.
 

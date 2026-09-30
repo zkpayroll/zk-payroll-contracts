@@ -10,6 +10,17 @@
 //!   - `close_at`     — hard close; no further state changes beyond archival.
 //!
 //! All timestamps are Unix seconds (`u64`) sourced from `env.ledger().timestamp()`.
+//!
+//! ## Payout schedule collision detection (#621)
+//!
+//! `create_period` rejects a new period whose `[open_at, close_at]` window
+//! overlaps any previously created period for the same company (interval
+//! overlap: `new_open_at < existing.close_at && existing.open_at < new_close_at`).
+//! Adjacent windows (one ends exactly where the next begins) are allowed, and
+//! windows are compared per company — different companies never collide.
+//! Colliding creations fail with `SettlementError::ScheduleCollision` (10).
+//! Note: cancelled/expired periods still count as collisions, so a rescheduled
+//! window must not reuse the blocked time range.
 //! The contract enforces window boundaries on every state-changing call so that
 //! payroll cannot be executed early, late, or after expiry.
 
@@ -45,6 +56,8 @@ pub enum SettlementError {
     Unauthorized = 8,
     /// The period has already been cancelled or expired; no further updates allowed.
     AlreadyFinalized = 9,
+    /// The new period's time window overlaps with an existing period's window.
+    ScheduleCollision = 10,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +168,7 @@ impl SettlementWindowContract {
     ///
     /// Timestamps must satisfy: `open_at <= execute_at <= grace_until <= close_at`.
     /// Only one unclosed period per company is permitted (enforced by sequence check).
+    /// The new period's time window must not overlap with any existing period (#621).
     pub fn create_period(
         env: Env,
         company_id: u64,
@@ -171,11 +185,7 @@ impl SettlementWindowContract {
         }
 
         let seq_key = DataKey::PeriodSequence(company_id);
-        let period_id: u32 = env
-            .storage()
-            .persistent()
-            .get(&seq_key)
-            .unwrap_or(1u32);
+        let period_id: u32 = env.storage().persistent().get(&seq_key).unwrap_or(1u32);
 
         // Reject if a non-finalized period already exists for this company.
         if period_id > 1 {
@@ -186,13 +196,14 @@ impl SettlementWindowContract {
                 .get::<DataKey, SettlementPeriod>(&prev_key)
             {
                 match prev.phase {
-                    PeriodPhase::Closed
-                    | PeriodPhase::Expired
-                    | PeriodPhase::Cancelled => {}
+                    PeriodPhase::Closed | PeriodPhase::Expired | PeriodPhase::Cancelled => {}
                     _ => return Err(SettlementError::PeriodAlreadyExists),
                 }
             }
         }
+
+        // Check for payout schedule collision with existing periods (#621).
+        Self::check_schedule_collision(&env, company_id, open_at, close_at)?;
 
         let now = env.ledger().timestamp();
         let period = SettlementPeriod {
@@ -210,9 +221,7 @@ impl SettlementWindowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Period(company_id, period_id), &period);
-        env.storage()
-            .persistent()
-            .set(&seq_key, &(period_id + 1));
+        env.storage().persistent().set(&seq_key, &(period_id + 1));
 
         payroll_events::emit_settlement_period_created(
             &env,
@@ -225,6 +234,39 @@ impl SettlementWindowContract {
         );
 
         Ok(period)
+    }
+
+    /// Check if the new period's time window [open_at, close_at] overlaps with any
+    /// existing period for the same company (#621).
+    ///
+    /// Two periods overlap if: new_open_at < existing.close_at && existing.open_at < new_close_at
+    /// This is the standard interval overlap check.
+    fn check_schedule_collision(
+        env: &Env,
+        company_id: u64,
+        new_open_at: u64,
+        new_close_at: u64,
+    ) -> Result<(), SettlementError> {
+        let seq_key = DataKey::PeriodSequence(company_id);
+        let max_period_id: u32 = env.storage().persistent().get(&seq_key).unwrap_or(1u32);
+
+        // Check all existing periods for this company
+        for period_id in 1..max_period_id {
+            let period_key = DataKey::Period(company_id, period_id);
+            if let Some(existing) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, SettlementPeriod>(&period_key)
+            {
+                // Check for overlap: [new_open_at, new_close_at] overlaps with [existing.open_at, existing.close_at]
+                // Overlap exists if: new_open_at < existing.close_at && existing.open_at < new_close_at
+                if new_open_at < existing.close_at && existing.open_at < new_close_at {
+                    return Err(SettlementError::ScheduleCollision);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Validate that the current ledger time is within the execution window.
@@ -471,9 +513,10 @@ impl SettlementWindowContract {
     }
 
     fn save_period(env: &Env, period: &SettlementPeriod) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::Period(period.company_id, period.period_id), period);
+        env.storage().persistent().set(
+            &DataKey::Period(period.company_id, period.period_id),
+            period,
+        );
     }
 
     fn require_not_finalized(period: &SettlementPeriod) -> Result<(), SettlementError> {
@@ -518,13 +561,17 @@ mod tests {
         let (open_at, execute_at, grace_until, close_at) = make_window(now + 10);
 
         let company_id = 1u64;
-        let period = client.create_period(&company_id, &open_at, &execute_at, &grace_until, &close_at);
+        let period =
+            client.create_period(&company_id, &open_at, &execute_at, &grace_until, &close_at);
         assert_eq!(period.period_id, 1);
         assert_eq!(period.phase, PeriodPhase::Pending);
 
         // Before open_at — should reject
         let result = client.try_check_execution_allowed(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::PeriodNotYetOpen);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::PeriodNotYetOpen
+        );
     }
 
     #[test]
@@ -535,7 +582,13 @@ mod tests {
         let company_id = 2u64;
 
         // Set window: open now, execute now+10, grace now+1000, close now+2000
-        client.create_period(&company_id, &base, &(base + 10), &(base + 1000), &(base + 2000));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 1000),
+            &(base + 2000),
+        );
 
         // Advance time into execute window
         env.ledger().with_mut(|l| l.timestamp = base + 50);
@@ -551,13 +604,22 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 3u64;
 
-        client.create_period(&company_id, &base, &(base + 500), &(base + 1000), &(base + 2000));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 500),
+            &(base + 1000),
+            &(base + 2000),
+        );
 
         // Time is at open_at but before execute_at
         env.ledger().with_mut(|l| l.timestamp = base + 100);
 
         let result = client.try_check_execution_allowed(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::ExecutionWindowNotOpen);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
     }
 
     #[test]
@@ -567,13 +629,22 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 4u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
 
         // Advance past grace
         env.ledger().with_mut(|l| l.timestamp = base + 150);
 
         let result = client.try_check_execution_allowed(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::ExecutionWindowExpired);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowExpired
+        );
     }
 
     #[test]
@@ -583,13 +654,22 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 5u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
         let cancelled = client.cancel_period(&company_id, &1);
         assert_eq!(cancelled.phase, PeriodPhase::Cancelled);
 
         // Second cancel should fail
         let result = client.try_cancel_period(&company_id, &1);
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::AlreadyFinalized);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
     }
 
     #[test]
@@ -599,12 +679,21 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 6u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 50), &(base + 100));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
 
-        // Before grace_until — should not expire
-        env.ledger().with_mut(|l| l.timestamp = base + 80);
+        // Before grace_until — should not expire (now=base+30 < grace_until=base+50)
+        env.ledger().with_mut(|l| l.timestamp = base + 30);
         let too_early = client.try_expire_period(&company_id, &1);
-        assert_eq!(too_early.unwrap_err().unwrap(), SettlementError::ExecutionWindowNotOpen);
+        assert_eq!(
+            too_early.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
 
         // After grace_until
         env.ledger().with_mut(|l| l.timestamp = base + 110);
@@ -619,8 +708,17 @@ mod tests {
         let base = env.ledger().timestamp();
 
         // execute_at before open_at
-        let result = client.try_create_period(&1u64, &(base + 100), &(base + 50), &(base + 200), &(base + 300));
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::InvalidWindowConfig);
+        let result = client.try_create_period(
+            &1u64,
+            &(base + 100),
+            &(base + 50),
+            &(base + 200),
+            &(base + 300),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::InvalidWindowConfig
+        );
     }
 
     #[test]
@@ -630,10 +728,27 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 7u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200)).period_id;
+        client
+            .create_period(
+                &company_id,
+                &base,
+                &(base + 10),
+                &(base + 100),
+                &(base + 200),
+            )
+            .period_id;
         // Second call while first is still active
-        let result = client.try_create_period(&company_id, &(base + 300), &(base + 310), &(base + 400), &(base + 500));
-        assert_eq!(result.unwrap_err().unwrap(), SettlementError::PeriodAlreadyExists);
+        let result = client.try_create_period(
+            &company_id,
+            &(base + 300),
+            &(base + 310),
+            &(base + 400),
+            &(base + 500),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::PeriodAlreadyExists
+        );
     }
 
     #[test]
@@ -643,11 +758,170 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 8u64;
 
-        client.create_period(&company_id, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
         client.cancel_period(&company_id, &1);
 
         // Should succeed now that period 1 is cancelled
-        let p2 = client.create_period(&company_id, &(base + 300), &(base + 310), &(base + 400), &(base + 500));
+        let p2 = client.create_period(
+            &company_id,
+            &(base + 300),
+            &(base + 310),
+            &(base + 400),
+            &(base + 500),
+        );
         assert_eq!(p2.period_id, 2);
+    }
+
+    // Tests for #621: Payout schedule collision detection
+
+    #[test]
+    fn test_schedule_collision_detected_overlapping_windows() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 9u64;
+
+        // Create first period: [base, base + 200]
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
+        client.cancel_period(&company_id, &1);
+
+        // Try to create second period with overlapping window: [base + 50, base + 250]
+        // This overlaps with first period's [base, base + 200]
+        let result = client.try_create_period(
+            &company_id,
+            &(base + 50),
+            &(base + 60),
+            &(base + 150),
+            &(base + 250),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ScheduleCollision
+        );
+    }
+
+    #[test]
+    fn test_schedule_collision_detected_contained_window() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 10u64;
+
+        // Create first period: [base, base + 500]
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 500),
+        );
+        client.cancel_period(&company_id, &1);
+
+        // Try to create second period completely contained: [base + 100, base + 200]
+        let result = client.try_create_period(
+            &company_id,
+            &(base + 100),
+            &(base + 110),
+            &(base + 150),
+            &(base + 200),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ScheduleCollision
+        );
+    }
+
+    #[test]
+    fn test_schedule_collision_detected_enclosing_window() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 11u64;
+
+        // Create first period: [base + 100, base + 200]
+        client.create_period(
+            &company_id,
+            &(base + 100),
+            &(base + 110),
+            &(base + 150),
+            &(base + 200),
+        );
+        client.cancel_period(&company_id, &1);
+
+        // Try to create second period that encloses the first: [base, base + 500]
+        let result = client.try_create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 500),
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ScheduleCollision
+        );
+    }
+
+    #[test]
+    fn test_no_collision_for_adjacent_periods() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 12u64;
+
+        // Create first period: [base, base + 100]
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+        client.cancel_period(&company_id, &1);
+
+        // Create second period starting exactly when first ends: [base + 100, base + 200]
+        // This should NOT be a collision (adjacent, not overlapping)
+        let p2 = client.create_period(
+            &company_id,
+            &(base + 100),
+            &(base + 110),
+            &(base + 150),
+            &(base + 200),
+        );
+        assert_eq!(p2.period_id, 2);
+    }
+
+    #[test]
+    fn test_no_collision_for_different_companies() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+
+        // Create period for company 1: [base, base + 200]
+        client.create_period(&1u64, &base, &(base + 10), &(base + 100), &(base + 200));
+        client.cancel_period(&1u64, &1);
+
+        // Create overlapping period for company 2 - should succeed
+        let p2 = client.create_period(
+            &2u64,
+            &(base + 50),
+            &(base + 60),
+            &(base + 150),
+            &(base + 250),
+        );
+        assert_eq!(p2.company_id, 2);
+        assert_eq!(p2.period_id, 1);
     }
 }

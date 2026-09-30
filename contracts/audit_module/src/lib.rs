@@ -297,8 +297,7 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
         if env.ledger().sequence() <= record.expiration_ledger
-            || env.ledger().sequence()
-                < record.expiration_ledger.saturating_add(retention_ledgers)
+            || env.ledger().sequence() < record.expiration_ledger.saturating_add(retention_ledgers)
         {
             return Err(AuditError::KeyExpired);
         }

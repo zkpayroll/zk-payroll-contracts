@@ -110,7 +110,10 @@ mod tests {
 
     #[test]
     fn test_normalize_asset_symbol_rejects_empty() {
-        assert_eq!(normalize_asset_symbol("   "), Err("asset symbol cannot be empty"));
+        assert_eq!(
+            normalize_asset_symbol("   "),
+            Err("asset symbol cannot be empty")
+        );
     }
 
     #[test]

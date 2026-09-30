@@ -15,7 +15,15 @@ fn mock_vk(env: &Env) -> VerificationKey {
         beta: BytesN::from_array(env, &[0u8; 128]),
         gamma: BytesN::from_array(env, &[0u8; 128]),
         delta: BytesN::from_array(env, &[0u8; 128]),
-        ic: Vec::from_array(env, [BytesN::from_array(env, &[0u8; 64]), BytesN::from_array(env, &[0u8; 64]), BytesN::from_array(env, &[0u8; 64]), BytesN::from_array(env, &[0u8; 64])]),
+        ic: Vec::from_array(
+            env,
+            [
+                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[0u8; 64]),
+            ],
+        ),
     }
 }
 
@@ -32,7 +40,14 @@ fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address) {
     let payroll_id = env.register_contract(None, Payroll);
     let payroll_client = PayrollClient::new(env, &payroll_id);
     let admin = Address::generate(env);
-    payroll_client.initialize(&admin, &token_id, &verifier_id, &commitment_id, &Address::generate(env), &Address::generate(env));
+    payroll_client.initialize(
+        &admin,
+        &token_id,
+        &verifier_id,
+        &commitment_id,
+        &Address::generate(env),
+        &Address::generate(env),
+    );
     (payroll_client, admin)
 }
 

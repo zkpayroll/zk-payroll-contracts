@@ -103,14 +103,7 @@ fn test_approval_validity_window() {
 
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
     let nonce = test_nonce(&env, 30);
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &10_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
     payroll.approve_payroll_run(&reviewer, &run_id);
     assert!(!payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
@@ -133,14 +126,7 @@ fn test_finalize_panics_after_approval_expiry() {
 
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
     let nonce = test_nonce(&env, 31);
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &10_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
     payroll.approve_payroll_run(&reviewer, &run_id);
 

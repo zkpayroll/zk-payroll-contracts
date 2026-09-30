@@ -75,14 +75,7 @@ fn setup_system<'a>(
     registry.add_employee(&company_id, &employee, &employee_commitment);
 
     (
-        executor,
-        registry,
-        commitment,
-        token,
-        company_id,
-        treasury,
-        employee,
-        admin,
+        executor, registry, commitment, token, company_id, treasury, employee, admin,
     )
 }
 

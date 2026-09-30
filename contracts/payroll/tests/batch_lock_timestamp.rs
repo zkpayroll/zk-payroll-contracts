@@ -109,18 +109,14 @@ fn test_batch_lock_timestamp_lifecycle() {
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
     let nonce = test_nonce(&env, 10);
 
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &10_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
 
     let lock_ts = payroll.get_batch_lock_timestamp(&run_id);
     assert_eq!(lock_ts, Some(env.ledger().timestamp()));
 
     payroll.finalize_payroll_run(&admin, &run_id);
-    assert_eq!(payroll.get_batch_lock_timestamp(&run_id), Some(env.ledger().timestamp()));
+    assert_eq!(
+        payroll.get_batch_lock_timestamp(&run_id),
+        Some(env.ledger().timestamp())
+    );
 }

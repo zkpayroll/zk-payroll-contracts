@@ -203,13 +203,7 @@ impl TreasuryIsolationContract {
         };
         env.storage().persistent().set(&bal_key, &initial);
 
-        payroll_events::emit_treasury_asset_registered(
-            &env,
-            company_id,
-            asset,
-            issuer,
-            symbol,
-        );
+        payroll_events::emit_treasury_asset_registered(&env, company_id, asset, issuer, symbol);
 
         Ok(record)
     }
@@ -506,7 +500,10 @@ mod tests {
 
         // Attempt to debit USDC treasury using XLM as committed_asset
         let result = client.try_execute_debit(&company_id, &xlm, &usdc, &5000i128);
-        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::AssetMismatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::AssetMismatch
+        );
     }
 
     #[test]
@@ -538,8 +535,12 @@ mod tests {
         client.register_asset(&company_id, &asset1, &issuer, &symbol_short!("USDC"));
 
         // Registering asset2 with the same issuer should fail
-        let result = client.try_register_asset(&company_id, &asset2, &issuer, &symbol_short!("USDC"));
-        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::IssuerMismatch);
+        let result =
+            client.try_register_asset(&company_id, &asset2, &issuer, &symbol_short!("USDC"));
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::IssuerMismatch
+        );
     }
 
     #[test]
@@ -554,7 +555,10 @@ mod tests {
         client.credit(&company_id, &asset, &100i128);
 
         let result = client.try_reserve(&company_id, &asset, &500i128);
-        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::InsufficientBalance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::InsufficientBalance
+        );
     }
 
     #[test]
@@ -565,7 +569,10 @@ mod tests {
         let company_id = 7u64;
 
         let result = client.try_credit(&company_id, &asset, &1000i128);
-        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::AssetNotRegistered);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::AssetNotRegistered
+        );
     }
 
     #[test]
@@ -606,6 +613,9 @@ mod tests {
 
         // Debit XLM using USDC committed_asset — must fail
         let result = client.try_execute_debit(&company_id, &usdc, &xlm, &1000i128);
-        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::AssetMismatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::AssetMismatch
+        );
     }
 }

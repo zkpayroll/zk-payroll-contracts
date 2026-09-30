@@ -31,7 +31,8 @@ fn test_generate_view_key_stores_and_verify_access_succeeds() {
     assert_eq!(key_bytes.len(), 32);
 
     let after = env.events().all().len();
-    assert_eq!(after, 1);
+    // Two events are emitted: ViewKeyGenerated and IndexerAuditGrant
+    assert_eq!(after, 2);
 
     let event = env.events().all().get(0).unwrap();
     assert_eq!(event.1.len(), 2);
@@ -595,6 +596,167 @@ fn test_export_audit_summary_emits_event() {
     client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
 
     assert!(env.events().all().len() > before);
+}
+
+// ── Issue #607: audit export integrity marker ─────────────────────────────
+//
+// Every exported summary carries an `integrity_hash` — a SHA-256 marker over
+// all summary fields — so recipients can detect post-emission tampering.
+// These tests pin the marker's core properties: non-zero, deterministic for
+// identical state, sensitive to both underlying data and export parameters,
+// and computed over the documented preimage layout.
+
+#[test]
+fn test_export_summary_integrity_hash_is_non_zero() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let summary = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    let zero = BytesN::from_array(&env, &[0u8; 32]);
+    assert_ne!(
+        summary.integrity_hash, zero,
+        "integrity marker must never be the zero hash"
+    );
+}
+
+#[test]
+fn test_export_summary_integrity_hash_is_deterministic() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+
+    let first = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    // Same ledger state (timestamp pinned) must reproduce the same marker.
+    env.ledger().with_mut(|l| l.timestamp = ts);
+    let second = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    assert_eq!(
+        first.integrity_hash, second.integrity_hash,
+        "identical state must yield an identical integrity marker"
+    );
+}
+
+#[test]
+fn test_export_summary_integrity_hash_changes_when_data_changes() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let first = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    // Add a new audit entry (a passing commitment verification) — the
+    // summary counts change, so the integrity marker must change too.
+    let amount: i128 = 7_500;
+    let blinding = BytesN::from_array(&env, &[0xCD; 32]);
+    let commitment = make_commitment(&env, amount, &blinding);
+    client.verify_commitment_with_key(
+        &auditor,
+        &commitment,
+        &amount,
+        &blinding,
+        &AuditScope::FullCompany,
+    );
+
+    env.ledger().with_mut(|l| l.timestamp = ts);
+    let second = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    assert_ne!(
+        first.integrity_hash, second.integrity_hash,
+        "marker must change when the underlying audit data changes"
+    );
+}
+
+#[test]
+fn test_export_summary_integrity_hash_differs_for_different_period() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+
+    let window_a = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+    let window_b = client.export_audit_summary(&auditor, &company_id, &(ts + 1_001), &(ts + 2_000));
+
+    assert_ne!(
+        window_a.integrity_hash, window_b.integrity_hash,
+        "marker must be bound to the exported period window"
+    );
+}
+
+#[test]
+fn test_export_summary_integrity_hash_covers_documented_fields() {
+    // Recompute the marker from the returned summary using the documented
+    // preimage layout (company_id || period bounds || counts || exported_at
+    // || exported_by) and confirm it matches. A recipient can therefore
+    // detect any post-emission field tampering by recomputation.
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+
+    let company_id = Symbol::new(&env, "default");
+    let ts = env.ledger().timestamp();
+    let summary = client.export_audit_summary(&auditor, &company_id, &0u64, &(ts + 1_000));
+
+    let mut preimage = soroban_sdk::Bytes::new(&env);
+    preimage.append(&summary.company_id.clone().to_xdr(&env));
+    preimage.extend_from_array(&summary.period_start.to_le_bytes());
+    preimage.extend_from_array(&summary.period_end.to_le_bytes());
+    preimage.extend_from_array(&summary.total_audit_entries.to_le_bytes());
+    preimage.extend_from_array(&summary.verification_pass_count.to_le_bytes());
+    preimage.extend_from_array(&summary.verification_fail_count.to_le_bytes());
+    preimage.extend_from_array(&summary.exported_at.to_le_bytes());
+    preimage.append(&summary.exported_by.clone().to_xdr(&env));
+    let recomputed: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+    assert_eq!(
+        summary.integrity_hash, recomputed,
+        "marker must be reproducible from the summary's public fields"
+    );
+
+    // Tampering with any field breaks the marker.
+    let mut tampered = summary.clone();
+    tampered.total_audit_entries += 1;
+    let mut tampered_preimage = soroban_sdk::Bytes::new(&env);
+    tampered_preimage.append(&tampered.company_id.clone().to_xdr(&env));
+    tampered_preimage.extend_from_array(&tampered.period_start.to_le_bytes());
+    tampered_preimage.extend_from_array(&tampered.period_end.to_le_bytes());
+    tampered_preimage.extend_from_array(&tampered.total_audit_entries.to_le_bytes());
+    tampered_preimage.extend_from_array(&tampered.verification_pass_count.to_le_bytes());
+    tampered_preimage.extend_from_array(&tampered.verification_fail_count.to_le_bytes());
+    tampered_preimage.extend_from_array(&tampered.exported_at.to_le_bytes());
+    tampered_preimage.append(&tampered.exported_by.clone().to_xdr(&env));
+    let tampered_hash: BytesN<32> = env.crypto().sha256(&tampered_preimage).into();
+
+    assert_ne!(
+        summary.integrity_hash, tampered_hash,
+        "a mutated summary field must produce a different marker"
+    );
 }
 
 // ── Issue #172: revoked audit grants cannot read/export/validate audit data ──

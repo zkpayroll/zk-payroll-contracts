@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 
 extern crate alloc;
 
@@ -296,10 +296,18 @@ pub trait PayrollRegistryTrait {
     fn get_approval_threshold(env: Env, company_id: u64) -> Option<ApprovalThreshold>;
 
     /// Get any pending approval threshold rotation for a company (#353).
-    fn get_pending_threshold_rotation(env: Env, company_id: u64) -> Option<PendingThresholdRotation>;
+    fn get_pending_threshold_rotation(
+        env: Env,
+        company_id: u64,
+    ) -> Option<PendingThresholdRotation>;
 
     /// Set the initial approval threshold when a company is registered (#353).
-    fn set_initial_approval_threshold(env: Env, company_id: u64, admin: Address, required_approvals: u32);
+    fn set_initial_approval_threshold(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        required_approvals: u32,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -945,10 +953,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
             effective_after,
         };
 
-        env.storage().persistent().set(
-            &DataKey::PendingThresholdRotation(company_id),
-            &pending,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingThresholdRotation(company_id), &pending);
 
         env.events().publish(
             (Symbol::new(&env, "ThresholdRotationProposed"), company_id),
@@ -973,7 +980,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
         let pending = env
             .storage()
             .persistent()
-            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(company_id))
+            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(
+                company_id,
+            ))
             .expect("No pending threshold rotation");
 
         if env.ledger().timestamp() < pending.effective_after {
@@ -1019,7 +1028,9 @@ impl PayrollRegistryTrait for PayrollRegistry {
         let pending = env
             .storage()
             .persistent()
-            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(company_id))
+            .get::<DataKey, PendingThresholdRotation>(&DataKey::PendingThresholdRotation(
+                company_id,
+            ))
             .expect("No pending threshold rotation");
 
         env.storage()
@@ -1038,7 +1049,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .get(&DataKey::ApprovalThreshold(company_id))
     }
 
-    fn get_pending_threshold_rotation(env: Env, company_id: u64) -> Option<PendingThresholdRotation> {
+    fn get_pending_threshold_rotation(
+        env: Env,
+        company_id: u64,
+    ) -> Option<PendingThresholdRotation> {
         env.storage()
             .persistent()
             .get(&DataKey::PendingThresholdRotation(company_id))

@@ -16,7 +16,6 @@
 /// | `test_has_open_review_reflects_lifecycle` | has_open_review tracks open/resolved state |
 /// | `test_failed_status_allowed_under_open_review` | Failed status update is never blocked |
 /// | `test_unreconciled_status_allowed_under_open_review` | Unreconciled rollback is never blocked |
-
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -50,7 +49,7 @@ fn mock_proof(env: &Env) -> BytesN<256> {
     BytesN::from_array(env, &[0u8; 256])
 }
 
-ufn mock_proof_with_seed(env: &Env, seed: u8) -> BytesN<256> {
+fn mock_proof_with_seed(env: &Env, seed: u8) -> BytesN<256> {
     let mut arr = [0u8; 256];
     arr[32] = seed;
     BytesN::from_array(env, &arr)
@@ -253,8 +252,7 @@ fn test_unauthorized_open_rejected() {
     let run_id = run_payroll(&ctx, 4);
 
     let attacker = Address::generate(&ctx.env);
-    ctx.payroll()
-        .open_overpayment_review(&attacker, &run_id);
+    ctx.payroll().open_overpayment_review(&attacker, &run_id);
 }
 
 /// A non-admin address cannot resolve an overpayment review.
@@ -323,11 +321,8 @@ fn test_empty_reason_rejected() {
 
     ctx.payroll().open_overpayment_review(&ctx.admin, &run_id);
 
-    ctx.payroll().resolve_overpayment_review(
-        &ctx.admin,
-        &run_id,
-        &Symbol::new(&ctx.env, ""),
-    );
+    ctx.payroll()
+        .resolve_overpayment_review(&ctx.admin, &run_id, &Symbol::new(&ctx.env, ""));
 }
 
 /// `get_overpayment_review` returns `None` before any review is opened.
@@ -337,7 +332,10 @@ fn test_get_review_returns_none_before_open() {
     let run_id = run_payroll(&ctx, 9);
 
     let result = ctx.payroll().get_overpayment_review(&run_id);
-    assert!(result.is_none(), "No review should exist before one is opened");
+    assert!(
+        result.is_none(),
+        "No review should exist before one is opened"
+    );
 }
 
 /// `has_open_review` accurately reflects the lifecycle: false → true → false.
@@ -346,17 +344,23 @@ fn test_has_open_review_reflects_lifecycle() {
     let ctx = setup();
     let run_id = run_payroll(&ctx, 10);
 
-    assert!(!ctx.payroll().has_open_review(&run_id), "Should be false before open");
+    assert!(
+        !ctx.payroll().has_open_review(&run_id),
+        "Should be false before open"
+    );
 
     ctx.payroll().open_overpayment_review(&ctx.admin, &run_id);
-    assert!(ctx.payroll().has_open_review(&run_id), "Should be true after open");
-
-    ctx.payroll().resolve_overpayment_review(
-        &ctx.admin,
-        &run_id,
-        &Symbol::new(&ctx.env, "closed"),
+    assert!(
+        ctx.payroll().has_open_review(&run_id),
+        "Should be true after open"
     );
-    assert!(!ctx.payroll().has_open_review(&run_id), "Should be false after resolve");
+
+    ctx.payroll()
+        .resolve_overpayment_review(&ctx.admin, &run_id, &Symbol::new(&ctx.env, "closed"));
+    assert!(
+        !ctx.payroll().has_open_review(&run_id),
+        "Should be false after resolve"
+    );
 }
 
 /// `ReconciliationStatus::Failed` is never blocked by an open review.
@@ -419,16 +423,14 @@ fn test_review_opened_event_is_privacy_safe() {
 
     let events = ctx.env.events().all();
     // Find the review_opened event (last batch of events after the payroll run events).
-    let review_event = events
-        .iter()
-        .find(|(_, topics, _)| {
-            if let Some(topic_val) = topics.get(1) {
-                if let Ok(sym) = Symbol::try_from_val(&ctx.env, &topic_val) {
-                    return sym == Symbol::new(&ctx.env, "review_opened");
-                }
+    let review_event = events.iter().find(|(_, topics, _)| {
+        if let Some(topic_val) = topics.get(1) {
+            if let Ok(sym) = Symbol::try_from_val(&ctx.env, &topic_val) {
+                return sym == Symbol::new(&ctx.env, "review_opened");
             }
-            false
-        });
+        }
+        false
+    });
 
     assert!(
         review_event.is_some(),
@@ -510,8 +512,14 @@ fn test_review_state_is_isolated_per_run() {
     // Open review only on run_a.
     ctx.payroll().open_overpayment_review(&ctx.admin, &run_a);
 
-    assert!(ctx.payroll().has_open_review(&run_a), "run_a must be under review");
-    assert!(!ctx.payroll().has_open_review(&run_b), "run_b must NOT be under review");
+    assert!(
+        ctx.payroll().has_open_review(&run_a),
+        "run_a must be under review"
+    );
+    assert!(
+        !ctx.payroll().has_open_review(&run_b),
+        "run_b must NOT be under review"
+    );
 
     // run_b can be reconciled independently.
     ctx.payroll().update_reconciliation_status(

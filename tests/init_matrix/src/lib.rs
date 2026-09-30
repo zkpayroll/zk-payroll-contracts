@@ -4,9 +4,7 @@ use pause_manager::{PauseManager, PauseManagerClient};
 use payment_executor::{
     ContractAddresses as ExecutorAddresses, PaymentExecutor, PaymentExecutorClient,
 };
-use payroll::{
-    CompanyState, ContractAddresses as PayrollAddresses, Payroll, PayrollClient,
-};
+use payroll::{CompanyState, ContractAddresses as PayrollAddresses, Payroll, PayrollClient};
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -113,7 +111,9 @@ mod payroll_init {
         assert_eq!(payroll_client.get_treasury_owner(), treasury_owner);
         assert_eq!(payroll_client.get_treasury_balance(&admin), 0i128);
 
-        let version = payroll_client.get_storage_version().expect("storage version must be set");
+        let version = payroll_client
+            .get_storage_version()
+            .expect("storage version must be set");
         assert_eq!(version.version, 1);
         assert!(version.migration_complete);
 
@@ -185,10 +185,15 @@ mod payroll_init {
             &treasury_owner,
         );
 
-        let version = payroll_client.get_storage_version().expect("storage version must be set");
+        let version = payroll_client
+            .get_storage_version()
+            .expect("storage version must be set");
         assert_eq!(version.version, 1);
         assert!(version.migration_complete);
-        assert_eq!(version.version_description, String::from_str(&env, "Initial version"));
+        assert_eq!(
+            version.version_description,
+            String::from_str(&env, "Initial version")
+        );
 
         let addrs = payroll_client.get_addresses();
         assert_eq!(addrs.admin, admin);

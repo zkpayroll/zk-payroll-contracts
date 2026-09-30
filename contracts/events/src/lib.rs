@@ -1129,7 +1129,10 @@ pub fn emit_period_unfrozen(e: &Env, period_label: Symbol, unfrozen_by: Address)
 /// Emitted when the settlement window contract is initialized.
 pub fn emit_settlement_window_initialized(e: &Env, admin: Address) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "settlement_window_initialized")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "settlement_window_initialized"),
+        ),
         (admin,),
     );
 }
@@ -1146,7 +1149,14 @@ pub fn emit_settlement_period_created(
 ) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "settlement_period_created")),
-        (company_id, period_id, open_at, execute_at, grace_until, close_at),
+        (
+            company_id,
+            period_id,
+            open_at,
+            execute_at,
+            grace_until,
+            close_at,
+        ),
     );
 }
 
@@ -1158,7 +1168,10 @@ pub fn emit_settlement_period_phase_changed(
     new_phase: Symbol,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "settlement_period_phase_changed")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "settlement_period_phase_changed"),
+        ),
         (company_id, period_id, new_phase),
     );
 }
@@ -1171,18 +1184,16 @@ pub fn emit_settlement_period_cancelled(
     cancelled_at: u64,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "settlement_period_cancelled")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "settlement_period_cancelled"),
+        ),
         (company_id, period_id, cancelled_at),
     );
 }
 
 /// Emitted when a settlement period expires.
-pub fn emit_settlement_period_expired(
-    e: &Env,
-    company_id: u64,
-    period_id: u32,
-    expired_at: u64,
-) {
+pub fn emit_settlement_period_expired(e: &Env, company_id: u64, period_id: u32, expired_at: u64) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "settlement_period_expired")),
         (company_id, period_id, expired_at),
@@ -1204,6 +1215,116 @@ pub fn emit_payroll_period_closed(e: &Env, period_label: Symbol, closed_by: Addr
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "payroll_period_closed")),
         (period_label, closed_by),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Restored feature events: #387, #413, #414, #415, #416
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Emitted when an optional reconciliation note hash is attached to a draft (#387).
+///
+/// Only the hash reference is emitted — raw note text is never placed on-chain.
+pub fn emit_draft_note_hash_set(e: &Env, draft_id: u64, note_hash: BytesN<32>) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "draft_note_hash_set")),
+        (draft_id, note_hash),
+    );
+}
+
+/// Emitted when a payroll obligation snapshot is recorded (#413).
+pub fn emit_obligation_snapshot_recorded(
+    e: &Env,
+    run_id: u64,
+    obligation_root: BytesN<32>,
+    total_amount: i128,
+    count: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "obligation_snapshot_recorded")),
+        (run_id, obligation_root, total_amount, count),
+    );
+}
+
+/// Emitted when an obligation snapshot is verified for a lifecycle step (#413).
+pub fn emit_obligation_snapshot_verified(
+    e: &Env,
+    run_id: u64,
+    snapshot_digest: BytesN<32>,
+    step: Symbol,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "obligation_snapshot_verified")),
+        (run_id, snapshot_digest, step),
+    );
+}
+
+/// Emitted when a signer grants a multi-stage draft approval (#414).
+pub fn emit_approval_granted(
+    e: &Env,
+    draft_id: u64,
+    signer: Address,
+    stage: u32,
+    current_approvals: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "approval_granted")),
+        (draft_id, signer, stage, current_approvals),
+    );
+}
+
+/// Emitted when protected draft fields change and stale approvals are rolled back (#414).
+pub fn emit_approvals_rolled_back(
+    e: &Env,
+    draft_id: u64,
+    old_hash: BytesN<32>,
+    new_hash: BytesN<32>,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "approvals_rolled_back")),
+        (draft_id, old_hash, new_hash),
+    );
+}
+
+/// Emitted when a confidential audit marker is recorded (#415).
+pub fn emit_audit_marker(
+    e: &Env,
+    action_type: Symbol,
+    run_id: u64,
+    entity_hash: BytesN<32>,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "audit_marker")),
+        (action_type, run_id, entity_hash, e.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a treasury reservation reconciliation checkpoint is recorded (#416).
+pub fn emit_reservation_checkpoint_recorded(
+    e: &Env,
+    run_id: u64,
+    stage: u32,
+    expected_amount: i128,
+    actual_amount: i128,
+    is_reconciled: bool,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "reservation_checkpoint_recorded")),
+        (run_id, stage, expected_amount, actual_amount, is_reconciled),
+    );
+}
+
+/// Emitted when treasury reservation drift is detected at a checkpoint (#416).
+pub fn emit_reservation_drift_detected(
+    e: &Env,
+    run_id: u64,
+    stage: u32,
+    expected_amount: i128,
+    actual_amount: i128,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "reservation_drift_detected")),
+        (run_id, stage, expected_amount, actual_amount),
     );
 }
 
