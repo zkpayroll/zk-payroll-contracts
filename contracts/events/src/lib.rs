@@ -755,6 +755,61 @@ pub fn emit_compliance_hold_released(e: &Env, hold_id: u64, released_by: Address
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Audit Hold Release Authorization Events (#546)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when a run-scoped audit hold is placed (#546).
+///
+/// Privacy-safe: carries only the opaque run id, the placing address, an
+/// opaque reason code, and the ledger timestamp. No amounts, employee
+/// addresses, or commitment data are included.
+pub fn emit_audit_hold_placed(
+    e: &Env,
+    run_id: u64,
+    placed_by: Address,
+    reason_code: Symbol,
+    placed_at: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "audit_hold_placed")),
+        (run_id, placed_by, reason_code, placed_at),
+    );
+}
+
+/// Emitted when an authorized address releases an audit hold (#546).
+///
+/// Privacy-safe: carries only the opaque run id, the releasing address, an
+/// opaque reason code, and the ledger timestamp.
+pub fn emit_audit_hold_released(
+    e: &Env,
+    run_id: u64,
+    released_by: Address,
+    release_reason: Symbol,
+    released_at: u64,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "audit_hold_released")),
+        (run_id, released_by, release_reason, released_at),
+    );
+}
+
+/// Emitted when audit-hold authority is granted to an address (#546).
+pub fn emit_audit_hold_authority_added(e: &Env, authority: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "audit_hold_authority_added")),
+        authority,
+    );
+}
+
+/// Emitted when audit-hold authority is revoked from an address (#546).
+pub fn emit_audit_hold_authority_removed(e: &Env, authority: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "audit_hold_authority_removed")),
+        authority,
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Funding Reservation Expiry Events (#337)
 // ═════════════════════════════════════════════════════════════════════════════
 

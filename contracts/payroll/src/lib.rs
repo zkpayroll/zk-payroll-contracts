@@ -529,6 +529,53 @@ pub struct ComplianceHold {
     pub is_active: bool,
 }
 
+// ── Issue #546: audit hold release authorization ────────────────────────────
+
+/// Lifecycle status of a run-scoped audit hold.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AuditHoldStatus {
+    /// Hold is active; the affected run cannot be finalized.
+    Active = 0,
+    /// Hold has been released by an authorized address.
+    Released = 1,
+}
+
+/// A run-scoped audit hold that blocks payroll finalization until an
+/// authorized address explicitly releases it (#546).
+///
+/// The hold keeps an operational review state explicit without touching
+/// committed payroll data: a held run keeps its record and reserved funds,
+/// but `finalize_payroll_run` is rejected until release. Only the contract
+/// admin or an address granted audit-hold authority may place or release a
+/// hold.
+///
+/// Privacy note: the record carries only an opaque run id, an opaque reason
+/// code, and actor addresses. Amounts, employee identities, and commitment
+/// data are deliberately absent, so a hold can be audited without exposing
+/// sensitive payroll values.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AuditHold {
+    /// The payroll run this hold applies to.
+    pub run_id: u64,
+    /// Authorized address that placed the hold.
+    pub placed_by: Address,
+    /// Ledger timestamp when the hold was placed.
+    pub placed_at: u64,
+    /// Opaque reason code for the hold (never a salary or amount).
+    pub reason_code: Symbol,
+    /// Current lifecycle state.
+    pub status: AuditHoldStatus,
+    /// Authorized address that released the hold (`None` while active).
+    pub released_by: Option<Address>,
+    /// Ledger timestamp of release (`None` while active).
+    pub released_at: Option<u64>,
+    /// Opaque reason code supplied at release time (empty while active).
+    pub release_reason: Symbol,
+}
+
 // ?? Issue #337: Funding Reservation Expiry ?????????????????????????????????????
 
 /// Funding reservation with expiry policy for asset-specific reservations.
@@ -863,6 +910,11 @@ pub enum DataKey {
     /// Contract-wide configuration revision, bumped once per audited
     /// configuration change (#490). Absent means `0`.
     ConfigRevision,
+    /// Run-scoped audit hold awaiting authorized release (#546). Absent when
+    /// no hold has been placed for the run.
+    AuditHold(u64),
+    /// Addresses granted permission to place/release audit holds (#546).
+    AuditHoldReleaseAuthority(Address),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -2861,6 +2913,7 @@ impl Payroll {
         Self::require_not_paused(&e);
         Self::validate_run_id(run_id);
         Self::require_run_not_disputed(&e, run_id);
+        Self::require_run_not_on_audit_hold(&e, run_id);
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -6703,6 +6756,222 @@ impl Payroll {
             false
         }
     }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #546: Audit hold release authorization
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Place a run-scoped audit hold that blocks finalization of `run_id`
+    /// until an authorized address releases it (#546).
+    ///
+    /// # Authorization
+    /// Only the contract admin or an address granted audit-hold authority may
+    /// place a hold.
+    ///
+    /// # Panics
+    /// - `"Not initialized"` — contract addresses have not been stored.
+    /// - `"Unauthorized: caller is not an authorized audit hold authority"` —
+    ///   `caller` is neither the admin nor a granted authority.
+    /// - `"Invalid payroll run ID"` — `run_id` is `u64::MAX`.
+    /// - `"Symbol cannot be empty"` — `reason_code` is the empty symbol.
+    /// - `"Run not found"` — no pending or completed run exists for `run_id`.
+    /// - `"Run already has an active audit hold"` — a hold is already active.
+    ///
+    /// Emits `("payroll", "audit_hold_placed")` with
+    /// `(run_id, caller, reason_code, placed_at)`.
+    pub fn place_audit_hold(e: Env, caller: Address, run_id: u64, reason_code: Symbol) {
+        Self::validate_run_id(run_id);
+        Self::validate_symbol_not_empty(&e, &reason_code, "reason_code");
+        Self::require_audit_hold_authority(&e, &caller);
+        caller.require_auth();
+
+        if !e.storage().persistent().has(&DataKey::PayrollRun(run_id))
+            && !e.storage().persistent().has(&DataKey::PendingRun(run_id))
+        {
+            panic!("Run not found");
+        }
+
+        if let Some(existing) = e
+            .storage()
+            .persistent()
+            .get::<DataKey, AuditHold>(&DataKey::AuditHold(run_id))
+        {
+            if existing.status == AuditHoldStatus::Active {
+                panic!("Run already has an active audit hold");
+            }
+        }
+
+        let placed_at = e.ledger().timestamp();
+        let hold = AuditHold {
+            run_id,
+            placed_by: caller.clone(),
+            placed_at,
+            reason_code: reason_code.clone(),
+            status: AuditHoldStatus::Active,
+            released_by: None,
+            released_at: None,
+            release_reason: Symbol::new(&e, ""),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::AuditHold(run_id), &hold);
+
+        payroll_events::emit_audit_hold_placed(&e, run_id, caller, reason_code, placed_at);
+    }
+
+    /// Release an active audit hold so `run_id` can be finalized again (#546).
+    ///
+    /// # Authorization
+    /// Only the contract admin or an address granted audit-hold authority may
+    /// release a hold.
+    ///
+    /// # Panics
+    /// - `"Unauthorized: caller is not an authorized audit hold authority"`.
+    /// - `"Audit hold not found"` — no hold exists for `run_id`.
+    /// - `"Audit hold is not active"` — the hold was already released.
+    /// - `"Symbol cannot be empty"` — `release_reason` is the empty symbol.
+    ///
+    /// Emits `("payroll", "audit_hold_released")` with
+    /// `(run_id, caller, release_reason, released_at)`.
+    pub fn release_audit_hold(e: Env, caller: Address, run_id: u64, release_reason: Symbol) {
+        Self::validate_run_id(run_id);
+        Self::validate_symbol_not_empty(&e, &release_reason, "release_reason");
+        Self::require_audit_hold_authority(&e, &caller);
+        caller.require_auth();
+
+        let key = DataKey::AuditHold(run_id);
+        let mut hold: AuditHold = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Audit hold not found");
+
+        if hold.status != AuditHoldStatus::Active {
+            panic!("Audit hold is not active");
+        }
+
+        let released_at = e.ledger().timestamp();
+        hold.status = AuditHoldStatus::Released;
+        hold.released_by = Some(caller.clone());
+        hold.released_at = Some(released_at);
+        hold.release_reason = release_reason.clone();
+        e.storage().persistent().set(&key, &hold);
+
+        payroll_events::emit_audit_hold_released(&e, run_id, caller, release_reason, released_at);
+    }
+
+    /// Grant audit-hold authority to an address. Only the stored contract
+    /// admin may call (#546).
+    pub fn add_audit_hold_authority(e: Env, admin: Address, authority: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let authority_key = DataKey::AuditHoldReleaseAuthority(authority.clone());
+        let previous_ref = stored_ref(&e, &authority_key);
+        e.storage().persistent().set(&authority_key, &true);
+
+        payroll_events::emit_audit_hold_authority_added(&e, authority.clone());
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::AUDIT_HOLD_AUTHORITY,
+            value_ref(&e, &authority),
+            previous_ref,
+            stored_ref(&e, &authority_key),
+        );
+    }
+
+    /// Revoke audit-hold authority from an address. Only the stored contract
+    /// admin may call (#546).
+    pub fn remove_audit_hold_authority(e: Env, admin: Address, authority: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let authority_key = DataKey::AuditHoldReleaseAuthority(authority.clone());
+        let previous_ref = stored_ref(&e, &authority_key);
+        e.storage().persistent().remove(&authority_key);
+
+        payroll_events::emit_audit_hold_authority_removed(&e, authority.clone());
+        record_config_change(
+            &e,
+            &admin,
+            config_keys::AUDIT_HOLD_AUTHORITY,
+            value_ref(&e, &authority),
+            previous_ref,
+            stored_ref(&e, &authority_key),
+        );
+    }
+
+    /// Return `true` if the address may place or release audit holds: the
+    /// contract admin, or an address explicitly granted audit-hold authority.
+    pub fn is_audit_hold_authority(e: Env, address: Address) -> bool {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if address == addrs.admin {
+            return true;
+        }
+        e.storage()
+            .persistent()
+            .get(&DataKey::AuditHoldReleaseAuthority(address))
+            .unwrap_or(false)
+    }
+
+    /// Return the audit hold record for a run, if one has ever been placed.
+    pub fn get_audit_hold(e: Env, run_id: u64) -> Option<AuditHold> {
+        e.storage().persistent().get(&DataKey::AuditHold(run_id))
+    }
+
+    /// Return `true` if `run_id` currently has an active audit hold.
+    pub fn is_run_on_audit_hold(e: Env, run_id: u64) -> bool {
+        match e
+            .storage()
+            .persistent()
+            .get::<DataKey, AuditHold>(&DataKey::AuditHold(run_id))
+        {
+            Some(hold) => hold.status == AuditHoldStatus::Active,
+            None => false,
+        }
+    }
+
+    /// Panic unless `caller` is the admin or a granted audit-hold authority.
+    fn require_audit_hold_authority(e: &Env, caller: &Address) {
+        if !Self::is_audit_hold_authority(e.clone(), caller.clone()) {
+            panic!("Unauthorized: caller is not an authorized audit hold authority");
+        }
+    }
+
+    /// Panic if `run_id` has an active audit hold. Called by irreversible
+    /// lifecycle actions (currently finalization) to enforce the hold.
+    fn require_run_not_on_audit_hold(e: &Env, run_id: u64) {
+        if let Some(hold) = e
+            .storage()
+            .persistent()
+            .get::<DataKey, AuditHold>(&DataKey::AuditHold(run_id))
+        {
+            if hold.status == AuditHoldStatus::Active {
+                panic!("Run is under an active audit hold");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -9768,6 +10037,142 @@ mod tests {
 
         // Attempt to release again should panic
         payroll_client.release_compliance_hold(&admin, &hold_id);
+    }
+
+    // ============================================================================
+    // Issue #546: Audit Hold Release Authorization Tests
+    // ============================================================================
+
+    /// Prepare a pending run that audit-hold tests can hold and finalize.
+    fn prepare_audit_hold_run(
+        env: &Env,
+        payroll_client: &PayrollClient<'_>,
+        employee: &Address,
+        seed: u8,
+    ) -> u64 {
+        let nonce = test_nonce(env, seed);
+        let (proofs, amounts, employees) = single_payment_batch(env, employee, 1000);
+        payroll_client.prepare_payroll_run(&proofs, &amounts, &employees, &1000, &nonce, &None)
+    }
+
+    /// Main path: place a hold, observe it, then release it and confirm the
+    /// record captures the authorized releaser.
+    #[test]
+    fn test_audit_hold_place_and_release() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let run_id = prepare_audit_hold_run(&env, &payroll_client, &employee, 200);
+
+        assert!(!payroll_client.is_run_on_audit_hold(&run_id));
+
+        let reason = Symbol::new(&env, "audit_review");
+        payroll_client.place_audit_hold(&admin, &run_id, &reason);
+
+        assert!(payroll_client.is_run_on_audit_hold(&run_id));
+        let hold = payroll_client
+            .get_audit_hold(&run_id)
+            .expect("hold should exist");
+        assert_eq!(hold.run_id, run_id);
+        assert_eq!(hold.status, AuditHoldStatus::Active);
+        assert_eq!(hold.reason_code, reason);
+        assert!(hold.released_by.is_none());
+
+        let release_reason = Symbol::new(&env, "audit_cleared");
+        payroll_client.release_audit_hold(&admin, &run_id, &release_reason);
+
+        assert!(!payroll_client.is_run_on_audit_hold(&run_id));
+        let released = payroll_client.get_audit_hold(&run_id).unwrap();
+        assert_eq!(released.status, AuditHoldStatus::Released);
+        assert_eq!(released.released_by, Some(admin.clone()));
+        assert_eq!(released.release_reason, release_reason);
+        assert!(released.released_at.is_some());
+    }
+
+    /// The payroll workflow integration point: finalization is blocked while a
+    /// hold is active and resumes once released.
+    #[test]
+    fn test_audit_hold_blocks_finalize_until_released() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let run_id = prepare_audit_hold_run(&env, &payroll_client, &employee, 201);
+
+        payroll_client.place_audit_hold(&admin, &run_id, &Symbol::new(&env, "audit_review"));
+
+        let blocked = payroll_client.try_finalize_payroll_run(&admin, &run_id);
+        assert!(
+            blocked.is_err(),
+            "finalize must be rejected while an audit hold is active"
+        );
+
+        payroll_client.release_audit_hold(&admin, &run_id, &Symbol::new(&env, "cleared"));
+        payroll_client.finalize_payroll_run(&admin, &run_id);
+        assert!(payroll_client.get_pending_run(&run_id).is_none());
+    }
+
+    /// Failure state: an address without authority cannot release a hold.
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not an authorized audit hold authority")]
+    fn test_unauthorized_caller_cannot_release_audit_hold() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let run_id = prepare_audit_hold_run(&env, &payroll_client, &employee, 202);
+        payroll_client.place_audit_hold(&admin, &run_id, &Symbol::new(&env, "audit_review"));
+
+        let outsider = Address::generate(&env);
+        payroll_client.release_audit_hold(&outsider, &run_id, &Symbol::new(&env, "attempt"));
+    }
+
+    /// A granted authority may release; revocation removes the capability.
+    #[test]
+    fn test_audit_hold_authority_grant_enables_release() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let run_id = prepare_audit_hold_run(&env, &payroll_client, &employee, 203);
+        payroll_client.place_audit_hold(&admin, &run_id, &Symbol::new(&env, "audit_review"));
+
+        let authority = Address::generate(&env);
+        assert!(!payroll_client.is_audit_hold_authority(&authority));
+        payroll_client.add_audit_hold_authority(&admin, &authority);
+        assert!(payroll_client.is_audit_hold_authority(&authority));
+
+        payroll_client.release_audit_hold(&authority, &run_id, &Symbol::new(&env, "cleared"));
+        assert!(!payroll_client.is_run_on_audit_hold(&run_id));
+
+        // A revoked authority loses the ability to place or release holds.
+        payroll_client.remove_audit_hold_authority(&admin, &authority);
+        assert!(!payroll_client.is_audit_hold_authority(&authority));
+        let result =
+            payroll_client.try_place_audit_hold(&authority, &run_id, &Symbol::new(&env, "again"));
+        assert!(result.is_err(), "revoked authority must not place holds");
+    }
+
+    /// Edge case: an already-released hold cannot be released twice.
+    #[test]
+    #[should_panic(expected = "Audit hold is not active")]
+    fn test_cannot_release_inactive_audit_hold() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let run_id = prepare_audit_hold_run(&env, &payroll_client, &employee, 204);
+        payroll_client.place_audit_hold(&admin, &run_id, &Symbol::new(&env, "audit_review"));
+        payroll_client.release_audit_hold(&admin, &run_id, &Symbol::new(&env, "first"));
+        payroll_client.release_audit_hold(&admin, &run_id, &Symbol::new(&env, "second"));
+    }
+
+    /// Edge case: only one active hold may exist per run.
+    #[test]
+    #[should_panic(expected = "Run already has an active audit hold")]
+    fn test_cannot_place_duplicate_active_audit_hold() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let run_id = prepare_audit_hold_run(&env, &payroll_client, &employee, 205);
+        payroll_client.place_audit_hold(&admin, &run_id, &Symbol::new(&env, "audit_review"));
+        payroll_client.place_audit_hold(&admin, &run_id, &Symbol::new(&env, "audit_review"));
     }
 
     // ============================================================================

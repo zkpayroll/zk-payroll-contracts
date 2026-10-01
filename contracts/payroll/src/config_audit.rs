@@ -54,6 +54,9 @@ pub mod config_keys {
     /// `add_dispute_authority` / `remove_dispute_authority` — subject:
     /// authority; value: `bool` (absent once removed).
     pub const DISPUTE_AUTHORITY: &str = "dispute_authority";
+    /// `add_audit_hold_authority` / `remove_audit_hold_authority` — subject:
+    /// authority; value: `bool` (absent once removed) (#546).
+    pub const AUDIT_HOLD_AUTHORITY: &str = "audit_hold_authority";
     /// `add_reviewer` / `remove_reviewer` — subject: reviewer; value: `bool`
     /// (absent once removed).
     pub const REVIEWER: &str = "reviewer";

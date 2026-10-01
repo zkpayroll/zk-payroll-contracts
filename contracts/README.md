@@ -259,6 +259,82 @@ Three token transfers are issued from the company treasury:
 
 ---
 
+## Audit hold release authorization (`payroll` — issue #546)
+
+A payroll run can be placed on an **audit hold** — an explicit operational
+state that blocks finalization while a compliance or audit question is
+resolved, without touching committed payroll data or reserved funds. A held run
+keeps its pending/executed record; only `finalize_payroll_run` is rejected until
+an authorized address releases the hold. Cancellation and other escape hatches
+remain available, mirroring the dispute-freeze design (#342).
+
+### Authorization model
+
+- The contract **admin** may place or release holds implicitly.
+- The admin may grant additional **audit-hold authorities** with
+  `add_audit_hold_authority`; `remove_audit_hold_authority` revokes them.
+- `is_audit_hold_authority` reports whether an address may act.
+- Both authority changes are recorded in the configuration audit trail under the
+  `audit_hold_authority` key.
+
+### Operations
+
+```bash
+# Place a hold on a run (admin or granted authority).
+stellar contract invoke --id "$PAYROLL_ID" --source "$SOURCE" --network "$NETWORK" \
+  -- place_audit_hold \
+    --caller "$ADMIN_ADDR" \
+    --run_id 42 \
+    --reason_code AUDIT_REVIEW
+
+# Release the hold with a mandatory, opaque reason code.
+stellar contract invoke --id "$PAYROLL_ID" --source "$SOURCE" --network "$NETWORK" \
+  -- release_audit_hold \
+    --caller "$AUDITOR_ADDR" \
+    --run_id 42 \
+    --release_reason AUDIT_CLEARED
+```
+
+### Validation and errors
+
+| Condition | Panic message |
+|-----------|---------------|
+| Caller lacks authority | `Unauthorized: caller is not an authorized audit hold authority` |
+| Empty reason / release reason | `Symbol cannot be empty` |
+| Unknown run | `Run not found` |
+| Hold already active | `Run already has an active audit hold` |
+| Release with no hold | `Audit hold not found` |
+| Release an already-released hold | `Audit hold is not active` |
+| Finalize while held | `Run is under an active audit hold` |
+
+### Privacy
+
+Hold records and events carry only an opaque `run_id`, opaque reason codes, and
+actor addresses. `AuditHold` events (`audit_hold_placed`, `audit_hold_released`,
+`audit_hold_authority_added`, `audit_hold_authority_removed`) never include
+salary amounts, employee identities, or commitment data.
+
+### Read helpers
+
+| Function | Returns |
+|----------|---------|
+| `get_audit_hold(run_id)` | Full `AuditHold` record, if any. |
+| `is_run_on_audit_hold(run_id)` | `true` while the hold is active. |
+| `is_audit_hold_authority(address)` | `true` for admin or granted authority. |
+
+### QA
+
+1. **Main path** — prepare a run, `place_audit_hold`, confirm
+   `finalize_payroll_run` is rejected, `release_audit_hold`, then finalize
+   succeeds.
+2. **Failure path** — an address with no authority calls `release_audit_hold`
+   and is rejected with the authorization error above.
+3. **Edge case** — releasing an already-released hold panics with
+   `Audit hold is not active`; placing a hold while one is active panics with
+   `Run already has an active audit hold`.
+
+---
+
 ## Related guides
 
 | Guide | When to use it |
