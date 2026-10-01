@@ -195,12 +195,8 @@ mod tests {
         ctx.admin.require_auth_for_next_call();
 
         let currency_code = Symbol::new(&env, "USDC");
-        ctx.payroll_client.set_payroll_currency(
-            &ctx.admin,
-            &ctx.usdc_token,
-            &currency_code,
-            &6u8,
-        );
+        ctx.payroll_client
+            .set_payroll_currency(&ctx.admin, &ctx.usdc_token, &currency_code, &6u8);
 
         let config = ctx
             .payroll_client

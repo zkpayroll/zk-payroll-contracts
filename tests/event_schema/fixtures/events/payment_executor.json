@@ -33,6 +33,14 @@
     ],
     "data": [{ "name": "period_id", "type": "u32" }]
   },
+  "payment_executor.PeriodReopened": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "PeriodReopened" },
+      { "type": "u64" }
+    ],
+    "data": [{ "name": "period_id", "type": "u32" }]
+  },
   "payment_executor.PayrollProcessed": {
     "schema_version": 1,
     "topics": [

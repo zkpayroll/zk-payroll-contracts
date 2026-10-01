@@ -102,6 +102,8 @@ pub enum AuditError {
     InvalidChallenge = 208,
     /// The challenge response timestamp is outside the acceptance window.
     InvalidResponseTimestamp = 209,
+    /// The proof reference hash is invalid (empty or all-zero sentinel).
+    InvalidProofReference = 210,
 }
 
 /// Payment Execution Errors (300-399)
@@ -142,6 +144,9 @@ pub enum PaymentError {
     /// execution, grace, and close timestamps are not monotonically ordered
     /// (issue #316).
     InvalidSettlementWindowConfig = 312,
+    /// A settlement window overlaps the calendar range of another payroll
+    /// period (issue: payroll calendar overlap detection).
+    SettlementWindowOverlap = 313,
 }
 
 /// Treasury and Asset Errors (400-499)

@@ -37,6 +37,7 @@ struct Ctx<'a> {
     treasury_owner: Address,
     commitment: SalaryCommitmentContractClient<'a>,
     token_client: TokenClient<'a>,
+    import_source: Address,
 }
 
 fn mock_vk(env: &Env) -> VerificationKey {
@@ -93,6 +94,9 @@ fn setup<'a>() -> Ctx<'a> {
     );
     commitment.set_payroll_operator(&payroll_id);
 
+    let import_source = Address::generate(&env);
+    payroll.register_import_source(&import_source, &0u32);
+
     Ctx {
         env,
         payroll,
@@ -102,6 +106,7 @@ fn setup<'a>() -> Ctx<'a> {
         treasury_owner,
         commitment,
         token_client,
+        import_source,
     }
 }
 
@@ -779,6 +784,7 @@ fn payroll_run_still_executes_after_config_changes() {
         &3_000i128,
         &BytesN::from_array(env, &nonce),
         &None,
+        &ctx.import_source,
     );
     assert!(run_id > 0);
     assert!(

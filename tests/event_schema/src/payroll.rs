@@ -8,7 +8,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, TryIntoVal, Val, Vec as SVec};
 
 use crate::support::{
-    assert_matches_fixture, field, last_event, new_env, sym, EventSchema, SchemaMap,
+    assert_matches_fixture, dynamic, field, last_event, new_env, sym, EventSchema, SchemaMap,
 };
 
 fn topic(env: &Env, action: &str) -> SVec<Val> {
@@ -146,6 +146,46 @@ fn case_deposit(env: &Env, cid: &Address, out: &mut SchemaMap) {
                 field("from", "Address"),
                 field("amount", "i128"),
                 field("deposit_id", "BytesN<32>"),
+            ],
+        },
+    );
+}
+
+fn case_treasury_balance_snapshot(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let asset = Address::generate(env);
+    let trigger = Symbol::new(env, "run_prepared");
+    env.as_contract(cid, || {
+        payroll_events::emit_treasury_balance_snapshot(
+            env,
+            asset.clone(),
+            1_000_000,
+            950_000,
+            50_000,
+            0,
+            123,
+            trigger.clone(),
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        (payroll_events::payroll_topic(), Symbol::new(env, "treasury_balance_snapshot"), asset.clone()).into_val(env),
+        "payroll.treasury_balance_snapshot topics changed"
+    );
+    let decoded: (i128, i128, i128, i128, u64, Symbol) = data.try_into_val(env).unwrap();
+    assert_eq!(decoded, (1_000_000, 950_000, 50_000, 0, 123, trigger));
+    out.insert(
+        "payroll.treasury_balance_snapshot".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("treasury_balance_snapshot"), dynamic("Address")],
+            data: vec![
+                field("total_balance", "i128"),
+                field("available_balance", "i128"),
+                field("reserved_balance", "i128"),
+                field("blocked_balance", "i128"),
+                field("observed_at", "u64"),
+                field("trigger", "Symbol"),
             ],
         },
     );
@@ -971,6 +1011,77 @@ fn case_run_approved(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_run_approval_withdrawn(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let run_id: u64 = 34;
+    let reviewer = Address::generate(env);
+    let reason = Symbol::new(env, "policy");
+    env.as_contract(cid, || {
+        payroll_events::emit_run_approval_withdrawn(env, run_id, reviewer.clone(), reason.clone());
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "run_approval_withdrawn"),
+        "payroll.run_approval_withdrawn topics changed"
+    );
+    let decoded: (u64, Address, Symbol) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (run_id, reviewer, reason),
+        "payroll.run_approval_withdrawn payload changed"
+    );
+    out.insert(
+        "payroll.run_approval_withdrawn".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("run_approval_withdrawn")],
+            data: vec![
+                field("run_id", "u64"),
+                field("reviewer", "Address"),
+                field("reason", "Symbol"),
+            ],
+        },
+    );
+}
+
+fn case_run_approval_superseded(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let run_id: u64 = 35;
+    let previous_reviewer = Address::generate(env);
+    let new_reviewer = Address::generate(env);
+    env.as_contract(cid, || {
+        payroll_events::emit_run_approval_superseded(
+            env,
+            run_id,
+            previous_reviewer.clone(),
+            new_reviewer.clone(),
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "run_approval_superseded"),
+        "payroll.run_approval_superseded topics changed"
+    );
+    let decoded: (u64, Address, Address) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (run_id, previous_reviewer, new_reviewer),
+        "payroll.run_approval_superseded payload changed"
+    );
+    out.insert(
+        "payroll.run_approval_superseded".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("run_approval_superseded")],
+            data: vec![
+                field("run_id", "u64"),
+                field("previous_reviewer", "Address"),
+                field("new_reviewer", "Address"),
+            ],
+        },
+    );
+}
+
 fn case_run_rejected(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let run_id: u64 = 32;
     let reviewer = Address::generate(env);
@@ -1079,6 +1190,7 @@ fn payroll_events_match_fixture() {
     case_pause_manager_set(&env, &cid, &mut observed);
     case_asset_allowlist_updated(&env, &cid, &mut observed);
     case_deposit(&env, &cid, &mut observed);
+    case_treasury_balance_snapshot(&env, &cid, &mut observed);
     case_metadata_committed(&env, &cid, &mut observed);
     case_metadata_bound(&env, &cid, &mut observed);
     case_draft_committed(&env, &cid, &mut observed);
@@ -1110,6 +1222,8 @@ fn payroll_events_match_fixture() {
     case_run_approved(&env, &cid, &mut observed);
     case_run_rejected(&env, &cid, &mut observed);
     case_run_changes_requested(&env, &cid, &mut observed);
+    case_run_approval_withdrawn(&env, &cid, &mut observed);
+    case_run_approval_superseded(&env, &cid, &mut observed);
     case_reservation_created(&env, &cid, &mut observed);
 
     assert_matches_fixture(

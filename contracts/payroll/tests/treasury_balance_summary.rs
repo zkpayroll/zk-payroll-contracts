@@ -108,14 +108,8 @@ fn test_treasury_summary_initial_and_reserved() {
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 200_000);
     let nonce = test_nonce(&env, 20);
 
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &200_000,
-        &nonce,
-        &None,
-    );
+    let run_id =
+        payroll.prepare_payroll_run(&proofs, &amounts, &employees, &200_000, &nonce, &None);
 
     let locked = payroll.get_safe_treasury_summary(&addrs.token);
     assert_eq!(locked.total_balance, 1_000_000);

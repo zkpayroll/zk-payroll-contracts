@@ -7,7 +7,7 @@
 // 4. Challenges cannot be modified after resolution
 
 use soroban_sdk::{contracttype, Address, Env, Symbol};
-use shared_errors::AuditError;
+use crate::AuditError;
 
 /// Unique identifier for a challenge.
 pub type ChallengeId = u64;
@@ -143,6 +143,25 @@ pub fn is_valid_proof_reference(env: &Env, proof_reference_hash: &soroban_sdk::B
     proof_reference_hash != &zero
 }
 
+/// Validates audit reference attachment with enhanced checks.
+///
+/// This function provides comprehensive validation for proof reference attachments
+/// in audit workflows, ensuring that:
+/// 1. The reference is not the empty/all-zero sentinel
+/// 2. The reference is properly formatted for audit trail purposes
+/// 3. The validation is privacy-safe and doesn't expose sensitive payroll data
+///
+/// Returns `Ok(())` if the reference is valid, `Err(AuditError::InvalidProofReference)` otherwise.
+pub fn validate_audit_reference_attachment(
+    env: &Env,
+    proof_reference_hash: &soroban_sdk::BytesN<32>,
+) -> Result<(), AuditError> {
+    if !is_valid_proof_reference(env, proof_reference_hash) {
+        return Err(AuditError::InvalidProofReference);
+    }
+    Ok(())
+}
+
 pub fn create_challenge(
     env: &Env,
     company_id: Symbol,
@@ -257,9 +276,7 @@ pub fn respond_to_challenge(
         // An accepting response must carry a real proof reference — reject
         // it early, independent of whatever the referenced proof actually
         // verifies to (that's proof_verifier's job, not this module's).
-        if !is_valid_proof_reference(env, &proof_reference_hash) {
-            return Err(AuditError::InvalidProofReference);
-        }
+        validate_audit_reference_attachment(env, &proof_reference_hash)?;
         challenge.status = ChallengeStatus::Responded;
     }
 

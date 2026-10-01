@@ -102,21 +102,16 @@ fn test_cancelled_batch_status_returns_metadata() {
 
     let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 50_000);
     let nonce = test_nonce(&env, 40);
-    let run_id = payroll.prepare_payroll_run(
-        &proofs,
-        &amounts,
-        &employees,
-        &50_000,
-        &nonce,
-        &None,
-    );
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &50_000, &nonce, &None);
 
     assert_eq!(payroll.get_cancelled_batch_status(&run_id), None);
 
     let reason = Symbol::new(&env, "payroll_recalc");
     payroll.cancel_payroll_run(&admin, &run_id, &reason);
 
-    let status = payroll.get_cancelled_batch_status(&run_id).expect("Status expected");
+    let status = payroll
+        .get_cancelled_batch_status(&run_id)
+        .expect("Status expected");
     assert_eq!(status.run_id, run_id);
     assert_eq!(status.cancelled_by, admin);
     assert_eq!(status.reason, reason);

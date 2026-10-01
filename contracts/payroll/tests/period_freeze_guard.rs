@@ -1,9 +1,9 @@
 //! Payroll period configuration freeze guard tests (#248).
-//!
-//! Covers: editable periods still accept configuration edits, explicit admin
-//! freezes block further edits, settlement-ready periods are implicitly
-//! frozen, submitting a run freezes the period it was prepared under, and
-//! non-admin freeze attempts are rejected.
+///
+/// Covers: editable periods still accept configuration edits, explicit admin
+/// freezes block further edits, settlement-ready periods are implicitly
+/// frozen, submitting a run freezes the period it was prepared under, and
+/// non-admin freeze attempts are rejected.
 
 #![cfg(test)]
 
@@ -11,14 +11,14 @@ use ::token::{Token, TokenClient};
 use payroll::{Payroll, PayrollClient, PeriodConfigState, SettlementWindowStatus};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk:testutils:{Address as_, Ledger as_ };
+use soroban_sdk:{Address, BytesN, Env, Symbol, Vec};
 
 fn mock_proof(env: &Env) -> BytesN<256> {
     BytesN::from_array(env, &[0u8; 256])
 }
 
-fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
+fn test_nonce(env: &Env, seed: u8) -> BytesN <32> {
     let mut arr = [0u8; 32];
     arr[0] = seed;
     BytesN::from_array(env, &arr)
@@ -63,7 +63,7 @@ fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Ad
     let treasury = Address::generate(env);
     let admin = Address::generate(env);
     let treasury_owner = Address::generate(env);
-    token_client.mint(&treasury, &1_000_000i128);
+    token_client.mint(&treasury, &`1_000_000i128`);
 
     payroll_client.initialize(
         &admin,
@@ -118,7 +118,7 @@ fn editable_period_allows_configuration_edits() {
     payroll.set_settlement_window(&admin, &period, &OPEN_AT, &EXEC_START, &EXEC_END, &CLOSE_AT);
 
     assert!(!payroll.is_period_config_frozen(&period));
-    assert_eq!(
+    assert_eq(
         payroll.get_period_config_state(&period),
         PeriodConfigState::Editable
     );
@@ -132,7 +132,7 @@ fn editable_period_allows_configuration_edits() {
         &(EXEC_END + 10),
         &(CLOSE_AT + 10),
     );
-    assert_eq!(
+    assert_eq(
         payroll.get_settlement_window_status(&period),
         Some(SettlementWindowStatus::PreOpen)
     );
@@ -152,7 +152,7 @@ fn explicit_freeze_blocks_further_edits() {
     payroll.freeze_period_config(&admin, &period);
 
     assert!(payroll.is_period_config_frozen(&period));
-    assert_eq!(
+    assert_eq(
         payroll.get_period_config_state(&period),
         PeriodConfigState::Frozen
     );
@@ -180,13 +180,13 @@ fn settlement_ready_period_is_implicitly_frozen() {
 
     // Reach the execution window: the period is now settlement-ready.
     set_timestamp(&env, EXEC_START);
-    assert_eq!(
+    assert_eq(
         payroll.get_settlement_window_status(&period),
         Some(SettlementWindowStatus::Executable)
     );
     assert!(payroll.is_period_config_frozen(&period));
     // No explicit freeze marker was recorded.
-    assert_eq!(
+    assert_eq(
         payroll.get_period_config_state(&period),
         PeriodConfigState::Editable
     );
@@ -239,4 +239,52 @@ fn non_admin_cannot_freeze_period() {
 
     let result = payroll.try_freeze_period_config(&stranger, &period);
     assert!(result.is_err());
+}
+
+#[test]
+fn non_overlapping_settlement_windows_are_accepted() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _owner, _employee) = setup_payroll(&env);
+    let first = Symbol::new(&env, "period_first");
+    let second = Symbol::new(&env, "period_second");
+
+    payroll.set_settlement_window(&admin, &first, &100, &200, &300, &400);
+    payroll.set_settlement_window(&admin, &second, &401, &500, &600, &700);
+
+    assert!(payroll.get_settlement_window(&first).is_some());
+    assert!(payroll.get_settlement_window(&second).is_some());
+}
+
+#[test]
+fn overlapping_and_endpoint_touching_windows_are_rejected() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _owner, _employee) = setup_payroll(&env);
+    let first = Symbol::new(&env, "period_first");
+    let partial_overlap = Symbol::new(&env, "period_partial");
+    let endpoint_touch = Symbol::new(&env, "period_endpoint");
+
+    payroll.set_settlement_window(&admin, &first, &100, &200, &300, &400);
+
+    assert!(payroll
+        .try_set_settlement_window(&admin, &partial_overlap, &350, &450, &500, &550)
+        .is_err());
+    assert!(payroll
+        .try_set_settlement_window(&admin, &endpoint_touch, &400, &500, &600, &700)
+        .is_err());
+    assert!(payroll.get_settlement_window(&partial_overlap).is_none());
+    assert!(payroll.get_settlement_window(&endpoint_touch).is_none());
+}
+
+#[test]
+fn replacing_a_period_window_does_not_overlap_itself() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _owner, _employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_replace");
+
+    payroll.set_settlement_window(&admin, &period, &100, &200, &300, &400);
+    payroll.set_settlement_window(&admin, &period, &400, &500, &600, &700);
+
+    let window = payroll.get_settlement_window(&period).unwrap();
+    assert_eq(window.open_at, 400);
+    assert_eq(window.close_at, 700);
 }

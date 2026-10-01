@@ -28,6 +28,7 @@ Tracks off-chain preparation and admin draft management prior to processing:
 - **Submitted**: Submitted for processing via `submit_run_draft` (terminal).
 - **Cancelled**: Stopped before execution via `cancel_run_draft` (terminal).
 - **Expired**: Marked stale/expired via `expire_run_draft` (terminal).
+- **Lock Owner Query**: `get_draft_lock_owner` returns `Some(admin)` when the draft is in a locked state (`Finalized` or `Submitted`), and `None` for unlocked (`Pending`) or terminated (`Cancelled`, `Expired`) drafts (#556).
 
 ## 3. Cancellation & State Cleanup Semantics
 

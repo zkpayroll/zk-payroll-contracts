@@ -5,9 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use payroll::{
-        Payroll, PayrollClient, PayrollRunState, PayrollRunStatusKind,
-    };
+    use payroll::{Payroll, PayrollClient, PayrollRunState, PayrollRunStatusKind};
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::SalaryCommitmentContractClient;
     use soroban_sdk::{
@@ -99,18 +97,14 @@ mod tests {
         // Register employees
         let mut alice_blinding = [0u8; 32];
         alice_blinding[31] = 123u8;
-        let alice_commitment = commitment_client.compute_commitment(
-            &5000u64,
-            &BytesN::from_array(env, &alice_blinding),
-        );
+        let alice_commitment = commitment_client
+            .compute_commitment(&5000u64, &BytesN::from_array(env, &alice_blinding));
         commitment_client.register_employee(&alice, &alice_commitment);
 
         let mut bob_blinding = [0u8; 32];
         bob_blinding[31] = 124u8;
-        let bob_commitment = commitment_client.compute_commitment(
-            &3000u64,
-            &BytesN::from_array(env, &bob_blinding),
-        );
+        let bob_commitment =
+            commitment_client.compute_commitment(&3000u64, &BytesN::from_array(env, &bob_blinding));
         commitment_client.register_employee(&bob, &bob_commitment);
 
         TestContext {

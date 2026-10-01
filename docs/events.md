@@ -183,6 +183,48 @@ data       (EmployeeStatus previous_status, EmployeeStatus new_status, u32 ledge
 
 ---
 
+### `EmployeeActivated` — `payroll_registry`
+
+Emitted when a registered employee is marked `Active` via `set_employee_status`.
+Activated employees become eligible for payroll execution once other checks pass.
+
+```
+topics[0]  Symbol("EmployeeActivated")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (u32 previous_status, u32 new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+---
+
+### `EmployeeSuspended` — `payroll_registry`
+
+Emitted when an employee is temporarily suspended via `set_employee_status`.
+
+```
+topics[0]  Symbol("EmployeeSuspended")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (u32 previous_status, u32 new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+---
+
+### `EmployeeOffboarded` — `payroll_registry`
+
+Emitted when an employee is offboarded via `set_employee_status`. Offboarded
+records are terminal and cannot be reactivated.
+
+```
+topics[0]  Symbol("EmployeeOffboarded")
+topics[1]  u64   company_id
+topics[2]  Address employee
+data       (u32 previous_status, u32 new_status, u32 ledger_sequence, u64 timestamp)
+```
+
+---
+
+
 ### `CommitmentUpdated` ? `salary_commitment`
 
 Emitted when a new commitment is stored (`store_commitment`) or an existing
@@ -230,6 +272,30 @@ data       (BytesN<32> old_commitment, BytesN<32> new_commitment)
 | Severity | Consumers |
 |----------|-----------|
 | `MEDIUM` (authoritative invalidation signal) | Indexers, salary-history rebuilders, audit trails |
+
+---
+
+### `ApprovedCommitmentRotated` ? `salary_commitment`
+
+Emitted when a **locked** (approved or already settled) commitment is rotated
+via `rotate_approved_commitment` (issue #520). The lock is retained, so the
+payroll record that caused the lock stays bound to the retired commitment
+value, which also remains available in `get_commitment_history`.
+
+```
+topics[0]  Symbol("ApprovedCommitmentRotated")
+topics[1]  Address employee
+data       (BytesN<32> old_commitment, BytesN<32> new_commitment)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` (authoritative invalidation signal for future runs only) | Indexers, salary-history rebuilders, audit trails |
+
+> ?? Unlike `CommitmentRotated`, this event does **not** require a preceding
+> `CommitmentUnlocked`: there is no window in which the approved binding is
+> unprotected. It is still preceded by `CommitmentUpdated` in the same
+> transaction (the new value becomes the active commitment).
 
 ---
 
@@ -379,6 +445,23 @@ data       (u32 period_id,)
 
 ---
 
+### `PeriodReopened` ? `payment_executor`
+
+Emitted when a closed payroll period is reopened by the company admin (#484).
+Allows payments to resume for the period, provided no other period is active.
+
+```
+topics[0]  Symbol("PeriodReopened")
+topics[1]  u64   company_id
+data       (u32 period_id,)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` (exceptional lifecycle event) | Indexers, reconciliation tools, audit dashboards |
+
+---
+
 ### `PayrollProcessed` ? `payment_executor`
 
 Emitted after a successful private payment execution via the period-aware
@@ -450,6 +533,44 @@ assert topics only; they do not log or export payroll amounts, commitments, or
 employee addresses. A failed or unauthorized approval reverts and emits no
 `run_approved` event.
 
+#### `payroll / run_approval_withdrawn`
+
+Emitted when the reviewer that recorded a run's active approval withdraws it
+(#522). The stored review transitions to a `Withdrawn` decision, so downstream
+consumers treating the run as approved must stop doing so when this event is
+observed.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_approval_withdrawn")
+data       (u64 run_id, Address reviewer, Symbol reason)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Approval-workflow indexers, compliance dashboards |
+
+#### `payroll / run_approval_superseded`
+
+Emitted when a different authorized reviewer takes over an existing approval
+(#522). The active approval is re-pointed at the new reviewer and its #403
+expiry window restarts from the supersession time.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_approval_superseded")
+data       (u64 run_id, Address previous_reviewer, Address new_reviewer)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Approval-workflow indexers, compliance dashboards |
+
+Both withdrawal and supersession events are privacy-safe: they carry only the
+opaque run id, reviewer addresses, and a short reason symbol (withdrawal
+only). A failed or unauthorized withdrawal or supersession reverts and emits
+no event.
+
 
 #### `payroll / draft_updated`
 
@@ -473,6 +594,28 @@ data       (Address from, i128 amount)
 | Severity | Consumers |
 |----------|-----------|
 | `LOW` (treasury deposits) | Funding dashboards, treasury monitors |
+
+#### `payroll / treasury_balance_snapshot`
+
+Emitted after a successful treasury or payroll lifecycle transition. The
+snapshot is the same aggregate view returned by `get_safe_treasury_summary`:
+it contains token-level liquidity and reservation totals, but no employee row,
+salary commitment, proof, or recipient data.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("treasury_balance_snapshot")
+topics[2]  Address asset
+data       (i128 total_balance, i128 available_balance,
+            i128 reserved_balance, i128 blocked_balance,
+            u64 observed_at, Symbol trigger)
+```
+
+`trigger` identifies the completed boundary: `deposit`, `run_prepared`,
+`run_finalized`, `run_cancelled`, `run_expired`, `run_executed`, or
+`emergency_withdrawal`. Amounts are raw token units and should be normalized
+using the asset's decimals. Consumers should treat the event as an
+observability snapshot, not as an authorization signal.
 
 > ?? The legacy `payroll` contract emits additional event types beyond the
 > three enumerated above (for example `draft_amended`, run lifecycle and
@@ -823,6 +966,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `CommitmentUpdated` | `salary_commitment` | `(employee)` | `(commitment,)` |
 | `CommitmentUpdated` | `payroll_registry` | `(company_id, employee)` | `(new_commitment,)` |
 | `CommitmentRotated` | `salary_commitment` | `(employee)` | `(old, new)` |
+| `ApprovedCommitmentRotated` | `salary_commitment` | `(employee)` | `(old, new)` |
 | `ReferenceIdSet` | `salary_commitment` | `(employee)` | `(reference_id,)` |
 | `AdminRotationProposed` | `salary_commitment` | `(current_admin)` | `(new_admin,)` |
 | `CompanyRegistered` | `payroll_registry` | `(company_id)` | `(admin, treasury)` |
@@ -838,6 +982,8 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address ? single-value data)* |
 | `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address ? single-value data)* |
 | `payroll / config_changed` | `payroll` | `("payroll", "config_changed", key)` | `(actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp)` |
+| `InterruptedRunRecovered` | `payroll` | `("InterruptedRunRecovered", Address employer, Address asset)` | `(batch_root, execution_nonce, resumed_checkpoint_index, total_checkpoints)` |
+
 
 ---
 

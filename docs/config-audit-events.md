@@ -47,6 +47,7 @@ used by the other `payroll` events).
 | `retention_policy` | `set_retention_policy` | admin | — | `RetentionPolicy` |
 | `dispute_authority` | `add_dispute_authority`, `remove_dispute_authority` | admin | authority `Address` | `bool` (absent once removed) |
 | `reviewer` | `add_reviewer`, `remove_reviewer` | admin | reviewer `Address` | `bool` (absent once removed) |
+| `approval_threshold` | `set_approval_threshold`, `clear_approval_threshold` | admin | — | `u32` (absent once cleared) |
 | `reservation_expiry` | `set_reservation_expiry_policy` | admin | asset `Address` | `ReservationExpiry` |
 | `payroll_currency` | `set_payroll_currency` | admin | — | `PayrollCurrencyConfig` |
 | `storage_version` | `set_storage_version` | admin | — | `StorageVersionState` |

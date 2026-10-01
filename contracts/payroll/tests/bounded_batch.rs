@@ -125,13 +125,7 @@ fn test_bounded_batch_happy_path() {
     let nonce = test_nonce(&env, 1);
 
     let run_id = payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &3_000i128,
-        &nonce,
-        &None,
-        &3u32,
+        &proofs, &amounts, &employees, &3_000i128, &nonce, &None, &3u32,
     );
 
     assert!(run_id > 0);
@@ -154,13 +148,7 @@ fn test_bounded_batch_partial_and_resumption() {
 
     // Step 1: Process batch of 5 with batch_size = 2 (processes employees 0 and 1)
     payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &5_000i128,
-        &nonce,
-        &None,
-        &2u32,
+        &proofs, &amounts, &employees, &5_000i128, &nonce, &None, &2u32,
     );
     assert_eq!(token_client.balance(&employees.get(0).unwrap()), 1_000);
     assert_eq!(token_client.balance(&employees.get(1).unwrap()), 1_000);
@@ -168,13 +156,7 @@ fn test_bounded_batch_partial_and_resumption() {
 
     // Step 2: Resume batch processing (processes employees 2 and 3)
     payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &5_000i128,
-        &nonce,
-        &None,
-        &2u32,
+        &proofs, &amounts, &employees, &5_000i128, &nonce, &None, &2u32,
     );
     assert_eq!(token_client.balance(&employees.get(2).unwrap()), 1_000);
     assert_eq!(token_client.balance(&employees.get(3).unwrap()), 1_000);
@@ -182,13 +164,7 @@ fn test_bounded_batch_partial_and_resumption() {
 
     // Step 3: Final resumption (processes employee 4)
     payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &5_000i128,
-        &nonce,
-        &None,
-        &2u32,
+        &proofs, &amounts, &employees, &5_000i128, &nonce, &None, &2u32,
     );
     assert_eq!(token_client.balance(&employees.get(4).unwrap()), 1_000);
 
@@ -207,13 +183,7 @@ fn test_bounded_batch_over_cap_rejected() {
     let nonce = test_nonce(&env, 3);
 
     payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &1_000i128,
-        &nonce,
-        &None,
-        &51u32,
+        &proofs, &amounts, &employees, &1_000i128, &nonce, &None, &51u32,
     );
 }
 
@@ -230,13 +200,7 @@ fn test_bounded_batch_empty_batch_rejected() {
     let nonce = test_nonce(&env, 4);
 
     payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &0i128,
-        &nonce,
-        &None,
-        &10u32,
+        &proofs, &amounts, &employees, &0i128, &nonce, &None, &10u32,
     );
 }
 
@@ -251,13 +215,7 @@ fn test_bounded_batch_zero_batch_size_rejected() {
     let nonce = test_nonce(&env, 5);
 
     payroll.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &1_000i128,
-        &nonce,
-        &None,
-        &0u32,
+        &proofs, &amounts, &employees, &1_000i128, &nonce, &None, &0u32,
     );
 }
 
@@ -327,12 +285,6 @@ fn test_bounded_batch_unauthorized_caller_rejected() {
     }]);
 
     payroll_client.batch_process_payroll_bounded(
-        &proofs,
-        &amounts,
-        &employees,
-        &1_000i128,
-        &nonce,
-        &None,
-        &10u32,
+        &proofs, &amounts, &employees, &1_000i128, &nonce, &None, &10u32,
     );
 }

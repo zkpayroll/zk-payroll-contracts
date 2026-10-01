@@ -6,6 +6,8 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+pub mod challenge;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -39,6 +41,16 @@ pub enum AuditError {
     DelegationExceedsParentExpiry = 11,
     /// A delegated grant is no longer valid because its parent grant was revoked.
     DelegationRevoked = 12,
+    /// The proof reference hash is invalid (empty or all-zero sentinel).
+    InvalidProofReference = 13,
+    /// A challenge with this ID does not exist.
+    ChallengeNotFound = 14,
+    /// The challenge deadline has passed - no further responses accepted.
+    ChallengeExpired = 15,
+    /// The challenge has already been resolved.
+    ChallengeAlreadyResolved = 16,
+    /// An invalid challenge ID or out-of-scope challenge was submitted.
+    InvalidChallenge = 17,
 }
 
 // ---------------------------------------------------------------------------
@@ -294,8 +306,7 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
         if env.ledger().sequence() <= record.expiration_ledger
-            || env.ledger().sequence()
-                < record.expiration_ledger.saturating_add(retention_ledgers)
+            || env.ledger().sequence() < record.expiration_ledger.saturating_add(retention_ledgers)
         {
             return Err(AuditError::KeyExpired);
         }
@@ -1004,39 +1015,39 @@ impl AuditModule {
 #[cfg(test)]
 mod tests;
 
-    // ────────────────────────────────────────────────────────────────────────────
-    // Issue #513: Audit Grant Scope Query Endpoint
-    // ────────────────────────────────────────────────────────────────────────────
-    
-    /// Query the effective scope and lifecycle state of an audit grant.
-    /// 
-    /// Returns:
-    /// - Grant scope (FullCompany, TimeRange, EmployeeList, AggregateOnly)
-    /// - Expiration ledger
-    /// - Whether grant is currently active (not expired)
-    /// - Granted by (admin address)
-    /// - Delegation status
-    /// 
-    /// Read-only query, no authorization required for transparency.
-    /// Privacy-safe: returns metadata only, no salary or employee data.
-    pub fn query_grant_scope(env: Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
-        let record: ViewKeyRecord = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AuditorKey(auditor))
-            .ok_or(AuditError::KeyNotFound)?;
-            
-        Ok(record)
+// ────────────────────────────────────────────────────────────────────────────
+// Issue #513: Audit Grant Scope Query Endpoint
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Query the effective scope and lifecycle state of an audit grant.
+///
+/// Returns:
+/// - Grant scope (FullCompany, TimeRange, EmployeeList, AggregateOnly)
+/// - Expiration ledger
+/// - Whether grant is currently active (not expired)
+/// - Granted by (admin address)
+/// - Delegation status
+///
+/// Read-only query, no authorization required for transparency.
+/// Privacy-safe: returns metadata only, no salary or employee data.
+pub fn query_grant_scope(env: Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
+    let record: ViewKeyRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::AuditorKey(auditor))
+        .ok_or(AuditError::KeyNotFound)?;
+
+    Ok(record)
+}
+
+/// Check if a grant is currently active (exists and not expired).
+pub fn is_grant_active(env: Env, auditor: Address) -> bool {
+    match env
+        .storage()
+        .persistent()
+        .get::<_, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
+    {
+        Some(record) => env.ledger().sequence() <= record.expiration_ledger,
+        None => false,
     }
-    
-    /// Check if a grant is currently active (exists and not expired).
-    pub fn is_grant_active(env: Env, auditor: Address) -> bool {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
-        {
-            Some(record) => env.ledger().sequence() <= record.expiration_ledger,
-            None => false,
-        }
-    }
+}

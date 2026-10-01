@@ -101,6 +101,37 @@ pub fn emit_deposit(e: &Env, from: Address, amount: i128, deposit_id: BytesN<32>
     );
 }
 
+/// Emit an aggregate treasury balance snapshot after a funding or payroll
+/// lifecycle transition. The payload contains no employee, salary-row, or
+/// proof data; consumers can update treasury health dashboards without
+/// polling token and reservation storage.
+pub fn emit_treasury_balance_snapshot(
+    e: &Env,
+    asset: Address,
+    total_balance: i128,
+    available_balance: i128,
+    reserved_balance: i128,
+    blocked_balance: i128,
+    observed_at: u64,
+    trigger: Symbol,
+) {
+    e.events().publish(
+        (
+            payroll_topic(),
+            Symbol::new(e, "treasury_balance_snapshot"),
+            asset,
+        ),
+        (
+            total_balance,
+            available_balance,
+            reserved_balance,
+            blocked_balance,
+            observed_at,
+            trigger,
+        ),
+    );
+}
+
 /// Emitted when a metadata hash is pre-committed.
 pub fn emit_metadata_committed(e: &Env, metadata_hash: BytesN<32>) {
     e.events().publish(
@@ -114,6 +145,47 @@ pub fn emit_metadata_bound(e: &Env, run_id: u64, metadata_hash: BytesN<32>) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "meta_bound")),
         (run_id, metadata_hash),
+    );
+}
+
+/// Emitted when a payroll note hash is pre-committed. Deliberately carries
+/// only the hash, never the note's actual content, the employee it
+/// concerns, or any amount.
+pub fn emit_note_committed(e: &Env, note_hash: BytesN<32>) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "note_committed")),
+        note_hash,
+    );
+}
+
+/// Emitted when a payroll note hash is bound to a payroll run.
+pub fn emit_note_bound(e: &Env, run_id: u64, note_hash: BytesN<32>) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "note_bound")),
+        (run_id, note_hash),
+    );
+}
+
+/// Emitted when a confidential memo's hash is registered for a payroll
+/// batch. Deliberately carries only the hash plus the already-public
+/// (employer, period, batch_id) identifiers, never the memo's actual
+/// content.
+pub fn emit_memo_registered(
+    e: &Env,
+    employer: Address,
+    period: Symbol,
+    batch_id: BytesN<32>,
+    memo_hash: BytesN<32>,
+) {
+    e.events().publish(
+        (
+            payroll_topic(),
+            Symbol::new(e, "memo_registered"),
+            employer,
+            period,
+            batch_id,
+        ),
+        memo_hash,
     );
 }
 
@@ -422,6 +494,21 @@ pub fn emit_commitment_rotated(
     );
 }
 
+/// Emitted when a locked (approved or already settled) commitment is rotated
+/// with `rotate_approved_commitment` (issue #520). The lock is retained, so
+/// payroll records produced against the retired value stay bound to it.
+pub fn emit_commitment_approved_rotated(
+    e: &Env,
+    employee: Address,
+    old_commitment: BytesN<32>,
+    new_commitment: BytesN<32>,
+) {
+    e.events().publish(
+        (Symbol::new(e, "ApprovedCommitmentRotated"), employee),
+        (old_commitment, new_commitment),
+    );
+}
+
 /// Emitted when an employee's commitment is locked (no updates allowed).
 pub fn emit_commitment_locked(e: &Env, employee: Address) {
     e.events()
@@ -524,6 +611,12 @@ pub fn emit_period_closed(e: &Env, company_id: u64, period_id: u32) {
         .publish((Symbol::new(e, "PeriodClosed"), company_id), (period_id,));
 }
 
+/// Emitted when a closed payroll period is reopened for a company.
+pub fn emit_period_reopened(e: &Env, company_id: u64, period_id: u32) {
+    e.events()
+        .publish((Symbol::new(e, "PeriodReopened"), company_id), (period_id,));
+}
+
 /// Emitted when a single payment is executed in the payment executor.
 pub fn emit_executor_payment_processed(
     e: &Env,
@@ -554,6 +647,28 @@ pub fn emit_withholding_config_set(e: &Env, company_id: u64, actor: Address) {
 pub fn emit_asset_allowed_changed(e: &Env, asset: Address, allowed: bool) {
     e.events()
         .publish((Symbol::new(e, "AssetAllowedChanged"),), (asset, allowed));
+}
+
+/// Emitted when the minimum payout amount threshold is set or updated (issue #514).
+///
+/// The event contains only the threshold value and timestamp; it does not expose
+/// individual payroll amounts or employee data.
+pub fn emit_minimum_payout_amount_set(e: &Env, minimum_amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "min_payout_set")),
+        (minimum_amount, e.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a payroll batch violates the minimum payout amount threshold (issue #514).
+///
+/// The event contains only the threshold value; it does not expose the actual
+/// payout amounts or employee data.
+pub fn emit_minimum_payout_amount_violation(e: &Env, minimum_amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "min_payout_violation")),
+        (minimum_amount,),
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -870,6 +985,14 @@ pub fn emit_draft_submitted(e: &Env, draft_id: u64, admin: Address) {
     );
 }
 
+/// Emitted when a pending payroll run expires before finalization.
+pub fn emit_run_expired(e: &Env, run_id: u64, expired_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_expired")),
+        (run_id, expired_by),
+    );
+}
+
 /// Emitted when a payroll run draft is cancelled.
 pub fn emit_draft_cancelled(e: &Env, draft_id: u64, admin: Address) {
     e.events().publish(
@@ -883,6 +1006,26 @@ pub fn emit_draft_expired(e: &Env, draft_id: u64, admin: Address) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "draft_expired")),
         (draft_id, admin),
+    );
+}
+
+/// Emitted when a payroll period is frozen (#471).
+///
+/// `reason` is a short operator-supplied label (e.g. `finalized` when the
+/// freeze was applied automatically by `submit_run_draft`). No salary values
+/// or per-employee data are ever included in this event.
+pub fn emit_period_frozen(e: &Env, period_label: Symbol, frozen_by: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "period_frozen")),
+        (period_label, frozen_by, reason),
+    );
+}
+
+/// Emitted when a payroll period freeze is lifted (#471).
+pub fn emit_period_unfrozen(e: &Env, period_label: Symbol, unfrozen_by: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "period_unfrozen")),
+        (period_label, unfrozen_by),
     );
 }
 
@@ -1070,6 +1213,40 @@ pub fn emit_reviewer_removed(e: &Env, reviewer: Address) {
     );
 }
 
+/// Emitted when the maximum concurrently authorized reviewer count is set
+/// or replaced by admin (issue #539).
+pub fn emit_max_reviewers_set(e: &Env, max_reviewers: u32) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "max_reviewers_set")),
+        max_reviewers,
+    );
+}
+
+/// Emitted when the payroll approval threshold is set or replaced by admin.
+/// `threshold == 0` means the threshold was cleared.
+pub fn emit_approval_threshold_set(e: &Env, threshold: u32) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "approval_threshold_set")),
+        threshold,
+    );
+}
+
+/// Emitted when the operator key for signed off-chain authorizations is
+/// registered or replaced by admin (issue #519). Never carries the key
+/// itself in the event; `get_operator_key` is the read path for that.
+pub fn emit_operator_key_registered(e: &Env) {
+    e.events()
+        .publish((payroll_topic(), Symbol::new(e, "operator_key_set")), ());
+}
+
+/// Emitted when the operator key is revoked by admin (issue #519).
+pub fn emit_operator_key_revoked(e: &Env) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "operator_key_revoked")),
+        (),
+    );
+}
+
 /// Emitted when an authorized reviewer approves a payroll run.
 pub fn emit_run_approved(e: &Env, run_id: u64, reviewer: Address) {
     e.events().publish(
@@ -1091,6 +1268,35 @@ pub fn emit_run_changes_requested(e: &Env, run_id: u64, reviewer: Address, reaso
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "changes_requested")),
         (run_id, reviewer, reason),
+    );
+}
+
+/// Emitted when an authorized reviewer withdraws a pending payroll approval (#522).
+///
+/// Privacy-safe: carries only the opaque run id, the withdrawing reviewer's
+/// address, and a short reason symbol. No amounts, employee data, or
+/// commitment/proof material is included.
+pub fn emit_run_approval_withdrawn(e: &Env, run_id: u64, reviewer: Address, reason: Symbol) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_approval_withdrawn")),
+        (run_id, reviewer, reason),
+    );
+}
+
+/// Emitted when an existing payroll approval is superseded by a different
+/// authorized reviewer (#522).
+///
+/// Privacy-safe: carries only the opaque run id and the previous and new
+/// reviewer addresses. No amounts or employee data is included.
+pub fn emit_run_approval_superseded(
+    e: &Env,
+    run_id: u64,
+    previous_reviewer: Address,
+    new_reviewer: Address,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "run_approval_superseded")),
+        (run_id, previous_reviewer, new_reviewer),
     );
 }
 
@@ -1283,5 +1489,146 @@ pub fn emit_registry_admin_config_version_updated(
     e.events().publish(
         (Symbol::new(e, "AdminConfigVersionUpdated"), company_id),
         (new_version, updated_by),
+    );
+}
+
+// ── Issue #479: Employee Status Change Events ────────────────────────────────
+
+/// Emitted when an employee is activated or reactivated in the registry.
+pub fn emit_employee_activated(
+    e: &Env,
+    company_id: u64,
+    employee: Address,
+    previous_status: u32,
+    new_status: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "EmployeeActivated"), company_id, employee),
+        (
+            previous_status,
+            new_status,
+            e.ledger().sequence(),
+            e.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Emitted when an employee is suspended in the registry.
+pub fn emit_employee_suspended(
+    e: &Env,
+    company_id: u64,
+    employee: Address,
+    previous_status: u32,
+    new_status: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "EmployeeSuspended"), company_id, employee),
+        (
+            previous_status,
+            new_status,
+            e.ledger().sequence(),
+            e.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Emitted when an employee is offboarded in the registry.
+pub fn emit_employee_offboarded(
+    e: &Env,
+    company_id: u64,
+    employee: Address,
+    previous_status: u32,
+    new_status: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "EmployeeOffboarded"), company_id, employee),
+        (
+            previous_status,
+            new_status,
+            e.ledger().sequence(),
+            e.ledger().timestamp(),
+        ),
+    );
+}
+
+// ── Issue #481: Interrupted Payroll Run Recovery Events ───────────────────────
+
+/// Emitted when an interrupted payroll run is safely recovered for resumption.
+pub fn emit_interrupted_run_recovered(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+    resumed_checkpoint_index: u32,
+    total_checkpoints: u32,
+) {
+    e.events().publish(
+        (Symbol::new(e, "InterruptedRunRecovered"), employer, asset),
+        (
+            batch_root,
+            execution_nonce,
+            resumed_checkpoint_index,
+            total_checkpoints,
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-asset treasury isolation events (#317)
+// ---------------------------------------------------------------------------
+
+/// Emitted once when a `treasury_isolation` contract instance is initialized.
+pub fn emit_treasury_isolation_initialized(e: &Env, admin: Address) {
+    e.events()
+        .publish((payroll_topic(), Symbol::new(e, "treas_iso_init")), admin);
+}
+
+/// Emitted when a new asset is registered for a company's treasury.
+pub fn emit_treasury_asset_registered(
+    e: &Env,
+    company_id: u64,
+    asset: Address,
+    issuer: Address,
+    symbol: Symbol,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_asset_reg")),
+        (company_id, asset, issuer, symbol),
+    );
+}
+
+/// Emitted when a company's (company, asset) balance is credited.
+pub fn emit_treasury_credited(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_credited")),
+        (company_id, asset, amount),
+    );
+}
+
+/// Emitted when an amount is reserved against a (company, asset) balance for
+/// an in-flight payroll batch.
+pub fn emit_treasury_reserved(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_reserved")),
+        (company_id, asset, amount),
+    );
+}
+
+/// Emitted when a previously reserved amount is released back to available
+/// balance (e.g. batch cancellation).
+pub fn emit_treasury_reserve_released(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_reserve_rel")),
+        (company_id, asset, amount),
+    );
+}
+
+/// Emitted when a (company, asset) balance is debited on successful batch
+/// execution.
+pub fn emit_treasury_debited(e: &Env, company_id: u64, asset: Address, amount: i128) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_debited")),
+        (company_id, asset, amount),
     );
 }

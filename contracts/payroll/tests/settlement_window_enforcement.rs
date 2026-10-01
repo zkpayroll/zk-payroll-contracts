@@ -423,3 +423,191 @@ fn test_unauthorized_expire_pending_run_rejected() {
     let result = payroll.try_expire_pending_run(&not_admin, &run_id);
     assert!(result.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Clock Boundary Tests for Settlement Window Cutoffs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_exact_open_at_boundary() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // Exactly at open_at - should be in PreOpen state
+    set_timestamp(&env, OPEN_AT);
+    assert_eq!(
+        payroll.get_settlement_window_status(&period),
+        Some(SettlementWindowStatus::PreOpen)
+    );
+}
+
+#[test]
+fn test_one_tick_before_open_at() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // One tick before open_at - should be in PreOpen state
+    set_timestamp(&env, OPEN_AT - 1);
+    assert_eq!(
+        payroll.get_settlement_window_status(&period),
+        Some(SettlementWindowStatus::PreOpen)
+    );
+}
+
+#[test]
+fn test_one_tick_after_open_at() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // One tick after open_at - should be in PreOpen state (until execution_start)
+    set_timestamp(&env, OPEN_AT + 1);
+    assert_eq!(
+        payroll.get_settlement_window_status(&period),
+        Some(SettlementWindowStatus::PreOpen)
+    );
+}
+
+#[test]
+fn test_one_tick_before_execution_start() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // One tick before execution_start - should be rejected
+    set_timestamp(&env, EXEC_START - 1);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 15);
+    let result =
+        payroll.try_prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_one_tick_after_execution_start() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // One tick after execution_start - should succeed
+    set_timestamp(&env, EXEC_START + 1);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 16);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+    assert!(payroll.get_pending_run(&run_id).is_some());
+}
+
+#[test]
+fn test_one_tick_before_execution_end() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // One tick before execution_end - should succeed
+    set_timestamp(&env, EXEC_END - 1);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 17);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+    assert!(payroll.get_pending_run(&run_id).is_some());
+}
+
+#[test]
+fn test_exact_close_at_boundary() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 18);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // Exactly at close_at - expiration should succeed
+    set_timestamp(&env, CLOSE_AT);
+    payroll.expire_pending_run(&admin, &run_id);
+    assert!(payroll.get_pending_run(&run_id).is_none());
+}
+
+#[test]
+fn test_one_tick_before_close_at() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 19);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // One tick before close_at - still in grace, expiration should fail
+    set_timestamp(&env, CLOSE_AT - 1);
+    let result = payroll.try_expire_pending_run(&admin, &run_id);
+    assert!(result.is_err());
+    assert!(payroll.get_pending_run(&run_id).is_some());
+}
+
+#[test]
+fn test_one_tick_after_close_at() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 20);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // One tick after close_at - expiration should succeed
+    set_timestamp(&env, CLOSE_AT + 1);
+    payroll.expire_pending_run(&admin, &run_id);
+    assert!(payroll.get_pending_run(&run_id).is_none());
+}
+
+#[test]
+fn test_mid_execution_window_succeeds() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // Midpoint between execution_start and execution_end
+    let mid_point = EXEC_START + (EXEC_END - EXEC_START) / 2;
+    set_timestamp(&env, mid_point);
+
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 21);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+    assert!(payroll.get_pending_run(&run_id).is_some());
+}
+
+#[test]
+fn test_mid_grace_period_cancellation_succeeds() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 22);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // Midpoint between execution_end and close_at
+    let mid_grace = EXEC_END + (CLOSE_AT - EXEC_END) / 2;
+    set_timestamp(&env, mid_grace);
+
+    let reason = Symbol::new(&env, "mid_grace_cancel");
+    payroll.cancel_payroll_run(&admin, &run_id, &reason);
+    assert!(payroll.get_pending_run(&run_id).is_none());
+}
