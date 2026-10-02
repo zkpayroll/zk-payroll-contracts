@@ -37,6 +37,20 @@ where the contract exposes `Result<_, Error>`.
 | `salary_commitment.update_commitment` / `rotate_commitment` | `"Commitment is locked..."` | A payroll draft or audit lock prevents changing the salary commitment. | Retryable after unlock | Show the lock reason and wait for an admin unlock or payroll finalization rollback. |
 | `salary_commitment.set_reference_id` | Invalid or duplicate reference ID | Empty/oversized HR reference or reference already assigned. | Non-retryable until corrected | Validate length and uniqueness client-side before submission. |
 
+## Compensation Policy Effective Dates
+
+| Contract / entrypoint | Error case | Likely cause | Retry? | Recommended recovery |
+|-----------------------|------------|--------------|--------|----------------------|
+| `payroll_registry.schedule_compensation_policy` | `"Compensation policy effective date is invalid ... effective date is in the past ..."` | The submitted `effective_at` trails the ledger clock by more than the 300s skew tolerance. | Non-retryable until corrected | Re-read the ledger timestamp and submit a date at or after it. If the intent was to correct an already-in-force policy, schedule a *new* policy with a later date instead of rewriting the old one. |
+| `payroll_registry.schedule_compensation_policy` | `"... effective date is too far in the future ..."` | `effective_at` is more than one year ahead of the ledger clock — typically a milliseconds value submitted as seconds. | Non-retryable until corrected | Convert the timestamp to seconds and re-submit. Confirm the unit with the scheduling UI before retrying. |
+| `payroll_registry.schedule_compensation_policy` | `"... effective date is not after the latest scheduled policy ..."` | `effective_at` is not strictly later than the newest policy already scheduled for the company. | Non-retryable until corrected | Read `latest_scheduled_effective_at` from `check_policy_effective_date` and schedule strictly after it. |
+| `payroll_registry.schedule_compensation_policy` | `"Compensation policy commitment must not be zero"` | An all-zero `policy_commitment` was submitted; that is the uninitialised slot, not a hashed schedule. | Non-retryable until corrected | Hash the schedule off-chain and submit the resulting `BytesN<32>`. |
+| `payroll_registry.schedule_compensation_policy` | `"Unauthorized: caller is not the company admin"` | The `admin` argument is not the registered company admin. | Non-retryable until signer changes | Fetch the company record and retry with the registered admin. |
+| `payroll_registry.require_valid_effective_date` | `"Compensation policy effective date is invalid ..."` | Same three rules as above; this entrypoint is the guard form used before accepting a payroll input. | Non-retryable until corrected | Call `check_policy_effective_date` instead to get the verdict without raising an error. |
+
+See [Compensation Policy Effective-Date Validation](compensation-policy-effective-dates.md)
+for the rules and their rationale.
+
 ## Payroll Execution and Periods
 
 | Contract / entrypoint | Error case | Likely cause | Retry? | Recommended recovery |

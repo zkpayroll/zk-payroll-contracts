@@ -3,11 +3,28 @@
 extern crate alloc;
 
 use pause_manager::PauseManagerClient;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
+};
 
 const STELLAR_ACCOUNT_STRKEY_LEN: u32 = 56;
 const STELLAR_ACCOUNT_STRKEY_LEN_USIZE: usize = 56;
 const STELLAR_ACCOUNT_VERSION_BYTE: u8 = 6 << 3;
+
+/// Tolerance (seconds) applied when comparing a caller-supplied compensation
+/// policy effective date against the current ledger clock.
+///
+/// An effective date is chosen off-chain and submitted by the HR admin, so it
+/// can legitimately trail the network clock by the usual consensus skew. Dates
+/// further behind than this are treated as genuinely in the past.
+pub const COMPENSATION_POLICY_PAST_SKEW_SECONDS: u64 = 300;
+
+/// Upper bound (seconds) on how far in the future a compensation policy may be
+/// scheduled. A year is comfortably longer than any payroll planning horizon
+/// while still turning a mistyped timestamp (a millisecond value, a
+/// seconds/milliseconds mix-up) into a clear rejection instead of a policy
+/// nobody can pay against.
+pub const MAX_COMPENSATION_POLICY_HORIZON_SECONDS: u64 = 60 * 60 * 24 * 365;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -92,6 +109,90 @@ pub struct EligibilityAssessment {
     pub eligible: bool,
 }
 
+// -- Compensation policy effective-date validation --------------------------
+
+/// A company compensation policy, effective from a single ledger timestamp.
+///
+/// The policy carries only a *hashed* schedule commitment, never a salary
+/// amount or pay-rate value: on-chain state and events must never leak
+/// compensation, so the amounts stay off-chain behind the commitment exactly
+/// as employee salary commitments do.
+///
+/// A policy applies from `effective_at` (inclusive) until the effective date of
+/// the next scheduled policy. Effective dates in a company's schedule are
+/// strictly increasing, so the policy in force at any timestamp is unique.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompensationPolicy {
+    pub company_id: u64,
+    /// Poseidon hash of the compensation schedule. Never a plaintext amount.
+    pub policy_commitment: BytesN<32>,
+    /// Ledger timestamp from which this policy applies (inclusive).
+    pub effective_at: u64,
+    /// Ledger timestamp at which the policy was scheduled.
+    pub created_at: u64,
+    /// Company admin that scheduled the policy.
+    pub created_by: Address,
+}
+
+/// Why a proposed compensation policy effective date cannot be accepted.
+///
+/// Each variant names the one thing the caller must change, so a rejected
+/// schedule can be corrected without reading contract source.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CompensationPolicyEffectiveDateIssue {
+    /// The effective date is acceptable.
+    None = 0,
+    /// The date is more than `COMPENSATION_POLICY_PAST_SKEW_SECONDS` behind the
+    /// ledger clock.
+    InThePast = 1,
+    /// The date is beyond `MAX_COMPENSATION_POLICY_HORIZON_SECONDS` ahead.
+    BeyondSchedulingHorizon = 2,
+    /// The date is not strictly after the latest policy already scheduled.
+    NotAfterScheduledPolicy = 3,
+}
+
+impl CompensationPolicyEffectiveDateIssue {
+    /// Human-readable explanation, for panic messages and client output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CompensationPolicyEffectiveDateIssue::None => "effective date is acceptable",
+            CompensationPolicyEffectiveDateIssue::InThePast => {
+                "effective date is in the past; schedule it at or after the current ledger timestamp"
+            }
+            CompensationPolicyEffectiveDateIssue::BeyondSchedulingHorizon => {
+                "effective date is too far in the future; schedule within the one-year scheduling horizon"
+            }
+            CompensationPolicyEffectiveDateIssue::NotAfterScheduledPolicy => {
+                "effective date is not after the latest scheduled policy; use a strictly later timestamp"
+            }
+        }
+    }
+}
+
+/// Structured verdict for a proposed compensation policy effective date.
+///
+/// `valid` always agrees with `issue == None`. The remaining fields let a
+/// client render the failure without re-deriving ledger state: the ledger
+/// clock the verdict was taken at, and the effective date a new policy must
+/// beat to extend a company's schedule.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompensationPolicyEffectiveDateCheck {
+    /// The proposed effective date under evaluation.
+    pub effective_at: u64,
+    /// Ledger timestamp the verdict was taken at.
+    pub ledger_now: u64,
+    /// Effective date of the newest policy already scheduled, if any.
+    pub latest_scheduled_effective_at: Option<u64>,
+    /// The single issue deciding the verdict.
+    pub issue: CompensationPolicyEffectiveDateIssue,
+    /// Convenience flag; always agrees with `issue == None`.
+    pub valid: bool,
+}
+
 // ?? Issue #91: privileged-role rotation ??????????????????????????????????????
 
 /// Pending two-step company admin or treasury rotation.
@@ -144,6 +245,8 @@ pub struct PendingThresholdRotation {
 /// - `PendingTreasuryRotation(u64)` ? `PendingCompanyRotation` (Persistent, issue #91)
 /// - `ApprovalThreshold(u64)`     ? `ApprovalThreshold`        (Persistent, issue #353)
 /// - `PendingThresholdRotation(u64)` ? `PendingThresholdRotation` (Persistent, issue #353)
+/// - `CompensationPolicy(u64, u64)` ? `CompensationPolicy`     (Persistent, keyed by effective date)
+/// - `CompensationPolicySchedule(u64)` ? `Vec<u64>`            (Persistent, ascending effective dates)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
@@ -163,6 +266,13 @@ pub enum DataKey {
     ApprovalThreshold(u64),
     /// Pending approval threshold rotation (issue #353).
     PendingThresholdRotation(u64),
+    /// A scheduled compensation policy, keyed by `(company_id, effective_at)`.
+    CompensationPolicy(u64, u64),
+    /// Ascending list of a company's scheduled compensation policy effective
+    /// dates. Strictly increasing by construction, so it doubles as the
+    /// "latest scheduled date" used by effective-date validation and as the
+    /// ordering used to resolve the policy in force at a timestamp.
+    CompensationPolicySchedule(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +410,75 @@ pub trait PayrollRegistryTrait {
 
     /// Set the initial approval threshold when a company is registered (#353).
     fn set_initial_approval_threshold(env: Env, company_id: u64, admin: Address, required_approvals: u32);
+
+    // -- Compensation policy effective-date validation ------------------------
+
+    /// Schedule a compensation policy for a company, effective from
+    /// `effective_at`.
+    ///
+    /// Requires authorisation from the company admin. The effective date is
+    /// validated before anything is written: it may not sit behind the ledger
+    /// clock (beyond the documented skew tolerance), may not exceed the
+    /// scheduling horizon, and must be strictly after the latest policy
+    /// already scheduled for the company.
+    fn schedule_compensation_policy(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        policy_commitment: BytesN<32>,
+        effective_at: u64,
+    ) -> CompensationPolicy;
+
+    /// Evaluate a proposed compensation policy effective date and report *why*
+    /// it is or is not acceptable.
+    ///
+    /// Purely read-only: no authorisation and no state change. `valid` agrees
+    /// with `issue == None`, and `schedule_compensation_policy` enforces
+    /// exactly the same rules, so this is the preflight companion to it.
+    ///
+    /// Named without the `compensation_` prefix only because the Soroban
+    /// contract-spec limit is 32 characters per function name; "policy" means
+    /// the compensation policy everywhere in this contract.
+    fn check_policy_effective_date(
+        env: Env,
+        company_id: u64,
+        effective_at: u64,
+    ) -> CompensationPolicyEffectiveDateCheck;
+
+    /// Assert that `effective_at` is an acceptable effective date for a new
+    /// compensation policy, panicking with the issue and its remediation
+    /// otherwise.
+    ///
+    /// Read-only, so other contracts can call it as a guard before accepting a
+    /// payroll input that claims to fall under a compensation policy. Shorter
+    /// than `require_valid_compensation_policy_effective_date` for the same
+    /// 32-character reason as `check_policy_effective_date`.
+    fn require_valid_effective_date(env: Env, company_id: u64, effective_at: u64);
+
+    /// Return the compensation policy scheduled for exactly `effective_at`.
+    fn get_compensation_policy(
+        env: Env,
+        company_id: u64,
+        effective_at: u64,
+    ) -> Option<CompensationPolicy>;
+
+    /// Return a company's compensation policies in ascending effective-date
+    /// order (earliest first).
+    fn get_compensation_policy_schedule(env: Env, company_id: u64) -> Vec<CompensationPolicy>;
+
+    /// Return the policy in force at `at_timestamp`, i.e. the scheduled policy
+    /// with the greatest effective date `<= at_timestamp`.
+    ///
+    /// Returns `None` when `at_timestamp` precedes the company's first policy,
+    /// meaning no policy covers that point in time.
+    fn get_compensation_policy_at(
+        env: Env,
+        company_id: u64,
+        at_timestamp: u64,
+    ) -> Option<CompensationPolicy>;
+
+    /// Return `true` iff a compensation policy is in force at `at_timestamp`.
+    fn is_compensation_policy_effective(env: Env, company_id: u64, at_timestamp: u64) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +527,108 @@ impl PayrollRegistry {
             .persistent()
             .set(&DataKey::PauseManager, &pause_manager);
         payroll_events::emit_registry_pause_manager_set(&env, pause_manager);
+    }
+
+    // -- Compensation policy effective-date validation ------------------------
+
+    /// A company's scheduled compensation policy effective dates, ascending.
+    fn load_compensation_policy_schedule(env: &Env, company_id: u64) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompensationPolicySchedule(company_id))
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// The effective date a new policy must beat to extend the schedule, if
+    /// the company already has one.
+    fn latest_scheduled_effective_at(env: &Env, company_id: u64) -> Option<u64> {
+        Self::load_compensation_policy_schedule(env, company_id).last()
+    }
+
+    /// Single source of truth for effective-date validation. Read-only: it
+    /// touches no state and takes no authorisation, so both the read-only
+    /// entrypoints and `schedule_compensation_policy` agree by construction.
+    fn evaluate_compensation_effective_date(
+        env: &Env,
+        company_id: u64,
+        effective_at: u64,
+    ) -> CompensationPolicyEffectiveDateCheck {
+        let now = env.ledger().timestamp();
+        let latest_scheduled_effective_at = Self::latest_scheduled_effective_at(env, company_id);
+
+        let issue = if effective_at.saturating_add(COMPENSATION_POLICY_PAST_SKEW_SECONDS) < now {
+            // A date in the past would silently rewrite the policy that was
+            // already in force when earlier payroll was run.
+            CompensationPolicyEffectiveDateIssue::InThePast
+        } else if effective_at > now.saturating_add(MAX_COMPENSATION_POLICY_HORIZON_SECONDS) {
+            CompensationPolicyEffectiveDateIssue::BeyondSchedulingHorizon
+        } else if matches!(
+            latest_scheduled_effective_at,
+            Some(latest) if effective_at <= latest
+        ) {
+            // Strictly increasing effective dates are what make the policy in
+            // force at a timestamp unique, so ties and rewinds are refused.
+            CompensationPolicyEffectiveDateIssue::NotAfterScheduledPolicy
+        } else {
+            CompensationPolicyEffectiveDateIssue::None
+        };
+
+        CompensationPolicyEffectiveDateCheck {
+            effective_at,
+            ledger_now: now,
+            latest_scheduled_effective_at,
+            valid: issue == CompensationPolicyEffectiveDateIssue::None,
+            issue,
+        }
+    }
+
+    fn assert_compensation_effective_date_is_valid(
+        env: &Env,
+        company_id: u64,
+        effective_at: u64,
+    ) -> CompensationPolicyEffectiveDateCheck {
+        let check = Self::evaluate_compensation_effective_date(env, company_id, effective_at);
+        match check.issue {
+            CompensationPolicyEffectiveDateIssue::None => check,
+            // The ordering failure is the one case where the caller needs a
+            // number to fix the call, so it carries the bar to beat.
+            CompensationPolicyEffectiveDateIssue::NotAfterScheduledPolicy => panic!(
+                "Compensation policy effective date is invalid for company {}: {} (requested {}, latest scheduled {})",
+                company_id,
+                check.issue.as_str(),
+                effective_at,
+                check.latest_scheduled_effective_at.unwrap_or_default()
+            ),
+            issue => panic!(
+                "Compensation policy effective date is invalid for company {}: {} (requested {}, ledger now {})",
+                company_id,
+                issue.as_str(),
+                effective_at,
+                check.ledger_now
+            ),
+        }
+    }
+
+    /// The policy in force at `at_timestamp`: the scheduled policy with the
+    /// greatest effective date `<= at_timestamp`.
+    fn resolve_effective_compensation_policy(
+        env: &Env,
+        company_id: u64,
+        at_timestamp: u64,
+    ) -> Option<CompensationPolicy> {
+        let schedule = Self::load_compensation_policy_schedule(env, company_id);
+        // Effective dates are strictly increasing, so the newest acceptable
+        // date is the last entry that is not in the future.
+        for i in (0..schedule.len()).rev() {
+            let effective_at = schedule.get(i).unwrap();
+            if effective_at <= at_timestamp {
+                return env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::CompensationPolicy(company_id, effective_at));
+            }
+        }
+        None
     }
 
     fn add_employee_record(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>) {
@@ -1081,6 +1362,117 @@ impl PayrollRegistryTrait for PayrollRegistry {
             (Symbol::new(&env, "InitialThresholdConfigured"), company_id),
             (required_approvals, env.ledger().timestamp()),
         );
+    }
+
+    // -- Compensation policy effective-date validation ------------------------
+
+    fn schedule_compensation_policy(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        policy_commitment: BytesN<32>,
+        effective_at: u64,
+    ) -> CompensationPolicy {
+        Self::require_not_paused(&env);
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if admin != info.admin {
+            panic!("Unauthorized: caller is not the company admin");
+        }
+        admin.require_auth();
+
+        // The commitment must bind something: an all-zero policy is the
+        // uninitialized slot rather than a real hashed schedule, and would
+        // otherwise read as a valid policy.
+        if policy_commitment == BytesN::from_array(&env, &[0u8; 32]) {
+            panic!(
+                "Compensation policy commitment must not be zero: hash the schedule before scheduling it"
+            );
+        }
+
+        // Effective-date validation runs after the identity and authorisation
+        // checks, not before: an unauthorised caller must not be able to probe
+        // a company's existing schedule through the effective-date errors.
+        Self::assert_compensation_effective_date_is_valid(&env, company_id, effective_at);
+
+        let policy = CompensationPolicy {
+            company_id,
+            policy_commitment: policy_commitment.clone(),
+            effective_at,
+            created_at: env.ledger().timestamp(),
+            created_by: admin.clone(),
+        };
+
+        let schedule_key = DataKey::CompensationPolicySchedule(company_id);
+        let mut schedule = Self::load_compensation_policy_schedule(&env, company_id);
+        schedule.push_back(effective_at);
+        env.storage().persistent().set(&schedule_key, &schedule);
+        env.storage().persistent().set(
+            &DataKey::CompensationPolicy(company_id, effective_at),
+            &policy,
+        );
+
+        payroll_events::emit_compensation_policy_scheduled(
+            &env,
+            company_id,
+            policy_commitment,
+            effective_at,
+        );
+
+        policy
+    }
+
+    fn check_policy_effective_date(
+        env: Env,
+        company_id: u64,
+        effective_at: u64,
+    ) -> CompensationPolicyEffectiveDateCheck {
+        Self::evaluate_compensation_effective_date(&env, company_id, effective_at)
+    }
+
+    fn require_valid_effective_date(env: Env, company_id: u64, effective_at: u64) {
+        Self::assert_compensation_effective_date_is_valid(&env, company_id, effective_at);
+    }
+
+    fn get_compensation_policy(
+        env: Env,
+        company_id: u64,
+        effective_at: u64,
+    ) -> Option<CompensationPolicy> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompensationPolicy(company_id, effective_at))
+    }
+
+    fn get_compensation_policy_schedule(env: Env, company_id: u64) -> Vec<CompensationPolicy> {
+        let schedule = Self::load_compensation_policy_schedule(&env, company_id);
+        let mut policies = Vec::new(&env);
+        for i in 0..schedule.len() {
+            let effective_at = schedule.get(i).unwrap();
+            if let Some(policy) = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CompensationPolicy(company_id, effective_at))
+            {
+                policies.push_back(policy);
+            }
+        }
+        policies
+    }
+
+    fn get_compensation_policy_at(
+        env: Env,
+        company_id: u64,
+        at_timestamp: u64,
+    ) -> Option<CompensationPolicy> {
+        Self::resolve_effective_compensation_policy(&env, company_id, at_timestamp)
+    }
+
+    fn is_compensation_policy_effective(env: Env, company_id: u64, at_timestamp: u64) -> bool {
+        Self::resolve_effective_compensation_policy(&env, company_id, at_timestamp).is_some()
     }
 }
 

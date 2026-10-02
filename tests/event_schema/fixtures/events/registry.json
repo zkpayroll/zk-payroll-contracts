@@ -107,5 +107,16 @@
       { "type": "Address" }
     ],
     "data": []
+  },
+  "registry.CompensationPolicyScheduled": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "CompensationPolicyScheduled" },
+      { "type": "u64" }
+    ],
+    "data": [
+      { "name": "policy_commitment", "type": "BytesN<32>" },
+      { "name": "effective_at", "type": "u64" }
+    ]
   }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events};
+use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Env, IntoVal, String, Symbol, TryIntoVal};
 
 const VALID_EMPLOYEE_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -1034,4 +1034,107 @@ fn test_is_employee_active_helper_tracks_status_without_exposing_commitment() {
 
     client.set_employee_status(&company_id, &employee, &EmployeeStatus::Active);
     assert!(client.is_employee_active(&company_id, &employee));
+}
+// -- Compensation policy effective-date validation ---------------------------
+
+#[test]
+fn test_scheduled_policy_is_keyed_by_its_effective_date() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let now = 1_700_000_000u64;
+    env.ledger().with_mut(|li| li.timestamp = now);
+
+    let commitment = BytesN::from_array(&env, &[31u8; 32]);
+    client.schedule_compensation_policy(&company_id, &admin, &commitment, &now);
+
+    let stored: CompensationPolicy = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompensationPolicy(company_id, now))
+            .expect("policy must be stored under its effective date")
+    });
+    assert_eq!(stored.policy_commitment, commitment);
+
+    let schedule: soroban_sdk::Vec<u64> = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompensationPolicySchedule(company_id))
+            .expect("schedule must be stored")
+    });
+    assert_eq!(schedule.len(), 1);
+    assert_eq!(schedule.get(0).unwrap(), now);
+}
+
+#[test]
+fn test_evaluating_an_effective_date_writes_nothing() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let now = 1_700_000_000u64;
+    env.ledger().with_mut(|li| li.timestamp = now);
+
+    let events_before = env.events().all().len();
+    let check = client.check_policy_effective_date(&company_id, &(now + 86_400));
+
+    assert!(check.valid);
+    assert_eq!(check.issue, CompensationPolicyEffectiveDateIssue::None);
+    assert_eq!(check.ledger_now, now);
+    assert_eq!(check.latest_scheduled_effective_at, None);
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "the read-only check must not emit events"
+    );
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !env.storage()
+                .persistent()
+                .has(&DataKey::CompensationPolicySchedule(company_id)),
+            "the read-only check must not write state"
+        );
+    });
+}
+
+#[test]
+fn test_latest_scheduled_effective_date_tracks_the_schedule() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let now = 1_700_000_000u64;
+    env.ledger().with_mut(|li| li.timestamp = now);
+
+    let latest: Option<u64> = env.as_contract(&contract_id, || {
+        PayrollRegistry::latest_scheduled_effective_at(&env, company_id)
+    });
+    assert_eq!(latest, None);
+
+    client.schedule_compensation_policy(
+        &company_id,
+        &admin,
+        &BytesN::from_array(&env, &[32u8; 32]),
+        &now,
+    );
+    env.ledger().with_mut(|li| li.timestamp = now + 1_000);
+    client.schedule_compensation_policy(
+        &company_id,
+        &admin,
+        &BytesN::from_array(&env, &[33u8; 32]),
+        &(now + 5_000),
+    );
+
+    let latest: Option<u64> = env.as_contract(&contract_id, || {
+        PayrollRegistry::latest_scheduled_effective_at(&env, company_id)
+    });
+    assert_eq!(latest, Some(now + 5_000));
 }

@@ -566,6 +566,37 @@ data       (Address admin, Address treasury)
 
 ---
 
+### `CompensationPolicyScheduled` ? `payroll_registry`
+
+Emitted when a company schedules a compensation policy. Carries the hashed
+schedule and the ledger timestamp it applies from — never a plaintext amount,
+rate, or band — so an indexer can answer "which policy window is this payroll
+run in?" from the event stream alone.
+
+```
+topics[0]  Symbol("CompensationPolicyScheduled")
+topics[1]  u64   company_id
+data       (BytesN<32> policy_commitment, u64 effective_at)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` (scheduled compensation change) | Payroll policy indexers, effective-date alerting |
+
+Notes:
+- `effective_at` is inclusive: the policy applies from that timestamp until the
+  effective date of the next scheduled policy. Effective dates in a company's
+  schedule are strictly increasing, so exactly one policy is in force at any
+  timestamp.
+- The contract rejects effective dates in the past (beyond a 300s clock-skew
+  tolerance), beyond a one-year scheduling horizon, or not strictly after the
+  newest scheduled policy, so this event cannot restate an already-executed
+  payroll window. See
+  [Compensation Policy Effective-Date Validation](compensation-policy-effective-dates.md).
+- A rejected schedule emits nothing and writes no state.
+
+---
+
 ### Privileged-Role Rotation Events (cross-contract cross-reference)
 
 The two-step rotation pattern is implemented in two contracts and emits the
@@ -851,6 +882,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `ReferenceIdSet` | `salary_commitment` | `(employee)` | `(reference_id,)` |
 | `AdminRotationProposed` | `salary_commitment` | `(current_admin)` | `(new_admin,)` |
 | `CompanyRegistered` | `payroll_registry` | `(company_id)` | `(admin, treasury)` |
+| `CompensationPolicyScheduled` | `payroll_registry` | `(company_id)` | `(policy_commitment, effective_at)` |
 | `PeriodCreated` | `payment_executor` | `(company_id)` | `(period_id,)` |
 | `PeriodClosed` | `payment_executor` | `(company_id)` | `(period_id,)` |
 | `PayrollProcessed` | `payment_executor` | `(company_id)` | `(employee, amount, period_id)` |

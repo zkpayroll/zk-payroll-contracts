@@ -27,6 +27,14 @@ a custom indexer and apply the levels below to drive alert routing and triage.
 | `CommitmentUpdated` | `(employee: Address, commitment: BytesN<32>)` | `LOW` | Normal employee onboarding / salary change |
 | `CommitmentRotated` | `(employee: Address, old: BytesN<32>, new: BytesN<32>)` | `MEDIUM` | Proactive commitment rotation; confirm it was authorised |
 
+### `payroll_registry` contract
+
+| Event topic | Data | Severity | Rationale |
+|-------------|------|----------|-----------|
+| `EmployeeStatusChanged` | `(company_id: u64, employee: Address, previous: Symbol, new: Symbol)` | `LOW` | Employee eligibility change (activation/deactivation) |
+| `CompensationPolicyScheduled` | `(company_id: u64, policy_commitment: BytesN<32>, effective_at: u64)` | `LOW` | Scheduled compensation change; alert only if `effective_at` is further ahead than the operator intended |
+| `CompanyRegistered` | `(company_id: u64, admin: Address, treasury: Address)` | `MEDIUM` | New tenant onboarding |
+
 ### `payment_executor` contract
 
 | Event topic | Data | Severity | Rationale |
@@ -85,9 +93,12 @@ Threshold alerts:
 - Payment volume drops >50% vs rolling 7-day average → `MEDIUM`
 
 ### Panel 2 — Commitment Lifecycle
-Events: `CommitmentUpdated`, `CommitmentRotated`
+Events: `CommitmentUpdated`, `CommitmentRotated`, `CompensationPolicyScheduled`
 Threshold alerts:
 - Bulk commitment rotations (>10 in 5 minutes) outside a known migration window → `HIGH`
+- A `CompensationPolicyScheduled` whose `effective_at` is more than one year
+  ahead of the emitting ledger → `MEDIUM` (the contract caps this at one year,
+  so treat the upper end of that range as a likely operator mistake)
 
 ### Panel 3 — Security & Operations
 Events: `PauseManager/paused`, `PauseManager/unpaused`

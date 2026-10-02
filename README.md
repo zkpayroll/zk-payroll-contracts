@@ -62,6 +62,12 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 > elapses (#507) — see
 > [docs/role-transfer-acceptance-delay.md](docs/role-transfer-acceptance-delay.md)
 > for the delay, the privacy-safe status views, and SDK guidance.
+>
+> **Compensation lifecycle:** company compensation policies are scheduled with a
+> validated effective date, so "which policy governed this payroll run" always
+> has one answer — see
+> [docs/compensation-policy-effective-dates.md](docs/compensation-policy-effective-dates.md)
+> for the rules, the read model, and SDK guidance.
 
 ## Prerequisites
 

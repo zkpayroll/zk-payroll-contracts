@@ -464,6 +464,44 @@ fn case_company_treasury_rotation_cancelled(env: &Env, cid: &Address, out: &mut 
     );
 }
 
+fn case_compensation_policy_scheduled(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let company_id: u64 = 12;
+    let policy_commitment = BytesN::from_array(env, &[77u8; 32]);
+    let effective_at: u64 = 1_700_000_000;
+    env.as_contract(cid, || {
+        payroll_events::emit_compensation_policy_scheduled(
+            env,
+            company_id,
+            policy_commitment.clone(),
+            effective_at,
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    let expected_topics: SVec<Val> =
+        (Symbol::new(env, "CompensationPolicyScheduled"), company_id).into_val(env);
+    assert_eq!(
+        topics, expected_topics,
+        "registry.CompensationPolicyScheduled topics changed"
+    );
+    let decoded: (BytesN<32>, u64) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (policy_commitment, effective_at),
+        "registry.CompensationPolicyScheduled payload changed"
+    );
+    out.insert(
+        "registry.CompensationPolicyScheduled".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("CompensationPolicyScheduled"), dynamic("u64")],
+            data: vec![
+                field("policy_commitment", "BytesN<32>"),
+                field("effective_at", "u64"),
+            ],
+        },
+    );
+}
+
 #[test]
 fn registry_events_match_fixture() {
     let (env, cid) = new_env();
@@ -481,6 +519,7 @@ fn registry_events_match_fixture() {
     case_company_treasury_proposed(&env, &cid, &mut observed);
     case_company_treasury_rotated(&env, &cid, &mut observed);
     case_company_treasury_rotation_cancelled(&env, &cid, &mut observed);
+    case_compensation_policy_scheduled(&env, &cid, &mut observed);
 
     assert_matches_fixture(
         "registry",

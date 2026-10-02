@@ -64,6 +64,33 @@ Notes:
 
 ---
 
+### `CompensationPolicyScheduled`
+
+Emitted by `payroll_registry` when a company schedules a compensation policy,
+binding a hashed schedule to the ledger timestamp it takes effect at.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| topic[0] | `Symbol` | `"CompensationPolicyScheduled"` |
+| topic[1] | `u64` | Company ID |
+| data[0] | `BytesN<32>` | Poseidon hash of the compensation schedule |
+| data[1] | `u64` | Ledger timestamp the policy applies from (inclusive) |
+
+Notes:
+- The schedule is stored and published as a commitment only. No salary amount,
+  pay rate, or band appears in this event or anywhere else on-chain.
+- Effective dates within a company are strictly increasing, so an indexer can
+  resolve the policy in force at any timestamp by taking the newest event for
+  that company whose `data[1]` is `<=` the run's timestamp.
+- The contract refuses effective dates in the past (beyond a 300s skew
+  tolerance), beyond a one-year scheduling horizon, or not strictly after the
+  newest scheduled policy, so this event cannot restate a payroll window that
+  has already been executed. See
+  [docs/compensation-policy-effective-dates.md](../compensation-policy-effective-dates.md).
+- A rejected schedule writes no state and emits no event.
+
+---
+
 ## FND — Funding Events
 
 Funding events track treasury deposits. Indexers monitoring treasury health should

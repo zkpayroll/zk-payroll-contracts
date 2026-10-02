@@ -1092,6 +1092,24 @@ pub fn emit_employee_status_changed(
     );
 }
 
+/// Emitted when a company's compensation policy is scheduled.
+///
+/// `policy_commitment` is a Poseidon hash of the off-chain schedule, never a
+/// plaintext amount, and `effective_at` is a ledger timestamp: together they
+/// tell an indexer which policy governs which window without revealing what
+/// anybody is paid.
+pub fn emit_compensation_policy_scheduled(
+    e: &Env,
+    company_id: u64,
+    policy_commitment: BytesN<32>,
+    effective_at: u64,
+) {
+    e.events().publish(
+        (Symbol::new(e, "CompensationPolicyScheduled"), company_id),
+        (policy_commitment, effective_at),
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // Payroll Period Freeze Events (#471)
 // ═════════════════════════════════════════════════════════════════════════

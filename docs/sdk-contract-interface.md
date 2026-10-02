@@ -618,6 +618,51 @@ Both `PayrollRegistry` and `Payroll` support admin rotation via a propose/accept
 | `SalaryCommitmentContract::is_commitment_active` | Check if commitment is valid (not revoked) |
 | `SalaryCommitmentContract::has_commitment` | Check if employee has any commitment |
 
+### Compensation policies (effective dates)
+
+A company can schedule hashed compensation policies, each applying from its own
+ledger timestamp. Effective dates in a company's schedule are strictly
+increasing, so "which policy governed this payroll run" has one answer.
+
+**Entrypoint:** `PayrollRegistry::schedule_compensation_policy`
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `company_id` | `u64` | Company ID |
+| `admin` | `Address` | Company admin |
+| `policy_commitment` | `BytesN<32>` | Poseidon hash of the schedule — never a plaintext amount |
+| `effective_at` | `u64` | Ledger timestamp the policy applies from (inclusive) |
+
+Returns a `CompensationPolicy` (`company_id`, `policy_commitment`,
+`effective_at`, `created_at`, `created_by`).
+
+`effective_at` is rejected when it is more than 300s behind the ledger clock,
+more than one year ahead of it, or not strictly after the newest policy already
+scheduled. Preflight a date without touching state:
+
+**Entrypoint:** `PayrollRegistry::check_policy_effective_date`
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `effective_at` | `u64` | Date that was evaluated |
+| `ledger_now` | `u64` | Ledger clock the verdict was taken at |
+| `latest_scheduled_effective_at` | `Option<u64>` | Newest scheduled effective date |
+| `issue` | `CompensationPolicyEffectiveDateIssue` | `None`, `InThePast`, `BeyondSchedulingHorizon`, or `NotAfterScheduledPolicy` |
+| `valid` | `bool` | Always agrees with `issue == None` |
+
+Reading the schedule back:
+
+| Entrypoint | Returns |
+|------------|---------|
+| `get_compensation_policy(company_id, effective_at)` | The policy scheduled for exactly that date |
+| `get_compensation_policy_schedule(company_id)` | All policies, ascending by effective date |
+| `get_compensation_policy_at(company_id, at_timestamp)` | Policy in force at `at_timestamp`, or `None` if none covers it |
+| `is_compensation_policy_effective(company_id, at_timestamp)` | Whether any policy is in force |
+| `require_valid_effective_date(company_id, effective_at)` | Guard that panics with the issue and its fix |
+
+See [Compensation Policy Effective-Date Validation](compensation-policy-effective-dates.md)
+for the rules, rationale, and error messages.
+
 ---
 
 ## Cross-Contract Call Graph
