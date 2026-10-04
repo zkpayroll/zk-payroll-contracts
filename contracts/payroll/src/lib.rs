@@ -4005,7 +4005,7 @@ impl Payroll {
     /// system can also cancel a pending run while paused, enabling rapid
     pub fn cancel_payroll_run_with_reason(e: Env, admin: Address, run_id: u64, reason: Symbol) {
         Self::validate_run_id(run_id);
-        Self::validate_symbol_not_empty(&e, &reason, "reason");
+        Payroll::validate_symbol_not_empty(&e, &reason, "reason");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -5127,7 +5127,7 @@ impl Payroll {
         period_label: Symbol,
     ) -> u64 {
         Self::require_not_paused(&e);
-        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
+        Payroll::validate_symbol_not_empty(&e, &period_label, "period_label");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -6798,7 +6798,7 @@ impl Payroll {
             panic!("Unauthorized");
         }
         admin.require_auth();
-        Self::validate_symbol_not_empty(&e, &period, "period");
+        Payroll::validate_symbol_not_empty(&e, &period, "period");
 
         e.storage()
             .persistent()
@@ -6964,7 +6964,7 @@ impl Payroll {
         }
         admin.require_auth();
 
-        Self::validate_symbol_not_empty(&e, &period, "period");
+        Payroll::validate_symbol_not_empty(&e, &period, "period");
 
         // Issue #248: reject edits to a period whose configuration is frozen.
         Self::assert_period_config_editable(&e, &period);
@@ -7076,7 +7076,7 @@ impl Payroll {
         }
         admin.require_auth();
 
-        Self::validate_symbol_not_empty(&e, &period, "period");
+        Payroll::validate_symbol_not_empty(&e, &period, "period");
 
         let frozen_key = DataKey::PeriodConfigFrozen(period.clone());
         let previous_ref = stored_ref(&e, &frozen_key);
@@ -7094,7 +7094,7 @@ impl Payroll {
     /// Return the recorded freeze state for a period.
     ///
     /// This reflects only the explicit freeze marker. Use
-    /// [`is_period_config_frozen`](Self::is_period_config_frozen) to also
+    /// [`is_period_config_frozen`](Payroll::is_period_config_frozen) to also
     /// account for the implicit conditions (submitted run, settlement-ready)
     /// that block configuration edits.
     pub fn get_period_config_state(e: Env, period: Symbol) -> PeriodConfigState {
@@ -7274,7 +7274,7 @@ impl Payroll {
 
     /// Panic when a period's configuration is frozen and must not be edited.
     fn assert_period_config_editable(e: &Env, period: &Symbol) {
-        if Self::is_period_config_frozen(e.clone(), period.clone()) {
+        if Payroll::is_period_config_frozen(e.clone(), period.clone()) {
             panic!(
                 "Payroll period configuration is frozen: settlement window cannot be edited (error code {})",
                 PaymentError::InvalidSettlementWindowConfig as u32
@@ -7815,9 +7815,9 @@ impl Payroll {
         reason: Symbol,
     ) -> u64 {
         Self::validate_run_id(run_id);
-        Self::validate_symbol_not_empty(&e, &period, "period");
+        Payroll::validate_symbol_not_empty(&e, &period, "period");
         Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
-        Self::validate_symbol_not_empty(&e, &reason, "reason");
+        Payroll::validate_symbol_not_empty(&e, &reason, "reason");
         Self::require_dispute_authority(&e, &caller);
         caller.require_auth();
 
@@ -7885,7 +7885,7 @@ impl Payroll {
     /// dispute. Once resolved, the associated run is no longer frozen and
     /// normal lifecycle actions (finalize, archive, prune) may continue.
     pub fn resolve_dispute(e: Env, caller: Address, dispute_id: u64, resolution_reason: Symbol) {
-        Self::validate_symbol_not_empty(&e, &resolution_reason, "resolution_reason");
+        Payroll::validate_symbol_not_empty(&e, &resolution_reason, "resolution_reason");
         Self::require_dispute_authority(&e, &caller);
         caller.require_auth();
 
@@ -9568,6 +9568,9 @@ impl Payroll {
     /// # Panics
     /// If the asset does not match the configured payroll currency.
     fn validate_payroll_currency(env: &Env, asset: &Address) -> Result<(), TreasuryError> {
+        if let Some(config) = env.storage().persistent().get::<_, PayrollCurrencyConfig>(
+            &DataKey::PayrollCurrencyConfig
+        ) {
         if let Some(config) = env
             .storage()
             .persistent()
@@ -9580,12 +9583,67 @@ impl Payroll {
         Ok(())
     }
 
+    // ?? Issue #401: Batch Lock Timestamp Query Helper ????????????????????????
+
+    /// Return the timestamp at which a payroll batch reached locked state (#401).
+    ///
+    /// A batch is in a locked state when funds have been reserved and it is awaiting
+    /// execution or has already been executed.
+    /// - If the batch is in a pending run state (`PendingRun(run_id)`), its `prepared_at` timestamp is returned.
+    /// - If the batch has been executed (`PayrollRun(run_id)`), its `executed_at` timestamp is returned.
+    /// - If the batch does not exist or has not been locked, `None` is returned.
+    // ?? Issue #402: Safe Treasury Balance Summary View ???????????????????????
+
+    /// Return aggregate treasury balance summary for a given asset token (#402).
+    ///
+    /// Returns the total balance held at the treasury address, the reserved/locked
+    /// balance allocated to pending payroll runs, blocked balances, and the net
+    /// available balance without disclosing individual salary rows.
+    // ?? Issue #403: Payroll Approval Expiry Validation ???????????????????????
+
+    /// Check whether an approval for a payroll run has expired (#403).
+    ///
+    /// Returns `true` if a review exists with decision `Approved` but `current_timestamp > reviewed_at + max_age_seconds`.
+    /// Returns `false` if the approval is within the validity window or if no approval exists.
+    /// Validate that a payroll run approval is active and not expired (#403).
+    ///
+    /// # Panics
+    /// - If the approval for `run_id` has expired (older than `max_age_seconds`).
+    // ?? Issue #404: Cancelled Batch Read Status Helper ???????????????????????
     // ────────────────────────────────────────────────────────────────────────────
     // Issue #515: Period Cloning Validation
     // ────────────────────────────────────────────────────────────────────────────
 
     /// Validate that a period is suitable for cloning/templating.
     ///
+    /// Returns `Some(CancelledBatchStatus)` if the batch was cancelled, containing
+    /// run_id, cancellation timestamp, admin address, cancellation reason symbol,
+    /// employee count, total amount, draft hash, and `is_cancelled: true`.
+    /// Returns `None` if the batch was not cancelled or does not exist.
+    // ?? Issue #352: Payroll Batch Split Validation ??????????????????????????????????
+
+    /// Record a batch split to track parent-child relationships (#352).
+    /// Validates that child batch totals can be aggregated back to parent.
+    /// Get batch split record by parent and child run IDs (#352).
+    /// Validate that a batch split preserves the original aggregate commitment (#352).
+    /// This ensures that when a large batch is split, the sum of children equals the parent.
+    // ?? Issue #401: Batch Lock Timestamp Query Helper ????????????????????????
+
+    /// Return the timestamp at which a payroll batch reached locked state (#401).
+    ///
+    /// A batch is in a locked state when funds have been reserved and it is awaiting
+    /// execution or has already been executed.
+    /// - If the batch is in a pending run state (`PendingRun(run_id)`), its `prepared_at` timestamp is returned.
+    /// - If the batch has been executed (`PayrollRun(run_id)`), its `executed_at` timestamp is returned.
+    /// - If the batch does not exist or has not been locked, `None` is returned.
+    // ?? Issue #402: Safe Treasury Balance Summary View ???????????????????????
+
+    /// Return aggregate treasury balance summary for a given asset token (#402).
+    ///
+    /// Returns the total balance held at the treasury address, the reserved/locked
+    /// balance allocated to pending payroll runs, blocked balances, and the net
+    /// available balance without disclosing individual salary rows.
+    // ?? Issue #403: Payroll Approval Expiry Validation ???????????????????????
     /// Panics (rather than returning `Result`) on every failure path, so the
     /// return type is `()`: a `Result<(), ()>` here previously broke
     /// `#[contractimpl]`'s cross-contract client generation, since `()`
@@ -9615,6 +9673,27 @@ impl Payroll {
 
     /// Verify draft checksum matches between preparation and finalization.
     ///
+    /// Returns `true` if a review exists with decision `Approved` but `current_timestamp > reviewed_at + max_age_seconds`.
+    /// Returns `false` if the approval is within the validity window or if no approval exists.
+    /// Validate that a payroll run approval is active and not expired (#403).
+    ///
+    /// # Panics
+    /// - If the approval for `run_id` has expired (older than `max_age_seconds`).
+    // ?? Issue #404: Cancelled Batch Read Status Helper ???????????????????????
+
+    /// Read safe cancellation metadata for a cancelled payroll batch (#404).
+    ///
+    /// Returns `Some(CancelledBatchStatus)` if the batch was cancelled, containing
+    /// run_id, cancellation timestamp, admin address, cancellation reason symbol,
+    /// employee count, total amount, draft hash, and `is_cancelled: true`.
+    /// Returns `None` if the batch was not cancelled or does not exist.
+    // ?? Issue #352: Payroll Batch Split Validation ??????????????????????????????????
+
+    /// Record a batch split to track parent-child relationships (#352).
+    /// Validates that child batch totals can be aggregated back to parent.
+    /// Get batch split record by parent and child run IDs (#352).
+    /// Validate that a batch split preserves the original aggregate commitment (#352).
+    /// This ensures that when a large batch is split, the sum of children equals the parent.
     /// See [`validate_period_for_cloning`](Self::validate_period_for_cloning)
     /// for why this returns `()` rather than `Result<(), ()>`.
     pub fn verify_draft_checksum(e: &Env, run_id: u64, provided_hash: BytesN<32>) {
@@ -9844,7 +9923,6 @@ impl Payroll {
             }
         }
     }
-}
 
 #[cfg(test)]
 mod tests {
@@ -14208,6 +14286,31 @@ mod tests {
 
     // ── Issue #544: Employee identifier normalization tests ──────────────────
 
+    /// Validate that a period is suitable for cloning/templating.
+    /// 
+    /// Checks:
+    /// - Period configuration is not frozen
+    /// - Settlement window exists
+    /// 
+    /// Returns Ok(()) if valid, panics with actionable message otherwise.
+    /// Privacy-safe: does not expose salary amounts or employee data.
+    pub fn validate_period_for_cloning(e: Env, period: Symbol) -> Result<(), ()> {
+        Payroll::validate_symbol_not_empty(&e, &period, "period");
+        
+        // Check if period is frozen
+        if Payroll::is_period_config_frozen(e.clone(), period.clone()) {
+            panic!("Source period is frozen and cannot be used as a template");
+        }
+        
+        // Verify settlement window exists
+        if !e.storage()
+            .persistent()
+            .has(&DataKey::SettlementWindow(period.clone()))
+        {
+            panic!("Source period has no settlement window configured");
+        }
+        
+        Ok(())
     #[test]
     fn test_employee_identifier_normalization_mixed_case_and_whitespace() {
         let env = Env::default();

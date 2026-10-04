@@ -575,3 +575,20 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 - [Stellar Development Foundation](https://stellar.org) — Protocol X-Ray ZK primitives
 - [Nethermind](https://nethermind.io) — ZK tooling collaboration
+
+### Signed Payroll Approvals & Nonce Mechanics
+
+To protect against replay attacks, approvals require an incrementing `u64` nonce bound to each `(payroll_id, approver)` pair.
+
+#### Querying Nonce
+Before requesting an approver's signature, query the current expected nonce via RPC:
+
+json
+{
+"method": "get_approver_nonce",
+"args": ["<payroll_id_bytes32>", "<approver_address>"]
+}
+
+
+#### Error Codes
+* `ApprovalError::InvalidNonce (1)`: Nonce mismatch (replayed signature or out-of-order request). Re-query current nonce and sign again.
