@@ -32,6 +32,9 @@ use correction_authorization::{
     CorrectionAuthorizationLimits, CorrectionLimitBreach, CorrectionUsage,
 };
 
+pub mod correction_request_expiry;
+use correction_request_expiry::CorrectionRequestExpiryPolicy;
+
 pub mod import_source;
 use import_source::{require_authorized_source, validate_source_for_report};
 
@@ -1258,7 +1261,7 @@ pub enum DataKey {
     /// Contract-wide configuration revision, bumped once per audited
     /// configuration change (#490). Absent means `0`.
     ConfigRevision,
-you    /// Run-scoped audit hold awaiting authorized release (#546). Absent when
+    /// Run-scoped audit hold awaiting authorized release (#546). Absent when
     /// no hold has been placed for the run.
     AuditHold(u64),
     /// Addresses granted permission to place/release audit holds (#546).
@@ -1302,6 +1305,10 @@ you    /// Run-scoped audit hold awaiting authorized release (#546). Absent when
     /// Accumulated correction usage counters for a payroll period (#577).
     /// Absent means no corrections have been recorded for the period.
     CorrectionUsage(Symbol),
+    /// Employer-configured expiry policy for idle correction requests (#622).
+    /// Absent means correction requests never lapse, matching the pre-existing
+    /// behaviour of `amend_run_draft`.
+    CorrectionRequestExpiryPolicy,
     /// Confidential memo hash registered for a payroll batch, keyed by
     /// (employer, period, batch_id) (#347). The memo content itself is
     /// never stored on-chain, only its hash, so this key existing is what
@@ -5217,6 +5224,10 @@ impl Payroll {
         }
         // Issue #471: a frozen period cannot receive draft edits.
         Self::require_period_not_frozen(&e, &draft.period_label);
+        // Issue #622: a correction request left untouched past the configured
+        // window can no longer be corrected; it must be retired first. No
+        // state is written when this rejects.
+        Self::require_correction_request_not_expired(&e, draft_id);
         if new_total_amount <= 0 {
             panic!("total_amount must be positive");
         }
@@ -5407,6 +5418,148 @@ impl Payroll {
         }
     }
 
+    // ── Issue #622: correction request expiry ───────────────────────────────
+
+    /// Configure how long an idle correction request stays correctable (#622).
+    ///
+    /// A *correction request* is a `Pending` payroll run draft. Once a policy is
+    /// set, a draft left untouched for longer than `max_age_seconds` — measured
+    /// from its `updated_at`, which every accepted amendment refreshes — can no
+    /// longer be amended: `amend_run_draft` rejects it, and anyone may retire it
+    /// via `expire_correction_request`. Pass `0` to disable expiry and restore
+    /// unrestricted corrections.
+    ///
+    /// Only the registered payroll admin may set the policy, the contract must
+    /// not be paused, and no payroll run may be in progress (#253), matching the
+    /// other payroll configuration gates. Clearing the policy is always allowed:
+    /// unlike run expiration (#474), a draft holds no treasury funds, so a
+    /// lapsed request never needs the policy to stay in place.
+    pub fn set_correction_request_expiry(e: Env, admin: Address, max_age_seconds: u64) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        Self::require_no_active_payroll_run(&e);
+
+        let policy_key = DataKey::CorrectionRequestExpiryPolicy;
+        if max_age_seconds == 0 {
+            e.storage().persistent().remove(&policy_key);
+        } else {
+            let policy = CorrectionRequestExpiryPolicy {
+                max_age_seconds,
+                set_at: e.ledger().timestamp(),
+                set_by: admin.clone(),
+            };
+            e.storage().persistent().set(&policy_key, &policy);
+        }
+
+        // Configuration change is announced for operators. The payload carries
+        // the age bound and the configuring admin only — never payroll data.
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "corr_req_expiry_set"),
+            ),
+            (admin, max_age_seconds),
+        );
+    }
+
+    /// Read the configured correction-request expiry policy (#622).
+    ///
+    /// Returns `None` when expiry is disabled, in which case correction requests
+    /// never lapse and `amend_run_draft` is unrestricted.
+    pub fn get_correction_request_expiry(e: Env) -> Option<CorrectionRequestExpiryPolicy> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::CorrectionRequestExpiryPolicy)
+    }
+
+    /// Return whether the correction request for `draft_id` has lapsed (#622).
+    ///
+    /// Returns `false` when no policy is configured, when the draft does not
+    /// exist, or when the draft is no longer `Pending`: a finalized, submitted,
+    /// cancelled, or already-expired draft is not an open correction request and
+    /// cannot expire again.
+    pub fn is_correction_request_expired(e: Env, draft_id: u64) -> bool {
+        let Some(policy) = e
+            .storage()
+            .persistent()
+            .get::<DataKey, CorrectionRequestExpiryPolicy>(&DataKey::CorrectionRequestExpiryPolicy)
+        else {
+            return false;
+        };
+        let Some(draft) = e
+            .storage()
+            .persistent()
+            .get::<DataKey, PayrollRunDraft>(&DataKey::RunDraft(draft_id))
+        else {
+            return false;
+        };
+        if draft.state != RunDraftState::Pending {
+            return false;
+        }
+        policy.is_expired(e.ledger().timestamp(), draft.updated_at)
+    }
+
+    /// Retire a lapsed correction request (#622).
+    ///
+    /// Permissionless by design — the same stance as run expiration (#474) — so
+    /// a stale draft cannot hold a period's single pending-draft slot (#398)
+    /// hostage. The draft is moved to the terminal `Expired` state, the
+    /// per-period slot is cleared so the period accepts a fresh draft, and
+    /// `draft_expired` is emitted. Only the draft id and caller are emitted;
+    /// no salary amount or employee identity is read out.
+    ///
+    /// # Panics
+    /// - If the draft does not exist, or is not `Pending` (already resolved, or
+    ///   expired by an earlier call).
+    /// - If expiry is disabled, or the request has not lapsed yet.
+    pub fn expire_correction_request(e: Env, caller: Address, draft_id: u64) {
+        Self::validate_draft_id(draft_id);
+        caller.require_auth();
+
+        let mut draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+        if draft.state != RunDraftState::Pending {
+            panic!("Only pending correction requests can be expired");
+        }
+        if !Self::is_correction_request_expired(e.clone(), draft_id) {
+            panic!("Correction request has not expired: the configured window has not elapsed");
+        }
+
+        draft.state = RunDraftState::Expired;
+        e.storage()
+            .persistent()
+            .set(&DataKey::RunDraft(draft_id), &draft);
+        // Issue #398 (follow-up): clear the per-period slot so the period can
+        // receive a fresh draft after this terminal transition.
+        e.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDraftForPeriod(draft.period_label.clone()));
+
+        payroll_events::emit_draft_expired(&e, draft_id, caller);
+    }
+
+    /// Panic if the pending correction request `draft_id` has lapsed (#622).
+    ///
+    /// No-op when expiry is disabled or the draft is not pending, so contracts
+    /// that never set a policy pay nothing for this gate.
+    fn require_correction_request_not_expired(e: &Env, draft_id: u64) {
+        if Self::is_correction_request_expired(e.clone(), draft_id) {
+            panic!(
+                "Correction request has expired: it was not amended within the configured window; call expire_correction_request and create a fresh draft"
+            );
+        }
+    }
 
     /// Update the reconciliation status of a completed payroll run.
     ///
@@ -9568,9 +9721,6 @@ impl Payroll {
     /// # Panics
     /// If the asset does not match the configured payroll currency.
     fn validate_payroll_currency(env: &Env, asset: &Address) -> Result<(), TreasuryError> {
-        if let Some(config) = env.storage().persistent().get::<_, PayrollCurrencyConfig>(
-            &DataKey::PayrollCurrencyConfig
-        ) {
         if let Some(config) = env
             .storage()
             .persistent()
@@ -9923,6 +10073,7 @@ impl Payroll {
             }
         }
     }
+}
 
 #[cfg(test)]
 mod tests {
@@ -14286,31 +14437,6 @@ mod tests {
 
     // ── Issue #544: Employee identifier normalization tests ──────────────────
 
-    /// Validate that a period is suitable for cloning/templating.
-    /// 
-    /// Checks:
-    /// - Period configuration is not frozen
-    /// - Settlement window exists
-    /// 
-    /// Returns Ok(()) if valid, panics with actionable message otherwise.
-    /// Privacy-safe: does not expose salary amounts or employee data.
-    pub fn validate_period_for_cloning(e: Env, period: Symbol) -> Result<(), ()> {
-        Payroll::validate_symbol_not_empty(&e, &period, "period");
-        
-        // Check if period is frozen
-        if Payroll::is_period_config_frozen(e.clone(), period.clone()) {
-            panic!("Source period is frozen and cannot be used as a template");
-        }
-        
-        // Verify settlement window exists
-        if !e.storage()
-            .persistent()
-            .has(&DataKey::SettlementWindow(period.clone()))
-        {
-            panic!("Source period has no settlement window configured");
-        }
-        
-        Ok(())
     #[test]
     fn test_employee_identifier_normalization_mixed_case_and_whitespace() {
         let env = Env::default();
