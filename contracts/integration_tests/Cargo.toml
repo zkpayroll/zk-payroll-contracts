@@ -18,4 +18,4 @@ token = { path = "../token" }
 pause_manager = { path = "../pause_manager" }
 payment_executor = { path = "../payment_executor" }
 shared_errors = { path = "../shared_errors" }
-stellar-strkey = "0.0.18"
+stellar-strkey = "1.0.0"

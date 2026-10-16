@@ -51,7 +51,7 @@ stellar-xdr = "28"
 base64 = "0.23"
 
 # Stellar StrKey encoding (G... addresses) from raw ed25519 public-key bytes
-stellar-strkey = "0.0.18"
+stellar-strkey = "1.0.0"
 
 # Terminal table rendering for the reconcile output
 comfy-table = "8"

@@ -1844,7 +1844,7 @@ dependencies = [
  "salary_commitment",
  "shared_errors",
  "soroban-sdk",
- "stellar-strkey 0.0.18",
+ "stellar-strkey 1.0.0",
  "token",
 ]
 
@@ -2118,7 +2118,7 @@ dependencies = [
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",
- "stellar-strkey 0.0.18",
+ "stellar-strkey 1.0.0",
  "token",
 ]
 
@@ -3136,7 +3136,7 @@ dependencies = [
  "ark-ec 0.5.0",
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
- "curve25519-dalek 4.1.3",
+ "curve25519-dalek 5.0.0",
  "ecdsa",
  "ed25519-dalek 2.2.0",
  "elliptic-curve",
@@ -3332,7 +3332,7 @@ dependencies = [
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",
- "stellar-strkey 0.0.18",
+ "stellar-strkey 1.0.0",
  "token",
 ]
 
@@ -3365,9 +3365,9 @@ dependencies = [
 
 [[package]]
 name = "stellar-strkey"
-version = "0.0.18"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f34ff61c0ca6f1c2b4169e8d1633417bd9225f58b6175e4e317204565d16277"
+checksum = "5038ed2bf4e11842210d118f65791d8ca4747622daddd222338b3d06b6051bc1"
 dependencies = [
  "crate-git-revision 0.0.9",
  "data-encoding",
@@ -4467,7 +4467,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "stellar-strkey 0.0.18",
+ "stellar-strkey 1.0.0",
  "stellar-xdr",
 ]
 
