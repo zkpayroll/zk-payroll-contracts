@@ -753,7 +753,7 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 7u64;
 
-<        client
+        client
             .create_period(
                 &company_id,
                 &base,

@@ -772,7 +772,7 @@ pub fn emit_audit_access_revoked(e: &Env, admin: Address, auditor: Address) {
         .publish((Symbol::new(e, "AuditAccessRevoked"), admin, auditor), ());
 }
 
-</// Emitted when an expired audit grant is permanently removed.
+/// Emitted when an expired audit grant is permanently removed.
 pub fn emit_audit_grant_pruned(e: &Env, admin: Address, auditor: Address) {
     e.events()
         .publish((Symbol::new(e, "AuditGrantPruned"), admin, auditor), ());

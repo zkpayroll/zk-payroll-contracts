@@ -41,7 +41,7 @@ pub enum AuditError {
     DelegationExceedsParentExpiry = 11,
     /// A delegated grant is no longer valid because its parent grant was revoked.
     DelegationRevoked = 12,
-<    /// The proof reference hash is invalid (empty or all-zero sentinel).
+    /// The proof reference hash is invalid (empty or all-zero sentinel).
     InvalidProofReference = 13,
     /// A challenge with this ID does not exist.
     ChallengeNotFound = 14,
