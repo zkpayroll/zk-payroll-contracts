@@ -61,6 +61,28 @@ pub use employee_suspension_rules::{
 /// Multi-stage approval primitives for protected payroll draft revisions (#616).
 pub mod signing;
 
+/// Expiry policy for payroll adjustment approvals (#654).
+pub mod adjustment_approval_expiry;
+pub use adjustment_approval_expiry::AdjustmentApprovalExpiryPolicy;
+
+/// Duplicate detection for payment instructions (#653).
+pub mod payment_instruction_dedup;
+pub use payment_instruction_dedup::{is_duplicate, record_or_reject_duplicate};
+
+/// Payroll operator permission validation (#652).
+pub mod operator_permission;
+pub use operator_permission::{
+    check_operator_capability, require_operator_capability, OperatorCapability, OperatorGrant,
+    OperatorPermissionCheck,
+};
+
+/// Prerequisite checks before a pay period may be closed (#651).
+pub mod period_closure_prerequisites;
+pub use period_closure_prerequisites::{
+    assert_closure_prerequisites, check_closure_prerequisites, PeriodClosureError,
+    PeriodClosurePrerequisites,
+};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
