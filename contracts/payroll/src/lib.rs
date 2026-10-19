@@ -48,6 +48,12 @@ pub use employee_record_version::{
     detect_version_conflict, increment_employee_version, EmployeeRecord,
 };
 
+pub mod bulk_employee_edit;
+pub use bulk_employee_edit::{
+    check_bulk_edit_conflicts, increment_bulk_employee_versions, BulkEmployeeEdit,
+    BulkEditError, BulkEditResult,
+};
+
 pub mod payment_instruction_expiry;
 pub use payment_instruction_expiry::{
     enforce_payment_instruction_expiry, PaymentInstruction,
