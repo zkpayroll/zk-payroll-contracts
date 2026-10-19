@@ -67,6 +67,36 @@ pub use employee_suspension_rules::{
 /// Multi-stage approval primitives for protected payroll draft revisions (#616).
 pub mod signing;
 
+/// Payroll policy effective-date guardrails (#703).
+pub mod policy_effective_date;
+pub use policy_effective_date::{
+    is_policy_effective, is_policy_expired, is_policy_pending, validate_effective_date,
+    validate_no_overlap, PolicyDateError, PolicyEffectivePeriod,
+};
+
+/// Employee payment destination confirmation (#704).
+pub mod payment_destination_confirmation;
+pub use payment_destination_confirmation::{
+    confirm_destination, is_confirmation_expired, is_destination_confirmed, reject_destination,
+    request_destination_confirmation, ConfirmationStatus, DestinationConfirmation,
+    DestinationConfirmationError,
+};
+
+/// Batch execution dependency validation (#705).
+pub mod batch_dependency_validation;
+pub use batch_dependency_validation::{
+    are_dependencies_completed, get_execution_order, validate_batch, validate_dependency_bounds,
+    validate_no_circular_dependencies, BatchDependencyError, BatchStep, BatchValidationResult,
+    StepStatus,
+};
+
+/// Draft payroll comparison snapshots (#710).
+pub mod draft_comparison_snapshots;
+pub use draft_comparison_snapshots::{
+    compare_snapshots, create_snapshot, get_change_summary, validate_snapshot_limit,
+    ComparisonResult, DraftComparisonError, DraftSnapshot, FieldChange,
+};
+
 /// Expiry policy for payroll adjustment approvals (#654).
 pub mod adjustment_approval_expiry;
 pub use adjustment_approval_expiry::AdjustmentApprovalExpiryPolicy;
