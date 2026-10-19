@@ -66,6 +66,8 @@ where the contract exposes `Result<_, Error>`.
 | `payroll.expire_payroll_run` | `"Run has not expired: the configured expiry window has not elapsed"` | Expiry was submitted while the run was still inside its window. | Retryable after the window elapses | Wait until `is_payroll_run_expired(run_id)` returns true, or finalize/cancel the run instead. |
 | `payroll.expire_payroll_run` | `"Pending run not found"` | The run is unknown, or already finalized/cancelled/expired. | Non-retryable for this run ID | Refresh state via `get_payroll_run_state`; for expired runs read `get_expired_run_record`. |
 | `payroll.set_run_expiration_policy` | `"Cannot disable run expiration while payroll runs are pending"` | Admin passed `max_age_seconds = 0` while runs are pending. | Non-retryable until runs resolve | Resolve (finalize/cancel/expire) the pending runs first, then disable. |
+| `payroll.amend_run_draft`, `require_payroll_variance` | `"Payroll variance threshold exceeded: proposed total deviates ..."` | The amendment's relative move past the configured `max_variance_bps` ceiling (#644). | Non-retryable until corrected | Shrink the amendment to fit the ceiling (preflight via `check_payroll_variance`), or ask the admin to deliberately raise/clear the threshold. See [Payroll Variance Threshold](./payroll-variance-threshold.md). |
+| `payroll.set_payroll_variance_threshold` | `"Variance threshold must not exceed 10000 basis points (100%)"` | The configured ceiling is above the 100% maximum (#644). | Non-retryable until corrected | Reconfigure with a value in `0..=10_000` bps. |
 
 ## Treasury and Token Checks
 

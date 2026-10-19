@@ -83,6 +83,13 @@ pub use period_closure_prerequisites::{
     PeriodClosurePrerequisites,
 };
 
+/// Payroll variance threshold validation (#644).
+pub mod payroll_variance;
+pub use payroll_variance::{
+    check_payroll_variance as check_variance_snapshot, validate_payroll_variance,
+    PayrollVarianceCheck, PayrollVarianceConfig, PayrollVarianceIssue, MAX_VARIANCE_BPS,
+};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
@@ -1140,6 +1147,19 @@ pub enum CompanyState {
 pub enum ApprovalKey {
     /// Multi-stage approval tracker bound to a draft's protected revision.
     DraftApproval(u64),
+}
+
+/// Storage key for payroll variance threshold validation (#644).
+///
+/// Deliberately separate from [`DataKey`]: that enum is already past the
+/// Soroban contract-spec ceiling of 50 cases, so this feature is keyed on its
+/// own enum to leave every existing storage key untouched.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VarianceKey {
+    /// Employer-configured payroll variance ceiling
+    /// ([`PayrollVarianceConfig`]). Absent means unrestricted.
+    PayrollVarianceThreshold,
 }
 
 #[contracttype]
@@ -5253,6 +5273,21 @@ impl Payroll {
         if new_total_amount <= 0 {
             panic!("total_amount must be positive");
         }
+        // Issue #644: payroll variance threshold, when configured, caps the
+        // relative move between the draft's current total (baseline) and the
+        // proposed total. Enforced before any state is written, so a rejected
+        // amendment leaves the draft and any correction budget intact.
+        let variance_max = e
+            .storage()
+            .persistent()
+            .get::<VarianceKey, PayrollVarianceConfig>(&VarianceKey::PayrollVarianceThreshold)
+            .map(|cfg| cfg.max_variance_bps);
+        Self::require_variance_within_threshold(
+            &e,
+            draft.total_amount,
+            new_total_amount,
+            variance_max,
+        );
         // Issue #577: correction authorization limits, when configured, cap how
         // much correction activity a payroll period accepts. `delta` is the
         // absolute magnitude of the change, so raising and lowering the draft
@@ -6954,6 +6989,161 @@ impl Payroll {
                     (minimum,),
                 );
                 panic!("Payout amount below minimum threshold");
+            }
+        }
+    }
+
+    // ── Issue #644: payroll variance threshold validation ────────────────────
+
+    /// Set the payroll variance threshold for draft amendments.
+    ///
+    /// Only the admin may call. `max_variance_bps` is a ceiling in basis
+    /// points (`0..=10_000`, where `10_000` is 100%). A `0` threshold is
+    /// strict: only exact matches are accepted. The policy is opt-in — while
+    /// unset, amendments are unrestricted, matching pre-existing behaviour.
+    ///
+    /// # Errors
+    /// - Panics if called by non-admin or while paused.
+    /// - Panics if `max_variance_bps` exceeds 10_000 bps.
+    pub fn set_payroll_variance_threshold(e: Env, admin: Address, max_variance_bps: u32) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        if max_variance_bps > MAX_VARIANCE_BPS {
+            panic!("Variance threshold must not exceed 10000 basis points (100%)");
+        }
+
+        e.storage().persistent().set(
+            &VarianceKey::PayrollVarianceThreshold,
+            &PayrollVarianceConfig { max_variance_bps },
+        );
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "variance_threshold_set"),
+            ),
+            (max_variance_bps, e.ledger().timestamp()),
+        );
+    }
+
+    /// Return the configured payroll variance threshold, if any.
+    ///
+    /// Returns `None` when no threshold has been set (unrestricted).
+    pub fn get_payroll_variance_threshold(e: Env) -> Option<u32> {
+        e.storage()
+            .persistent()
+            .get::<VarianceKey, PayrollVarianceConfig>(&VarianceKey::PayrollVarianceThreshold)
+            .map(|cfg| cfg.max_variance_bps)
+    }
+
+    /// Clear the payroll variance threshold, restoring unrestricted amendments.
+    ///
+    /// Only the admin may call.
+    pub fn clear_payroll_variance_threshold(e: Env, admin: Address) {
+        Self::require_not_paused(&e);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        e.storage()
+            .persistent()
+            .remove(&VarianceKey::PayrollVarianceThreshold);
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "variance_threshold_cleared"),
+            ),
+            (e.ledger().timestamp(),),
+        );
+    }
+
+    /// Preflight whether `proposed_total` fits within the configured variance
+    /// threshold relative to `baseline_total` (#644).
+    ///
+    /// Read-only: performs no auth and writes no state, so SDKs and dashboards
+    /// can surface the verdict before submitting an amendment. Reports
+    /// `within_threshold = true` when no threshold is configured.
+    pub fn check_payroll_variance(
+        e: Env,
+        baseline_total: i128,
+        proposed_total: i128,
+    ) -> PayrollVarianceCheck {
+        let max = e
+            .storage()
+            .persistent()
+            .get::<VarianceKey, PayrollVarianceConfig>(&VarianceKey::PayrollVarianceThreshold)
+            .map(|cfg| cfg.max_variance_bps);
+        check_variance_snapshot(baseline_total, proposed_total, max)
+    }
+
+    /// Require that `proposed_total` fits within the configured variance
+    /// threshold relative to `baseline_total` (#644).
+    ///
+    /// No-op when no threshold is configured. Otherwise panics with an
+    /// actionable error naming the measured and allowed basis points (never
+    /// salary values or employee identities).
+    pub fn require_payroll_variance(e: Env, baseline_total: i128, proposed_total: i128) {
+        let max = e
+            .storage()
+            .persistent()
+            .get::<VarianceKey, PayrollVarianceConfig>(&VarianceKey::PayrollVarianceThreshold)
+            .map(|cfg| cfg.max_variance_bps);
+        Self::require_variance_within_threshold(&e, baseline_total, proposed_total, max);
+    }
+
+    /// Enforce the variance ceiling for one draft amendment.
+    ///
+    /// No-op when no threshold is configured, so existing workflows are
+    /// untouched. Otherwise a rejected amendment panics before any state is
+    /// written, leaving the draft and any correction budget intact.
+    fn require_variance_within_threshold(
+        e: &Env,
+        baseline_total: i128,
+        proposed_total: i128,
+        max_bps: Option<u32>,
+    ) {
+        match validate_payroll_variance(baseline_total, proposed_total, max_bps) {
+            Ok(()) => {}
+            Err(PayrollVarianceIssue::NoThresholdConfigured) => {}
+            Err(PayrollVarianceIssue::InvalidThreshold) => {
+                panic!("Variance threshold is misconfigured: threshold exceeds 10000 basis points; clear and re-set the threshold")
+            }
+            Err(PayrollVarianceIssue::InvalidBaseline) => {
+                panic!("Variance check needs a positive baseline total: cannot measure variance without one")
+            }
+            Err(PayrollVarianceIssue::InvalidProposed) => {
+                panic!("total_amount must be positive")
+            }
+            Err(PayrollVarianceIssue::ExceedsThreshold) => {
+                let max = max_bps.unwrap_or(MAX_VARIANCE_BPS);
+                let measured = payroll_variance::variance_bps(baseline_total, proposed_total);
+                e.events().publish(
+                    (
+                        symbol_short!("payroll"),
+                        Symbol::new(e, "variance_threshold_violated"),
+                    ),
+                    (measured, max),
+                );
+                panic!(
+                    "Payroll variance threshold exceeded: proposed total deviates {} bps from baseline, above the {} bps maximum; adjust the amendment or raise the threshold",
+                    measured, max
+                );
             }
         }
     }
