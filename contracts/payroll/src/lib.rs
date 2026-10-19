@@ -147,6 +147,23 @@ pub use cross_currency_rounding::{
     RoundingMode, RoundingSafeguardError,
 };
 
+/// Emergency payroll pause authorization (#698).
+pub mod emergency_pause_authorization;
+pub use emergency_pause_authorization::{
+    assert_payroll_not_paused, execute_emergency_pause, execute_emergency_unpause,
+    initialize_pause_state, is_payroll_operation_paused, resolve_emergency_role,
+    validate_emergency_config, EmergencyPauseConfig, EmergencyPauseError, EmergencyPauseScope,
+    EmergencyPauseState, EmergencyRole,
+};
+
+/// Contract treasury replenishment readiness analysis (#637).
+pub mod treasury_replenishment_analysis;
+pub use treasury_replenishment_analysis::{
+    analyze_replenishment_readiness, calculate_required_reserve, validate_replenishment_config,
+    validate_replenishment_deposit, ReplenishmentReadinessAnalysis, ReplenishmentStatus,
+    TreasuryAnalysisError, TreasuryReplenishmentConfig,
+};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
