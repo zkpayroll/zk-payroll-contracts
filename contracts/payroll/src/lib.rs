@@ -90,6 +90,13 @@ pub use payroll_variance::{
     PayrollVarianceCheck, PayrollVarianceConfig, PayrollVarianceIssue, MAX_VARIANCE_BPS,
 };
 
+/// Multi-batch execution progress tracking (#643).
+pub mod multi_batch_progress;
+pub use multi_batch_progress::{
+    MultiBatchExecutionProgress, MultiBatchProgressIssue, MultiBatchStatus,
+    MAX_MULTI_BATCH_BATCHES, MAX_MULTI_BATCH_PAYMENTS,
+};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
@@ -1160,6 +1167,19 @@ pub enum VarianceKey {
     /// Employer-configured payroll variance ceiling
     /// ([`PayrollVarianceConfig`]). Absent means unrestricted.
     PayrollVarianceThreshold,
+}
+
+/// Storage key for multi-batch execution progress tracking (#643).
+///
+/// Deliberately separate from [`DataKey`]: that enum is already past the
+/// Soroban contract-spec ceiling of 50 cases, so this feature is keyed on its
+/// own enum to leave every existing storage key untouched.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MultiBatchKey {
+    /// Aggregate progress for one multi-batch execution, keyed by the
+    /// caller-supplied opaque execution identifier.
+    MultiBatchProgress(BytesN<32>),
 }
 
 #[contracttype]
@@ -10283,6 +10303,308 @@ impl Payroll {
             if hold.status == AuditHoldStatus::Active {
                 panic!("Run is under an active audit hold");
             }
+        }
+    }
+
+    // ── Issue #643: multi-batch execution progress tracking ─────────────────
+
+    /// Open a new multi-batch execution progress tracker.
+    ///
+    /// A multi-batch execution groups a sequence of bounded batches (each at
+    /// most 50 payments) under one opaque `execution_id` so operators and
+    /// dashboards can poll a single privacy-safe record instead of stitching
+    /// together per-batch `BatchCheckpoint` rows.
+    ///
+    /// Only the contract admin may open a tracker. The tracker starts at
+    /// `(0, 0)` in `InProgress` status; advance it with
+    /// [`Self::record_multi_batch_progress`]. The call is additive and does
+    /// not alter any existing batch flow, so enabling it cannot regress
+    /// prepared runs, checkpoints, or bounded execution.
+    ///
+    /// # Panics
+    /// - `"Not initialized"` — contract has no stored addresses.
+    /// - `"Unauthorized"` — `admin` is not the stored contract admin.
+    /// - `"Execution ID cannot be all-zero bytes"` — `execution_id` is zero.
+    /// - `"Multi-batch total batches must be between 1 and 50"` — out of range.
+    /// - `"Multi-batch total payments must be between 1 and 2500"` — out of range.
+    /// - `"Multi-batch total payments cannot be less than total batches"` —
+    ///   each batch holds at least one payment.
+    /// - `"Multi-batch execution already exists"` — `execution_id` is in use.
+    pub fn begin_multi_batch_execution(
+        e: Env,
+        admin: Address,
+        execution_id: BytesN<32>,
+        total_batches: u32,
+        total_payments: u32,
+    ) -> MultiBatchExecutionProgress {
+        Self::require_not_paused(&e);
+        Self::validate_non_zero_digest(&e, &execution_id, "execution_id");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        match multi_batch_progress::validate_begin_totals(total_batches, total_payments) {
+            Ok(()) => {}
+            Err(MultiBatchProgressIssue::EmptyBatches) => {
+                panic!("Multi-batch total batches must be between 1 and 50")
+            }
+            Err(MultiBatchProgressIssue::TooManyBatches) => {
+                panic!("Multi-batch total batches must be between 1 and 50")
+            }
+            Err(MultiBatchProgressIssue::EmptyPayments) => {
+                panic!("Multi-batch total payments must be between 1 and 2500")
+            }
+            Err(MultiBatchProgressIssue::TooManyPayments) => {
+                panic!("Multi-batch total payments must be between 1 and 2500")
+            }
+            Err(MultiBatchProgressIssue::PaymentsBelowBatches) => {
+                panic!("Multi-batch total payments cannot be less than total batches")
+            }
+            Err(_) => panic!("Invalid multi-batch execution plan"),
+        }
+
+        let key = MultiBatchKey::MultiBatchProgress(execution_id.clone());
+        if e.storage().persistent().has(&key) {
+            panic!("Multi-batch execution already exists");
+        }
+
+        let now = e.ledger().timestamp();
+        let progress = MultiBatchExecutionProgress {
+            execution_id: execution_id.clone(),
+            total_batches,
+            completed_batches: 0,
+            total_payments,
+            processed_payments: 0,
+            status: MultiBatchStatus::InProgress,
+            started_at: now,
+            last_updated: now,
+            updated_by: admin.clone(),
+        };
+        e.storage().persistent().set(&key, &progress);
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "multi_batch_started"),
+            ),
+            (execution_id, total_batches, total_payments, now),
+        );
+        progress
+    }
+
+    /// Record forward progress for an open multi-batch execution.
+    ///
+    /// Both cursors are absolute (not deltas) and must move monotonically:
+    /// `completed_batches` in `0..=total_batches` and `processed_payments` in
+    /// `0..=total_payments`, with at least one strictly increasing. Reaching
+    /// both planned totals transitions the tracker to `Completed`
+    /// automatically and emits a completion event; otherwise it stays
+    /// `InProgress`.
+    ///
+    /// Only the contract admin may record. The check runs before any state is
+    /// written, so a rejected record leaves the stored cursor intact.
+    ///
+    /// # Panics
+    /// - `"Multi-batch execution not found: call begin_multi_batch_execution first"` —
+    ///   unknown `execution_id`.
+    /// - `"Multi-batch execution is already terminal"` — `Completed`/`Failed`.
+    /// - `"Multi-batch completed batches exceed planned total"` — over total.
+    /// - `"Multi-batch processed payments exceed planned total"` — over total.
+    /// - `"Multi-batch progress regression: new progress is behind stored progress"` —
+    ///   cursor moved backwards.
+    /// - `"Multi-batch progress must move forward: no new batches or payments recorded"` —
+    ///   identical resubmission.
+    pub fn record_multi_batch_progress(
+        e: Env,
+        admin: Address,
+        execution_id: BytesN<32>,
+        completed_batches: u32,
+        processed_payments: u32,
+    ) -> MultiBatchExecutionProgress {
+        Self::require_not_paused(&e);
+        Self::validate_non_zero_digest(&e, &execution_id, "execution_id");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = MultiBatchKey::MultiBatchProgress(execution_id.clone());
+        let mut progress: MultiBatchExecutionProgress = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| {
+                panic!("Multi-batch execution not found: call begin_multi_batch_execution first")
+            });
+
+        match multi_batch_progress::validate_progress_record(
+            &progress,
+            completed_batches,
+            processed_payments,
+        ) {
+            Ok(()) => {}
+            Err(MultiBatchProgressIssue::AlreadyTerminal) => {
+                panic!("Multi-batch execution is already terminal")
+            }
+            Err(MultiBatchProgressIssue::BatchesOverTotal) => {
+                panic!("Multi-batch completed batches exceed planned total")
+            }
+            Err(MultiBatchProgressIssue::PaymentsOverTotal) => {
+                panic!("Multi-batch processed payments exceed planned total")
+            }
+            Err(MultiBatchProgressIssue::ProgressRegression) => {
+                panic!("Multi-batch progress regression: new progress is behind stored progress")
+            }
+            Err(MultiBatchProgressIssue::NoForwardProgress) => {
+                panic!("Multi-batch progress must move forward: no new batches or payments recorded")
+            }
+            Err(_) => panic!("Invalid multi-batch progress record"),
+        }
+
+        progress.completed_batches = completed_batches;
+        progress.processed_payments = processed_payments;
+        progress.last_updated = e.ledger().timestamp();
+        progress.updated_by = admin.clone();
+        let finished = completed_batches == progress.total_batches
+            && processed_payments == progress.total_payments;
+        if finished {
+            progress.status = MultiBatchStatus::Completed;
+        }
+        e.storage().persistent().set(&key, &progress);
+
+        if finished {
+            e.events().publish(
+                (
+                    symbol_short!("payroll"),
+                    Symbol::new(&e, "multi_batch_completed"),
+                ),
+                (
+                    execution_id,
+                    completed_batches,
+                    processed_payments,
+                    progress.last_updated,
+                ),
+            );
+        } else {
+            e.events().publish(
+                (
+                    symbol_short!("payroll"),
+                    Symbol::new(&e, "multi_batch_progress"),
+                ),
+                (
+                    execution_id,
+                    completed_batches,
+                    processed_payments,
+                    progress.last_updated,
+                ),
+            );
+        }
+        progress
+    }
+
+    /// Mark an in-progress multi-batch execution as failed.
+    ///
+    /// Only the contract admin may mark. Only `InProgress` executions can
+    /// fail; terminal (`Completed` / `Failed`) executions are rejected so a
+    /// finished record is never rewritten. The stored cursors are preserved so
+    /// operators can see how far the execution got before it failed.
+    ///
+    /// # Panics
+    /// - `"Multi-batch execution not found: call begin_multi_batch_execution first"` —
+    ///   unknown `execution_id`.
+    /// - `"Multi-batch execution is already terminal"` — already finished.
+    pub fn mark_multi_batch_failed(
+        e: Env,
+        admin: Address,
+        execution_id: BytesN<32>,
+    ) -> MultiBatchExecutionProgress {
+        Self::require_not_paused(&e);
+        Self::validate_non_zero_digest(&e, &execution_id, "execution_id");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = MultiBatchKey::MultiBatchProgress(execution_id.clone());
+        let mut progress: MultiBatchExecutionProgress = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| {
+                panic!("Multi-batch execution not found: call begin_multi_batch_execution first")
+            });
+
+        if progress.status != MultiBatchStatus::InProgress {
+            panic!("Multi-batch execution is already terminal");
+        }
+
+        progress.status = MultiBatchStatus::Failed;
+        progress.last_updated = e.ledger().timestamp();
+        progress.updated_by = admin;
+        e.storage().persistent().set(&key, &progress);
+
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "multi_batch_failed"),
+            ),
+            (
+                execution_id,
+                progress.completed_batches,
+                progress.processed_payments,
+                progress.last_updated,
+            ),
+        );
+        progress
+    }
+
+    /// Read the aggregate progress for a multi-batch execution.
+    ///
+    /// Read-only and privacy-safe: returns only the opaque execution
+    /// identifier and aggregate counts — never employee addresses, salary
+    /// values, commitments, or proof material.
+    ///
+    /// # Panics
+    /// - `"Multi-batch execution not found: call begin_multi_batch_execution first"` —
+    ///   unknown `execution_id`.
+    pub fn get_multi_batch_progress(e: Env, execution_id: BytesN<32>) -> MultiBatchExecutionProgress {
+        let key = MultiBatchKey::MultiBatchProgress(execution_id);
+        e.storage().persistent().get(&key).unwrap_or_else(|| {
+            panic!("Multi-batch execution not found: call begin_multi_batch_execution first")
+        })
+    }
+
+    /// Return `true` when the execution has reached both planned totals.
+    ///
+    /// Read-only convenience wrapper around [`Self::get_multi_batch_progress`]
+    /// for dashboards polling completion. Returns `false` when the execution
+    /// is unknown, in progress, or failed — only a `Completed` record (or a
+    /// record whose cursors cover both totals) reports `true`.
+    pub fn is_multi_batch_complete(e: Env, execution_id: BytesN<32>) -> bool {
+        let key = MultiBatchKey::MultiBatchProgress(execution_id);
+        match e
+            .storage()
+            .persistent()
+            .get::<MultiBatchKey, MultiBatchExecutionProgress>(&key)
+        {
+            Some(progress) => multi_batch_progress::is_complete(&progress),
+            None => false,
         }
     }
 }
