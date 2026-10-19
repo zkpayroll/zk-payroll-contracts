@@ -17,6 +17,9 @@ This document defines the canonical interface and storage model for the
 | `review_payout_dest_change` | `company_id: u64`, `employee: Address`, `admin: Address`, `approve: bool` | `()` | `require_auth(admin)` |
 | `cancel_payout_dest_change` | `company_id: u64`, `employee: Address` | `()` | `require_auth(employee)` |
 | `get_payout_dest_review` | `company_id: u64`, `employee: Address` | `Option<PayoutDestinationReview>` | None |
+| `confirm_payout_method` | `company_id: u64`, `employee: Address` | `()` | `require_auth(employee)` |
+| `get_payout_method_confirmation` | `company_id: u64`, `employee: Address` | `Option<PayoutMethodConfirmation>` | None |
+| `is_payout_method_confirmed` | `company_id: u64`, `employee: Address` | `bool` | None |
 
 ## Rust Interface Definitions
 
@@ -33,6 +36,9 @@ The contract interface is defined by the Rust trait:
   - `fn review_payout_dest_change(env: Env, company_id: u64, employee: Address, admin: Address, approve: bool)`
   - `fn cancel_payout_dest_change(env: Env, company_id: u64, employee: Address)`
   - `fn get_payout_dest_review(env: Env, company_id: u64, employee: Address) -> Option<PayoutDestinationReview>`
+  - `fn confirm_payout_method(env: Env, company_id: u64, employee: Address)`
+  - `fn get_payout_method_confirmation(env: Env, company_id: u64, employee: Address) -> Option<PayoutMethodConfirmation>`
+  - `fn is_payout_method_confirmed(env: Env, company_id: u64, employee: Address) -> bool`
 
 ## Storage Types and Keys
 
@@ -44,6 +50,9 @@ Storage is implemented using `DataKey`:
   destination defaults to the employee address)
 - `DataKey::DestinationReview(u64, Address)` maps to `PayoutDestinationReview`
   (issue #610; the most recent review for the employee)
+- `DataKey::PayoutMethodConfirmation(u64, Address)` maps to
+  `PayoutMethodConfirmation` (issue #642; absent means never confirmed or
+  stale — cleared on every applied destination change and on removal)
 
 The `CompanyInfo` struct definition in Rust:
 
@@ -89,6 +98,38 @@ salary values, commitments, or payment history. `current_destination` defaults
 to the employee address when no explicit destination has been stored, matching
 `get_payout_destination`.
 
+## Payout Method Confirmation (issue #642)
+
+`confirm_payout_method` lets the employee attest that the destination on file
+is correct. It snapshots `get_payout_destination` into a
+`PayoutMethodConfirmation` record:
+
+- `pub struct PayoutMethodConfirmation { company_id: u64, employee: Address, destination: Address, confirmed_at: u64, confirmed_by: Address }`
+
+Operators poll readiness with `is_payout_method_confirmed` (true only when a
+record exists **and** still matches the destination on file) and inspect the
+record with `get_payout_method_confirmation`. Re-confirming refreshes the
+timestamp, e.g. for periodic reviews.
+
+**Staleness:** every applied destination change (`update_payout_destination`,
+approved `review_payout_dest_change`) and `remove_employee` clears the record,
+so a stored confirmation always attests the destination on file. A rejected
+review leaves the destination unchanged, so confirming afterwards is allowed;
+a `Pending` review blocks confirmation until it is resolved or cancelled.
+
+**Validation:**
+
+| Condition | Panic |
+| --- | --- |
+| Employee is not registered under the company | `Employee not found` |
+| Company admin is revoked | `Company admin is revoked` |
+| A review for the employee is already `Pending` | `A payout destination change is under review: resolve or cancel it before confirming` |
+| Caller is not the employee (host auth) | `authorized` failure |
+| Contract is paused | `Contract is paused` |
+
+The record and the `PayoutMethodConfirmed` event carry only addresses and
+timestamps — no salary values, commitments, or payment history.
+
 ## Notes
 
 - Company IDs are allocated sequentially and persisted with `DataKey::CompanySequence`.
@@ -113,4 +154,5 @@ to the employee address when no explicit destination has been stored, matching
 | `PayoutDestinationChangeProposed` | `propose_payout_dest_change` |
 | `PayoutDestinationChangeReviewed` | `review_payout_dest_change` (data: `approve: bool`) |
 | `PayoutDestinationChangeCancelled` | `cancel_payout_dest_change` |
+| `PayoutMethodConfirmed` | `confirm_payout_method` (data: confirmed `destination`) |
 

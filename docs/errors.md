@@ -41,6 +41,10 @@ where the contract exposes `Result<_, Error>`.
 | `salary_commitment.rotate_approved_commitment` | `"New commitment must differ from the current commitment"` | The submitted value equals the active commitment — a no-op rotation. | Non-retryable until corrected | Generate a fresh commitment off-chain (new blinding factor) and resubmit. |
 | `salary_commitment.rotate_approved_commitment` / `rotate_commitment` | `"Commitment already in use: commitments must be unique across employees and payroll runs"` | The new value is already bound to an employee, active or archived. | Non-retryable until corrected | Generate a fresh commitment; retired values stay reserved for the life of the contract so settled payroll records remain attributable. |
 | `salary_commitment.set_reference_id` | Invalid or duplicate reference ID | Empty/oversized HR reference or reference already assigned. | Non-retryable until corrected | Validate length and uniqueness client-side before submission. |
+| `payroll_registry.confirm_payout_method` | `"Employee not found"` | Confirmation for an unknown or removed `(company_id, employee)` (#642). | Retryable after roster refresh | Refresh the roster and onboard the employee before confirming. |
+| `payroll_registry.confirm_payout_method` | `"A payout destination change is under review: resolve or cancel it before confirming"` | A `Pending` payout destination review exists for the employee (#642). | Retryable after the review resolves | Wait for the admin decision or ask the employee to cancel the pending change, then confirm. |
+| `payroll_registry.confirm_payout_method` | `"Company admin is revoked"` | The company is revoked (#642). | Non-retryable until restored | Require the canonical admin/rotation flow to restore the company before confirming. |
+| `payroll_registry.confirm_payout_method` | Host `authorized` failure | The transaction is not signed by the employee (#642). | Non-retryable until signer changes | Ask the employee to sign their own confirmation; the admin cannot confirm on their behalf. |
 
 ## Payroll Execution and Periods
 

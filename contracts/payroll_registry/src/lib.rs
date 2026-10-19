@@ -133,6 +133,32 @@ pub struct PayoutDestinationReview {
     pub resolved_by: Option<Address>,
 }
 
+// ── Issue #642: employee payout method confirmation ────────────────────────
+
+/// Employee confirmation of the payout destination on file (issue #642).
+///
+/// Records that the employee reviewed and confirmed the destination payroll
+/// will pay to. The `destination` is a snapshot of `get_payout_destination`
+/// at confirmation time, so a later destination change stales the record
+/// (the contract clears it on every applied change).
+///
+/// Privacy note: carries only the company/employee/destination addresses and
+/// timestamps — no salary values, commitments, or payment history.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayoutMethodConfirmation {
+    /// Company the employee is registered under.
+    pub company_id: u64,
+    /// Employee who confirmed.
+    pub employee: Address,
+    /// Destination confirmed (snapshot of the destination on file).
+    pub destination: Address,
+    /// Ledger timestamp when the confirmation was recorded.
+    pub confirmed_at: u64,
+    /// Employee that recorded the confirmation (always `employee`).
+    pub confirmed_by: Address,
+}
+
 // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
 /// Versioned admin configuration tracking for reliable change detection.
@@ -192,6 +218,12 @@ pub enum DataKey {
     DestinationReview(u64, Address),
     /// Versioned admin configuration for reliable change detection.
     AdminConfigVersion(u64),
+    /// Employee confirmation of the payout destination on file (issue #642).
+    /// Keyed by the confirming employee. Absent means never confirmed or
+    /// stale (cleared on every applied destination change / removal).
+    /// Appended (never reordered) so existing storage discriminants are
+    /// unchanged.
+    PayoutMethodConfirmation(u64, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +427,25 @@ pub trait PayrollRegistryTrait {
         company_id: u64,
         employee: Address,
     ) -> Option<PayoutDestinationReview>;
+
+    // ── Issue #642: employee payout method confirmation ────────────────────
+
+    /// Confirm the payout destination currently on file (issue #642).
+    /// Requires authorisation from the employee. Records a snapshot of
+    /// `get_payout_destination` so a later destination change stales it.
+    fn confirm_payout_method(env: Env, company_id: u64, employee: Address);
+
+    /// Return the payout method confirmation for an employee (issue #642),
+    /// or `None` when never confirmed or stale (cleared on change/removal).
+    fn get_payout_method_confirmation(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutMethodConfirmation>;
+
+    /// Return `true` iff a confirmation exists and still matches the
+    /// destination currently on file (issue #642).
+    fn is_payout_method_confirmed(env: Env, company_id: u64, employee: Address) -> bool;
 
     // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
@@ -708,6 +759,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .remove(&DataKey::Employee(company_id, emp));
+        // Issue #642: drop any payout method confirmation so a re-onboarded
+        // record with the same key cannot inherit a stale confirmation.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PayoutMethodConfirmation(
+                company_id,
+                employee.clone(),
+            ));
 
         payroll_events::emit_employee_removed(&env, company_id, employee);
     }
@@ -1419,6 +1478,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
             &DataKey::PayoutDestination(company_id, employee.clone()),
             &new_destination,
         );
+        // Issue #642: the confirmed snapshot (if any) no longer matches the
+        // destination on file, so clear it until the employee re-confirms.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PayoutMethodConfirmation(
+                company_id,
+                employee.clone(),
+            ));
 
         env.events().publish(
             (
@@ -1585,6 +1652,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
                 &DataKey::PayoutDestination(company_id, employee.clone()),
                 &new_destination,
             );
+            // Issue #642: clear any prior confirmation — it attested the
+            // pre-approval destination, not the newly applied one.
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PayoutMethodConfirmation(
+                    company_id,
+                    employee.clone(),
+                ));
             env.events().publish(
                 (
                     Symbol::new(&env, "PayoutDestinationUpdated"),
@@ -1657,6 +1732,126 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .get(&DataKey::DestinationReview(company_id, employee))
+    }
+
+    // ── Issue #642: employee payout method confirmation ────────────────────
+
+    /// Confirm the payout destination currently on file.
+    ///
+    /// Only the employee may confirm their own payout method: the call
+    /// snapshots `get_payout_destination` and records who confirmed and when,
+    /// so payroll operators can require a fresh confirmation before paying.
+    /// Re-confirming is allowed and refreshes the timestamp (e.g. after a
+    /// periodic review). The record is cleared automatically whenever the
+    /// destination changes (`update_payout_destination`, approved
+    /// `review_payout_dest_change`) or the employee is removed, so a stored
+    /// confirmation always attests the destination on file.
+    ///
+    /// # Panics
+    /// - `"Employee not found"` — unknown `(company_id, employee)`.
+    /// - `"Company admin is revoked"` — the company is revoked.
+    /// - `"A payout destination change is under review: resolve or cancel it before confirming"` —
+    ///   a `Pending` review exists for the employee.
+    fn confirm_payout_method(env: Env, company_id: u64, employee: Address) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if info.revoked {
+            panic!("Company admin is revoked");
+        }
+
+        // Only the employee may confirm their own payout method.
+        employee.require_auth();
+
+        if let Some(review) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutDestinationReview>(&DataKey::DestinationReview(
+                company_id,
+                employee.clone(),
+            ))
+        {
+            if review.status == DestinationReviewStatus::Pending {
+                panic!("A payout destination change is under review: resolve or cancel it before confirming");
+            }
+        }
+
+        let destination = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+        let confirmation = PayoutMethodConfirmation {
+            company_id,
+            employee: employee.clone(),
+            destination: destination.clone(),
+            confirmed_at: env.ledger().timestamp(),
+            confirmed_by: employee.clone(),
+        };
+        env.storage().persistent().set(
+            &DataKey::PayoutMethodConfirmation(company_id, employee.clone()),
+            &confirmation,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutMethodConfirmed"),
+                company_id,
+                employee,
+            ),
+            (destination,),
+        );
+    }
+
+    /// Return the stored payout method confirmation, if any.
+    ///
+    /// Read-only: returns `None` when the employee never confirmed or when
+    /// the record was cleared by a later destination change or removal.
+    /// Carries only addresses and timestamps — no salary or commitment data.
+    fn get_payout_method_confirmation(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutMethodConfirmation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayoutMethodConfirmation(company_id, employee))
+    }
+
+    /// Return `true` iff a confirmation exists and still matches the
+    /// destination currently on file.
+    ///
+    /// Read-only convenience for payroll operators and dashboards polling
+    /// readiness. Returns `false` for unknown employees (rather than
+    /// trapping) so lists can be filtered without per-row error handling;
+    /// use `confirm_payout_method` / `get_payout_method_confirmation` when an
+    /// explicit missing-employee error is required.
+    fn is_payout_method_confirmed(env: Env, company_id: u64, employee: Address) -> bool {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            return false;
+        }
+        let current = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutMethodConfirmation>(&DataKey::PayoutMethodConfirmation(
+                company_id, employee,
+            )) {
+            Some(confirmation) => confirmation.destination == current,
+            None => false,
+        }
     }
 }
 

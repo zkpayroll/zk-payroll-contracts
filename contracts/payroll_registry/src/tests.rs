@@ -1223,3 +1223,257 @@ fn test_payout_destination_review_rejects_non_owner_proposer() {
 
     registry.propose_payout_dest_change(&company_id, &employee, &new_destination);
 }
+
+// ── Issue #642: employee payout method confirmation tests ───────────────────
+
+fn confirmation_setup() -> (Env, PayrollRegistryClient<'static>, u64, Address, Address) {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[7u8; 32]);
+
+    let company_id = client.register_company(&admin, &treasury);
+    client.add_employee(&company_id, &employee, &commitment);
+    (env, client, company_id, admin, employee)
+}
+
+#[test]
+fn test_payout_method_confirmation_success_default_destination() {
+    let (env, client, company_id, _admin, employee) = confirmation_setup();
+
+    // Nothing confirmed yet: read helpers report absence without trapping.
+    assert!(!client.is_payout_method_confirmed(&company_id, &employee));
+    assert_eq!(
+        client.get_payout_method_confirmation(&company_id, &employee),
+        None
+    );
+
+    client.confirm_payout_method(&company_id, &employee);
+
+    // Confirmation emits a lifecycle event carrying the destination.
+    // Checked immediately: read-only calls after this point may rotate the
+    // test event buffer in this SDK version.
+    let topics = last_event_topics(&env);
+    let sym: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(sym, Symbol::new(&env, "PayoutMethodConfirmed"));
+
+    // Default destination (no explicit update) is the employee address itself.
+    let record = client
+        .get_payout_method_confirmation(&company_id, &employee)
+        .expect("confirmation record missing");
+    assert_eq!(record.company_id, company_id);
+    assert_eq!(record.employee, employee);
+    assert_eq!(record.destination, employee);
+    assert_eq!(record.confirmed_by, employee);
+    assert_eq!(record.confirmed_at, env.ledger().timestamp());
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+}
+
+#[test]
+fn test_payout_method_confirmation_after_direct_update_clears_and_reconfirms() {
+    let (_env, client, company_id, _admin, employee) = confirmation_setup();
+    let new_destination = Address::generate(&_env);
+
+    client.confirm_payout_method(&company_id, &employee);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+
+    // A direct destination change stales the prior confirmation.
+    client.update_payout_destination(&company_id, &employee, &new_destination);
+    assert!(!client.is_payout_method_confirmed(&company_id, &employee));
+    assert_eq!(
+        client.get_payout_method_confirmation(&company_id, &employee),
+        None
+    );
+
+    // Re-confirming attests the new destination.
+    client.confirm_payout_method(&company_id, &employee);
+    let record = client
+        .get_payout_method_confirmation(&company_id, &employee)
+        .unwrap();
+    assert_eq!(record.destination, new_destination);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+}
+
+#[test]
+fn test_payout_method_reconfirmation_refreshes_timestamp() {
+    use soroban_sdk::testutils::Ledger as _;
+
+    let (env, client, company_id, _admin, employee) = confirmation_setup();
+
+    env.ledger().set_timestamp(1_700_000_000);
+    client.confirm_payout_method(&company_id, &employee);
+    let first = client
+        .get_payout_method_confirmation(&company_id, &employee)
+        .unwrap();
+    assert_eq!(first.confirmed_at, 1_700_000_000);
+
+    // Periodic re-confirmation without any destination change refreshes time.
+    env.ledger().set_timestamp(1_700_086_400);
+    client.confirm_payout_method(&company_id, &employee);
+    let second = client
+        .get_payout_method_confirmation(&company_id, &employee)
+        .unwrap();
+    assert_eq!(second.confirmed_at, 1_700_086_400);
+    assert_eq!(second.destination, first.destination);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+}
+
+#[test]
+#[should_panic(expected = "Employee not found")]
+fn test_confirm_payout_method_rejects_unknown_employee() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let stranger = Address::generate(&env);
+    client.confirm_payout_method(&company_id, &stranger);
+}
+
+#[test]
+#[should_panic(expected = "authorized")]
+fn test_confirm_payout_method_rejects_non_owner() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, PayrollRegistry);
+    let registry = PayrollRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "register_company",
+            args: (admin.clone(), treasury.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let company_id = registry.register_company(&admin, &treasury);
+
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[1u8; 32]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_employee",
+            args: (company_id, employee.clone(), commitment.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    registry.add_employee(&company_id, &employee, &commitment);
+
+    // Attacker attempts to confirm the employee's payout method.
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "confirm_payout_method",
+            args: (company_id, employee.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    registry.confirm_payout_method(&company_id, &employee);
+}
+
+#[test]
+#[should_panic(expected = "under review")]
+fn test_confirm_payout_method_rejects_pending_review() {
+    let (_env, client, company_id, _admin, employee) = confirmation_setup();
+    let new_destination = Address::generate(&_env);
+
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    // The destination on file has not changed yet, but confirming now would
+    // attest a value that is about to be redirected.
+    client.confirm_payout_method(&company_id, &employee);
+}
+
+#[test]
+#[should_panic(expected = "Company admin is revoked")]
+fn test_confirm_payout_method_rejects_revoked_company() {
+    let (_env, client, company_id, admin, employee) = confirmation_setup();
+
+    client.revoke_company_admin(&company_id, &admin);
+    client.confirm_payout_method(&company_id, &employee);
+}
+
+#[test]
+fn test_is_payout_method_confirmed_false_when_never_confirmed() {
+    let (_env, client, company_id, _admin, employee) = confirmation_setup();
+
+    assert!(!client.is_payout_method_confirmed(&company_id, &employee));
+    assert_eq!(
+        client.get_payout_method_confirmation(&company_id, &employee),
+        None
+    );
+
+    // Unknown employees report false rather than trapping, so dashboards can
+    // filter lists without per-row error handling.
+    let stranger = Address::generate(&_env);
+    assert!(!client.is_payout_method_confirmed(&company_id, &stranger));
+}
+
+#[test]
+fn test_payout_method_confirmation_cleared_on_review_approval() {
+    let (_env, client, company_id, admin, employee) = confirmation_setup();
+    let new_destination = Address::generate(&_env);
+
+    client.confirm_payout_method(&company_id, &employee);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    client.review_payout_dest_change(&company_id, &employee, &admin, &true);
+
+    // Approval applies a new destination, so the old attestation is cleared.
+    assert_eq!(
+        client.get_payout_destination(&company_id, &employee),
+        new_destination
+    );
+    assert!(!client.is_payout_method_confirmed(&company_id, &employee));
+    assert_eq!(
+        client.get_payout_method_confirmation(&company_id, &employee),
+        None
+    );
+
+    // The employee confirms the newly approved destination.
+    client.confirm_payout_method(&company_id, &employee);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+}
+
+#[test]
+fn test_payout_method_confirmation_cleared_on_employee_removal() {
+    let (_env, client, company_id, admin, employee) = confirmation_setup();
+
+    client.confirm_payout_method(&company_id, &employee);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+
+    client.remove_employee(&company_id, &employee);
+    assert_eq!(
+        client.get_payout_method_confirmation(&company_id, &employee),
+        None
+    );
+    assert!(!client.is_payout_method_confirmed(&company_id, &employee));
+}
+
+#[test]
+fn test_confirm_payout_method_allowed_after_rejected_review() {
+    let (_env, client, company_id, admin, employee) = confirmation_setup();
+    let new_destination = Address::generate(&_env);
+
+    // A rejected review leaves the destination unchanged, so confirming the
+    // (unchanged) destination on file remains valid.
+    client.propose_payout_dest_change(&company_id, &employee, &new_destination);
+    client.review_payout_dest_change(&company_id, &employee, &admin, &false);
+
+    client.confirm_payout_method(&company_id, &employee);
+    let record = client
+        .get_payout_method_confirmation(&company_id, &employee)
+        .unwrap();
+    assert_eq!(record.destination, employee);
+    assert!(client.is_payout_method_confirmed(&company_id, &employee));
+}
