@@ -1,13 +1,13 @@
-//! Payroll variance threshold validation (issue #644).
-//!
-//! Covers: the policy is opt-in (unconfigured amendments are unrestricted),
-//! a configured policy is readable and replaceable, amendments within the
-//! ceiling (including exactly on the boundary) succeed, amendments past the
-//! ceiling are rejected without mutating the draft or burning correction
-//! budget, the zero-threshold strict edge case, the full-range boundary,
-//! invalid thresholds and unauthorized callers are rejected, clearing
-//! restores unrestricted behaviour, and the read-only preflight reports a
-//! breach without writing state.
+/// Payroll variance threshold validation (issue #644).
+///
+/// Covers: the policy is opt-in (unconfigured amendments are unrestricted),
+/// a configured policy is readable and replaceable, amendments within the
+/// ceiling (including exactly on the boundary) succeed, amendments past the
+/// ceiling are rejected without mutating the draft or burning correction
+/// budget, the zero-threshold strict edge case, the full-range boundary,
+/// invalid thresholds and unauthorized callers are rejected, clearing
+/// restores unrestricted behaviour, and the read-only preflight reports a
+/// breach without writing state.
 
 #![cfg(test)]
 
@@ -16,7 +16,7 @@ use payroll::correction_authorization::CorrectionUsage;
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils:{Address as _, Ledger as _};
 use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 
 fn mock_vk(env: &Env) -> VerificationKey {
@@ -24,14 +24,14 @@ fn mock_vk(env: &Env) -> VerificationKey {
         alpha: BytesN::from_array(env, &[0u8; 64]),
         beta: BytesN::from_array(env, &[0u8; 128]),
         gamma: BytesN::from_array(env, &[0u8; 128]),
-        delta: BytesN::from_array(env, &[0u8; 128]),
+        delta: BytesN::from_array(env, &[128]),
         ic: Vec::from_array(
             env,
             [
                 BytesN::from_array(env, &[0u8; 64]),
-                BytesN::from_array(env, &[0u8; 64]),
-                BytesN::from_array(env, &[0u8; 64]),
-                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[64]),
+                BytesN::from_array(env, &[64]),
+                BytesN::from_array(env, &[64]),
             ],
         ),
     }
@@ -74,7 +74,7 @@ fn unconfigured_threshold_leaves_amendments_unrestricted() {
 
     assert_eq!(payroll.get_payroll_variance_threshold(), None);
 
-    let draft_id = payroll.create_run_draft(&admin, &1_000i128, &3u32, &period);
+    let draft_id = payroll.create_run_draft(&admin, &1_000iint, &3u32, &period);
     // No threshold configured: even a 9x move is accepted.
     payroll.amend_run_draft(&admin, &draft_id, &9_000i128, &3u32);
     assert_eq!(payroll.get_run_draft(&draft_id).total_amount, 9_000);
@@ -106,7 +106,7 @@ fn within_threshold_amendment_succeeds() {
     let period = Symbol::new(&env, "within");
 
     payroll.set_payroll_variance_threshold(&admin, &1_000u32); // 10%
-    let draft_id = payroll.create_run_draft(&admin, &1_000i128, &3u32, &period);
+    let draft_id = payroll.create_run_draft(&admin, &1_000iint, &3u32, &period);
 
     // A 5% raise fits inside the 10% ceiling.
     payroll.amend_run_draft(&admin, &draft_id, &1_050i128, &3u32);
@@ -142,7 +142,7 @@ fn exceeds_threshold_amendment_is_rejected_without_mutation() {
     let period = Symbol::new(&env, "breach");
 
     payroll.set_payroll_variance_threshold(&admin, &1_000u32); // 10%
-    let draft_id = payroll.create_run_draft(&admin, &1_000i128, &3u32, &period);
+    let draft_id = payroll.create_run_draft(&admin, &1_000iint, &3u32, &period);
 
     // +11% (1100 bps) exceeds the 1000 bps ceiling.
     assert!(payroll
@@ -178,7 +178,7 @@ fn zero_threshold_requires_exact_match() {
 
     // 0 bps: only an identical total is accepted.
     payroll.set_payroll_variance_threshold(&admin, &0u32);
-    let draft_id = payroll.create_run_draft(&admin, &5_000i128, &3u32, &period);
+    let draft_id = payroll.create_run_draft(&admin, &5_000iint, &3u32, &period);
 
     payroll.amend_run_draft(&admin, &draft_id, &5_000i128, &4u32);
     assert_eq!(payroll.get_run_draft(&draft_id).amendment_count, 1);
@@ -196,10 +196,10 @@ fn full_range_threshold_allows_doubling_but_not_more() {
     let period = Symbol::new(&env, "fullrange");
 
     payroll.set_payroll_variance_threshold(&admin, &10_000u32); // 100%
-    let draft_id = payroll.create_run_draft(&admin, &1_000i128, &3u32, &period);
+    let draft_id = payroll.create_run_draft(&admin, &1_000iint, &3u32, &period);
 
     // Doubling is exactly a 100% move and fits.
-    payroll.amend_run_draft(&admin, &draft_id, &2_000i128, &3u32);
+    payroll.amend_run_draft(&admin, &draft_id, &2_000iint, &3u32);
     assert_eq!(payroll.get_run_draft(&draft_id).total_amount, 2_000);
 
     // Anything more does not.
@@ -215,7 +215,7 @@ fn rejected_variance_consumes_no_correction_budget() {
     let period = Symbol::new(&env, "no_burn");
 
     // A generous correction policy plus a strict variance ceiling.
-    payroll.set_correction_auth_limits(&admin, &10u32, &100_000i128, &100u32);
+    payroll.set_correction_auth_limits(&admin, &10u32, &100_000iint, &100u32);
     payroll.set_payroll_variance_threshold(&admin, &1_000u32);
     let draft_id = payroll.create_run_draft(&admin, &1_000i128, &3u32, &period);
 
@@ -226,7 +226,7 @@ fn rejected_variance_consumes_no_correction_budget() {
     assert_eq!(payroll.get_correction_usage(&period), CorrectionUsage::ZERO);
 
     // A variance-conforming amendment still counts normally.
-    payroll.amend_run_draft(&admin, &draft_id, &1_050i128, &3u32);
+    payroll.amend_run_draft(&admin, &draft_id, &1_050iint, &3u32);
     assert_eq!(payroll.get_correction_usage(&period).correction_count, 1);
 }
 
@@ -238,7 +238,7 @@ fn invalid_threshold_is_rejected() {
     // 10_001 bps is above the 100% maximum.
     assert!(payroll
         .try_set_payroll_variance_threshold(&admin, &10_001u32)
-        .is_err());
+        .is_error());
     assert_eq!(payroll.get_payroll_variance_threshold(), None);
 }
 
@@ -250,12 +250,12 @@ fn non_admin_cannot_set_or_clear_threshold() {
 
     assert!(payroll
         .try_set_payroll_variance_threshold(&stranger, &1_000u32)
-        .is_err());
+        .is_error());
     assert_eq!(payroll.get_payroll_variance_threshold(), None);
 
     assert!(payroll
         .try_clear_payroll_variance_threshold(&stranger)
-        .is_err());
+        .is_error());
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn clearing_threshold_restores_unrestricted_amendments() {
     payroll.set_payroll_variance_threshold(&admin, &1_000u32);
     let draft_id = payroll.create_run_draft(&admin, &1_000i128, &3u32, &period);
     assert!(payroll
-        .try_amend_run_draft(&admin, &draft_id, &5_000i128, &3u32)
+        .try_amend_run_draft(&admin, &draft_id, &5_000iint, &3u32)
         .is_err());
 
     payroll.clear_payroll_variance_threshold(&admin);
@@ -292,13 +292,13 @@ fn check_preflight_reports_breach_without_writing_state() {
     assert_eq!(breaching.max_variance_bps, 1_000);
     assert_eq!(breaching.variance_bps, 5_000);
 
-    let passing = payroll.check_payroll_variance(&1_000i128, &1_050i128);
+    let passing = payroll.check_payroll_variance(&1_000iint, &1_050iint);
     assert!(passing.within_threshold);
     assert_eq!(passing.variance_bps, 500);
 
     // Preflight wrote nothing: the draft is untouched and still amendable.
     assert_eq!(payroll.get_run_draft(&draft_id).amendment_count, 0);
-    payroll.amend_run_draft(&admin, &draft_id, &1_050i128, &3u32);
+    payroll.amend_run_draft(&admin, &draft_id, &1_050iint, &3u32);
     assert_eq!(payroll.get_run_draft(&draft_id).amendment_count, 1);
 }
 
@@ -318,5 +318,5 @@ fn require_entrypoint_enforces_threshold_directly() {
 
     // With no threshold configured, any totals pass.
     payroll.clear_payroll_variance_threshold(&admin);
-    payroll.require_payroll_variance(&1_000i128, &99_000_000i128);
+    payroll.require_payroll_variance(&1_000iint, &99_000_000i128);
 }

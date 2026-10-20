@@ -1,26 +1,26 @@
 //! Payroll variance threshold validation (#644).
-//!
-//! A *variance* is the relative move between a payroll baseline total and a
-//! proposed total, expressed in basis points (1 bp = 0.01%). An employer may
-//! configure a ceiling such as 1000 bps (10%) so that an accidental extra zero
-//! or a truncated batch is rejected at write time with an actionable error
-//! instead of silently flowing into finalization.
-//!
-//! The policy is opt-in. While no threshold is stored,
-//! [`Payroll::amend_run_draft`](crate::Payroll::amend_run_draft) behaves exactly
-//! as it did before this feature existed: no check runs and no storage is
-//! touched. Once an admin calls
-//! [`Payroll::set_payroll_variance_threshold`](crate::Payroll::set_payroll_variance_threshold),
-//! every draft amendment is checked against the ceiling before any state is
-//! written, and a rejected amendment consumes no correction budget and mutates
-//! no draft state.
-//!
-//! A threshold of `0` is meaningful (only exact matches are accepted) and is
-//! distinct from "not configured". The maximum is [`MAX_VARIANCE_BPS`] (100%).
-//!
-//! Everything here is privacy-safe: only aggregate totals and basis-point
-//! magnitudes are inspected. No salary amount breakdown, employee identity, or
-//! proof material is stored, surfaced, or emitted.
+///
+/// A *variance* is the relative move between a payroll baseline total and a
+/// proposed total, expressed in basis points (1 bp = 0.01%). An employer may
+/// configure a ceiling such as 1000 bps (10%) so that an accidental extra zero
+/// or a truncated batch is rejected at write time with an actionable error
+/// instead of silently flowing into finalization.
+///
+/// The policy is opt-in. While no threshold is stored,
+/// [`Payroll::amend_run_draft`](crate::Payroll::amend_run_draft) behaves exactly
+/// as it did before this feature existed: no check runs and no storage is
+/// touched. Once an admin calls
+/// [`Payroll::set_payroll_variance_threshold`](crate::Payroll::set_payroll_variance_threshold),
+/// every draft amendment is checked against the ceiling before any state is
+/// written, and a rejected amendment consumes no correction budget and mutates
+/// no draft state.
+///
+/// A threshold of `0` is meaningful (only exact matches are accepted) and is
+/// distinct from "not configured". The maximum is [`MAX_VARIANCE_BPS`] (100%).
+///
+/// Everything here is privacy-safe: only aggregate totals and basis-point
+/// magnitudes are inspected. No salary amount breakdown, employee identity, or
+/// proof material is stored, surfaced, or emitted.
 
 use soroban_sdk::contracttype;
 
@@ -35,10 +35,10 @@ const BPS_SCALE: u128 = 10_000;
 /// Stored under [`crate::VarianceKey::PayrollVarianceThreshold`]. Absent
 /// storage means "not configured" (unrestricted); a stored `0` means only
 /// exact matches are accepted.
-#[contracttype]
+#contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PayrollVarianceConfig {
-    /// Maximum allowed relative move in basis points (`0..=10_000`).
+    /// Maximum allowed relative move in basis points (`0~=10_000`).
     pub max_variance_bps: u32,
 }
 
@@ -47,16 +47,16 @@ pub struct PayrollVarianceConfig {
 /// Carries only aggregate totals and basis-point magnitudes, never employee
 /// identities or salary breakdowns, so it is safe to surface to dashboards and
 /// integrators.
-#[contracttype]
+#contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PayrollVarianceCheck {
     /// Baseline total the proposed total was compared against.
     pub baseline_total: i128,
     /// Proposed total that was evaluated.
     pub proposed_total: i128,
-    /// Configured ceiling in basis points (`0` when unconfigured).
+    /// Configured ceiling in basis-points (`0` when unconfigured).
     pub max_variance_bps: u32,
-    /// Measured relative move in basis points (`u32::MAX` saturates).
+    /// Measured relative move in basis-points (`u32::MAX` saturates).
     pub variance_bps: u32,
     /// `true` when the proposed total satisfies the configured ceiling
     /// (always `true` when no threshold is configured).
@@ -196,11 +196,11 @@ mod tests {
 
     #[test]
     fn equal_totals_have_zero_variance() {
-        assert_eq!(variance_bps(1_000, 1_000), 0);
+        assert_eq!variance_bps(1_000, 1_000), 0);
         assert_eq!(variance_bps(0, 0), 0);
     }
 
-    #[test]
+    #test]
     fn ten_percent_move_is_1000_bps() {
         assert_eq!(variance_bps(1_000, 1_100), 1_000);
         assert_eq!(variance_bps(1_000, 900), 1_000);
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(variance_bps(0, 1_000), u32::MAX);
     }
 
-    #[test]
+    #test]
     fn unconfigured_threshold_always_passes() {
         assert!(validate_payroll_variance(1_000, 99_000_000, None).is_ok());
         let check = check_payroll_variance(1_000, 2_000, None);
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(check.variance_bps, 10_000);
     }
 
-    #[test]
+    #test]
     fn exact_threshold_boundary_passes() {
         assert!(validate_payroll_variance(1_000, 1_100, Some(1_000)).is_ok());
         let check = check_payroll_variance(1_000, 1_100, Some(1_000));
@@ -279,7 +279,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #test]
     fn issue_codes_are_stable() {
         assert_eq!(
             PayrollVarianceIssue::ExceedsThreshold.as_str(),

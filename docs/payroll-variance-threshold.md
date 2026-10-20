@@ -12,22 +12,29 @@ instead of letting it flow into `finalize_run_draft` and execution.
 
 ## Rules
 
-The ceiling is configured in **basis points** (`0..=10_000`, where `10_000`
-is 100%) via `set_payroll_variance_threshold`:
+Exactly one of the following policies applies at any time:
 
-| Case | Behaviour |
-|------|-----------|
-| No threshold stored | Amendments are unrestricted (pre-existing behaviour). |
-| `max_variance_bps = 0` | Only exact matches are accepted (strictest policy). |
-| `0 < max <= 10_000` | Amendments whose measured variance `<= max` are accepted. |
-| `max > 10_000` | Rejected at configuration time. |
-| `baseline <= 0` or `proposed <= 0` | Rejected; no relative move can be computed. |
+- **Unrestricted (default)** — no threshold is stored, so amendments are not
+variance-checked. This preserves pre-existing behaviour for runs that never
+opted in.
+- **Strict zero-basis-point ceiling** — `set_payroll_variance_threshold(0)
+accepts only exact matches. It is a valid configuration, distinct from
+unrestricted.
+- **Positive ceiling** — `set_payroll_variance_threshold(max)` with
+`1 <= max <= 10000 accepts any amendment whose measured variance is less
+than or equal to `max`. A value greater than 10000 is rejected at
+configuration time.
 
 Measurement: `variance_bps = |proposed - baseline| * 10_000 / baseline`,
 integer division (rounds down), saturating to `u32::MAX` on overflow.
-Boundaries are inclusive: with a `1_000` bps (10%) ceiling, `1_000 -> 1_110`
-(1100 bps) is rejected while `1_000 -> 1_100` (exactly 1000 bps) is accepted.
-Raising and lowering are symmetric: `1_000 -> 900` is also exactly 1000 bps.
+Boundaries are inclusive: with a 1_000 bps (10%) ceiling, 1_000 -> 1_110
+(1100 bps) is rejected while 1_000 -> 1_100 (exactly 1000 bps) is accepted.
+Raising and lowering are symmetric: 1_000 -> 900 is also exactly 1000 bps.
+
+If either side of the comparison is non-positive, no relative move can be
+computed. The amendment path rejects non-positive totals at the pre-existing
+amount gate before the variance math runs, and the preflight helpers report a
+structured issue code for non-positive inputs.
 
 ## Order of operations in `amend_run_draft`
 
@@ -70,9 +77,9 @@ Soroban 50-case spec ceiling).
 
 All messages name the one thing the caller must change:
 
-- `"Variance threshold must not exceed 10000 basis points (100%)"` —
+-` "Variance threshold must not exceed 10000 basis-points (100%)"` —
   reconfigure with a value in range.
-- `"Payroll variance threshold exceeded: proposed total deviates {measured}
+- "Payroll variance threshold exceeded: proposed total deviates {measured}
   bps from baseline, above the {max} bps maximum; adjust the amendment or
   raise the threshold"` — shrink the amendment or deliberately raise the
   ceiling.
