@@ -24,3 +24,28 @@ Errors are stable contract errors: `7830` invalid group reference, `7831`
 invalid interval, `7832` start in past, `7833` start beyond the scheduling
 horizon, `7834` overlapping interval, `7835` history too large, `7836` not
 yet effective, and `7837` expired. Timestamp arithmetic is overflow-safe.
+
+## Payout confirmation reconciliation (#784)
+
+`reconcile_payout_confirmations(run_id, expected, confirmations)` returns the
+expected, confirmed, pending, and failed counts and a `ReconciliationStatus`.
+Payouts are matched by opaque `payout_ref`, independently of receipt order.
+Run IDs, asset addresses, beneficiary references, and amount references must
+match exactly. Both input vectors are limited to 50 records, and duplicate or
+unknown payout IDs are errors. A confirmed payout requires a nonzero transaction
+reference and a confirmation timestamp in `(0, current_ledger_timestamp]`.
+One transaction may legitimately confirm several distinct payouts.
+
+Missing receipts count as pending. Pending/failed receipts must not carry a
+confirmation timestamp. Any failed receipt yields `Failed`; otherwise any
+pending payout yields `Unreconciled`; only a completely confirmed set yields
+`Reconciled`. Empty expectation lists cannot reconcile successfully.
+
+This is evidence consistency checking, not independent verification that a
+transfer occurred. Callers must authenticate receipts and expected payouts.
+The report does not update a run or call `update_reconciliation_status`.
+Only hashes/references are supplied, never plaintext salary amounts.
+
+Errors: `7840` invalid/mismatched run, `7841` empty expectations, `7842` input
+too large, `7843` invalid reference, `7844` duplicate payout, `7845` unknown
+payout, `7846` mismatched payout details, and `7847` invalid confirmation time.

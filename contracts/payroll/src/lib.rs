@@ -240,6 +240,13 @@ pub mod pay_group_effective_date;
 mod validation_entrypoints;
 pub use pay_group_effective_date::{PayGroupDateError, PayGroupEffectivePeriod, PayGroupValidation};
 
+/// Payout confirmation reconciliation preflight (#784).
+pub mod payout_confirmation;
+pub use payout_confirmation::{
+    ExpectedPayout, PayoutConfirmation, PayoutConfirmationError, PayoutConfirmationStatus,
+    PayoutConfirmationValidation, PayoutReconciliation,
+};
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContractAddresses {
