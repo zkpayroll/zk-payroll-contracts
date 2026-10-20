@@ -251,6 +251,13 @@ pub use payout_confirmation::{
 pub mod ledger_export;
 pub use ledger_export::{LedgerExportError, LedgerExportValidation, LedgerExportVerification};
 
+/// Beneficiary verification status checks (#786).
+pub mod beneficiary_verification;
+pub use beneficiary_verification::{
+    BeneficiaryStatusValidation, BeneficiaryVerification, BeneficiaryVerificationError,
+    BeneficiaryVerificationStatus,
+};
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContractAddresses {

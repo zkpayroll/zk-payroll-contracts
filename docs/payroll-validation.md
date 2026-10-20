@@ -71,3 +71,37 @@ retrying. Empty exports cannot be reported as successfully reconciled ranges.
 Errors: `7850` invalid range, `7851` page too large, `7852` entry-count mismatch,
 `7853` nonconsecutive revisions, `7854` unavailable canonical entries, and
 `7855` an exported entry differs from storage.
+
+## Beneficiary verification status (#786)
+
+`check_beneficiary_status(beneficiary, verification)` accepts only a matching
+`Verified` record with a nonzero evidence reference, a nonzero verification
+timestamp at or before the ledger time, and an unexpired validity interval.
+Pending, rejected, revoked, missing, or mismatched records fail with distinct
+errors. Expiry is exclusive: a record is expired at `expires_at`. Zero expiry
+means indefinite validity; a finite expiry must follow `verified_at`.
+
+The record is not mutated when it expires. Only an evidence hash is accepted;
+identity documents and their contents must remain off-chain. This preflight
+checks a supplied record's status and dates, not an issuer's signature or
+identity evidence. The existing contract has no beneficiary-verification
+registry. Integrators must fetch/authenticate the record from their verifier
+before calling this check and enforce a successful result in their payout
+workflow. This API does not add a new mandatory gate to legacy payroll calls.
+
+Errors: `7860` missing record, `7861` beneficiary mismatch, `7862` pending,
+`7863` rejected, `7864` revoked, `7865` missing evidence, `7866` invalid dates,
+and `7867` expired. These checks cannot issue verification decisions.
+
+## Integration and tests
+
+The public validation traits and Soroban types are exported by the payroll
+crate, and the methods are part of the `Payroll` contract interface. All new
+methods are read-only; no storage migration or new authorization role is
+required. Call the date/status checks before the integrating flow commits any
+state or transfers funds. Authenticate off-chain records separately.
+
+Inline Rust tests cover success, rejection, and boundary cases for every API.
+Run `cargo test -p payroll --lib` for the module tests, and the normal workspace
+format, clippy, and test checks before merging. These additions do not require
+changes to the ZK circuits or trusted setup.
