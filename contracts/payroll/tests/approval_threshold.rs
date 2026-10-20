@@ -266,6 +266,72 @@ fn change_request_requires_a_fresh_quorum() {
 }
 
 #[test]
+fn review_decisions_store_complete_reasons() {
+    let env = Env::default();
+    let fx = setup_with_reviewers(&env, 2);
+    let run_id = prepare_run(&env, &fx, 1);
+    let reason = Symbol::new(&env, "policy");
+
+    fx.client
+        .reject_payroll_run(&reviewer(&fx, 0), &run_id, &reason);
+    let review = fx.client.get_run_review(&run_id).unwrap();
+    assert_eq!(review.decision, payroll::ReviewDecision::Rejected);
+    assert_eq!(review.reason, reason);
+
+    let changes_reason = Symbol::new(&env, "missing_docs");
+    fx.client.request_changes_payroll_run(
+        &reviewer(&fx, 1),
+        &run_id,
+        &changes_reason,
+    );
+    let review = fx.client.get_run_review(&run_id).unwrap();
+    assert_eq!(review.decision, payroll::ReviewDecision::ChangesRequested);
+    assert_eq!(review.reason, changes_reason);
+}
+
+#[test]
+fn empty_review_reasons_are_rejected_without_changing_run_state() {
+    let env = Env::default();
+    let fx = setup_with_reviewers(&env, 2);
+    fx.client.set_approval_threshold(&fx.admin, &2);
+    let run_id = prepare_run(&env, &fx, 1);
+    fx.client.approve_payroll_run(&reviewer(&fx, 0), &run_id);
+    let empty_reason = Symbol::new(&env, "");
+
+    assert!(fx
+        .client
+        .try_reject_payroll_run(&reviewer(&fx, 1), &run_id, &empty_reason)
+        .is_err());
+    assert!(fx
+        .client
+        .try_request_changes_payroll_run(&reviewer(&fx, 1), &run_id, &empty_reason)
+        .is_err());
+    assert_eq!(fx.client.get_approval_progress(&run_id).approved, 1);
+    assert!(fx.client.get_run_review(&run_id).is_some());
+}
+
+#[test]
+fn invalid_run_id_is_rejected_for_review_decisions() {
+    let env = Env::default();
+    let fx = setup_with_reviewers(&env, 1);
+    let reviewer = reviewer(&fx, 0);
+    let reason = Symbol::new(&env, "policy");
+
+    assert!(fx
+        .client
+        .try_approve_payroll_run(&reviewer, &u64::MAX)
+        .is_err());
+    assert!(fx
+        .client
+        .try_reject_payroll_run(&reviewer, &u64::MAX, &reason)
+        .is_err());
+    assert!(fx
+        .client
+        .try_request_changes_payroll_run(&reviewer, &u64::MAX, &reason)
+        .is_err());
+}
+
+#[test]
 fn withdrawn_approval_stops_counting_without_resetting_quorum() {
     let env = Env::default();
     let fx = setup_with_reviewers(&env, 3);

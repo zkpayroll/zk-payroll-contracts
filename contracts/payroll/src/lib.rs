@@ -8826,8 +8826,9 @@ impl Payroll {
     ///
     /// Each reviewer may hold at most one live approval per run; a repeated
     /// approval is rejected rather than counted twice toward the approval
-    /// threshold.
+    /// threshold. The reserved invalid run ID is rejected.
     pub fn approve_payroll_run(e: Env, reviewer: Address, run_id: u64) {
+        Self::validate_run_id(run_id);
         Self::require_not_paused(&e);
         if !Self::is_reviewer(e.clone(), reviewer.clone()) {
             panic!("Unauthorized: caller is not an authorized reviewer");
@@ -8851,8 +8852,11 @@ impl Payroll {
     }
 
     /// Reject a payroll run as an authorized reviewer. Clears every recorded
-    /// approval for the run.
+    /// approval for the run. A non-empty reason is required for a complete
+    /// audit record.
     pub fn reject_payroll_run(e: Env, reviewer: Address, run_id: u64, reason: Symbol) {
+        Self::validate_run_id(run_id);
+        Self::validate_symbol_not_empty(&e, &reason, "reason");
         Self::require_not_paused(&e);
         if !Self::is_reviewer(e.clone(), reviewer.clone()) {
             panic!("Unauthorized: caller is not an authorized reviewer");
@@ -8876,8 +8880,11 @@ impl Payroll {
     }
 
     /// Request changes to a payroll run as an authorized reviewer. Clears
-    /// every recorded approval for the run.
+    /// every recorded approval for the run. A non-empty reason is required
+    /// for a complete audit record.
     pub fn request_changes_payroll_run(e: Env, reviewer: Address, run_id: u64, reason: Symbol) {
+        Self::validate_run_id(run_id);
+        Self::validate_symbol_not_empty(&e, &reason, "reason");
         Self::require_not_paused(&e);
         if !Self::is_reviewer(e.clone(), reviewer.clone()) {
             panic!("Unauthorized: caller is not an authorized reviewer");

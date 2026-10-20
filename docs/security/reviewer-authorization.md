@@ -78,6 +78,12 @@ An authorized reviewer can submit one of three review decisions for a `run_id`:
 
 A reviewer may hold only one live approval per run; approving again is rejected with `Duplicate approval: reviewer has already approved this payroll run`. Rejecting or requesting changes clears every recorded approval for the run, so a fresh quorum is needed afterwards.
 
+Every review decision requires a valid, non-reserved `run_id`. Rejections and
+change requests must also include a non-empty reason symbol; invalid inputs
+are rejected before the review record, approval list, or event is changed.
+This ensures stored decisions and their audit events include the reason needed
+to explain an objection.
+
 Approval corrections (#522) keep the threshold consistent without resetting the quorum:
 - `withdraw_approval(reviewer, run_id, reason)` records `ReviewDecision::Withdrawn` and removes only that reviewer's approval from the count. A withdrawal is not treated as an objection.
 - `supersede_approval(reviewer, run_id)` moves the counted approval from the previous approver to `reviewer`. It is rejected with the duplicate-approval message if `reviewer` already holds a live approval.
