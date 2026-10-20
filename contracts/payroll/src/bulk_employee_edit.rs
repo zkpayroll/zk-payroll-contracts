@@ -1,4 +1,4 @@
-/// Bulk employee edit concurrency controls (Issue #655).
+//! Bulk employee edit concurrency controls (Issue #655).
 //!
 //! Enables editing multiple employee records in a single operation while
 //! ensuring version consistency across all records. If any employee's version
@@ -11,8 +11,8 @@
 //!   exposed in error messages or return values.
 //! - The operation is atomic: either all updates succeed or none do.
 
-use soroban_sdk::{contracttype, BytesN};
-use shared_errors::StorageError;
+use crate::employee_record_version::EmployeeRecord;
+use soroban_sdk::{contracttype, BytesN, String};
 
 /// Represents a single employee update in a bulk edit operation.
 #[contracttype]
@@ -29,7 +29,6 @@ pub struct BulkEmployeeEdit {
 }
 
 /// Error returned when a version conflict is detected during a bulk edit.
-#[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BulkEditError {
     /// At least one employee's version has changed since the edit was initiated.
@@ -68,22 +67,27 @@ pub struct BulkEditResult {
 /// Checks for version conflicts across a batch of employee edits.
 /// #
 /// # Arguments
-/// - `current_versions`: A map of employee_id -> current version from storage
+/// - `current_versions`: `(employee_id, current_version)` pairs from storage
 /// - `edits`: The batch of edits to validate
 ///
 /// # Returns
 /// - `Ok(())` if no conflicts detected
 /// - `Err(BulkEditError::VersionConflict)` if any employee version mismatch
 pub fn check_bulk_edit_conflicts(
-    current_versions: &std::collections::BTreeMap<u64, u64>,
+    current_versions: &[(u64, u64)],
     edits: &[BulkEmployeeEdit],
 ) -> Result<(), BulkEditError> {
     for edit in edits {
-        let current_version = match current_versions.get(&edit.employee_id) {
-            Some(&v) => v,
-            None => return Err(BulkEditError::EmployeeNotFound {
-                employee_id: edit.employee_id,
-            }),
+        let current_version = match current_versions
+            .iter()
+            .find(|(id, _)| *id == edit.employee_id)
+        {
+            Some(&(_, v)) => v,
+            None => {
+                return Err(BulkEditError::EmployeeNotFound {
+                    employee_id: edit.employee_id,
+                })
+            }
         };
 
         if current_version != edit.expected_version {
@@ -104,9 +108,7 @@ pub fn check_bulk_edit_conflicts(
 ///
 /// # Returns
 /// - A `BulkEditResult` indicating how many records were updated
-pub fn increment_bulk_employee_versions(
-    records: &mut [EmployeeRecord],
-) -> BulkEditResult {
+pub fn increment_bulk_employee_versions(records: &mut [EmployeeRecord]) -> BulkEditResult {
     let mut updated_count = 0u32;
 
     for record in records.iter_mut() {
@@ -116,98 +118,76 @@ pub fn increment_bulk_employee_versions(
 
     BulkEditResult {
         updated_count,
-        fully_successful: updated_count == records.len() as u32 && records.len() > 0,
+        fully_successful: updated_count == records.len() as u32 && !records.is_empty(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use employee_record_version::EmployeeRecord;
+    use soroban_sdk::Env;
+
+    fn edit(env: &Env, employee_id: u64, expected_version: u64, marker: u8) -> BulkEmployeeEdit {
+        BulkEmployeeEdit {
+            employee_id,
+            expected_version,
+            new_salary_commitment: BytesN::from_array(env, &[marker; 32]),
+            new_is_suspended: marker != 0,
+        }
+    }
+
+    fn record(env: &Env, employee_id: u64, version: u64, marker: u8) -> EmployeeRecord {
+        EmployeeRecord {
+            employee_id,
+            version,
+            salary_commitment: BytesN::from_array(env, &[marker; 32]),
+            is_suspended: marker != 0,
+            updated_at: 0,
+        }
+    }
 
     #[test]
     fn test_bulk_edit_no_conflict() {
-        let mut current_versions = std::collections::BTreeMap::new();
-        current_versions.insert(1, 5);
-        current_versions.insert(2, 3);
-
-        let edits = vec![
-            BulkEmployeeEdit {
-                employee_id: 1,
-                expected_version: 5,
-                new_salary_commitment: BytesN::from_array(&[0u8; 32]),
-                new_is_suspended: false,
-            },
-            BulkEmployeeEdit {
-                employee_id: 2,
-                expected_version: 3,
-                new_salary_commitment: BytesN::from_array(&[1u8; 32]),
-                new_is_suspended: true,
-            },
-        ];
+        let env = Env::default();
+        let current_versions = [(1, 5), (2, 3)];
+        let edits = [edit(&env, 1, 5, 0), edit(&env, 2, 3, 1)];
 
         assert!(check_bulk_edit_conflicts(&current_versions, &edits).is_ok());
     }
 
     #[test]
     fn test_bulk_edit_version_conflict() {
-        let mut current_versions = std::collections::BTreeMap::new();
-        current_versions.insert(1, 5); // version changed to 6
-
-        let edits = vec![BulkEmployeeEdit {
-            employee_id: 1,
-            expected_version: 5, // caller had old version 5
-            new_salary_commitment: BytesN::from_array(&[0u8; 32]),
-            new_is_suspended: false,
-        }];
+        let env = Env::default();
+        let current_versions = [(1, 6)]; // version changed to 6
+        let edits = [edit(&env, 1, 5, 0)]; // caller had old version 5
 
         let result = check_bulk_edit_conflicts(&current_versions, &edits);
-        assert!(matches!(
+        assert_eq!(
             result,
             Err(BulkEditError::VersionConflict {
                 employee_id: 1,
                 current_version: 6,
                 expected_version: 5
             })
-        ));
+        );
     }
 
     #[test]
     fn test_bulk_edit_employee_not_found() {
-        let current_versions = std::collections::BTreeMap::new();
+        let env = Env::default();
+        let edits = [edit(&env, 999, 1, 0)];
 
-        let edits = vec![BulkEmployeeEdit {
-            employee_id: 999,
-            expected_version: 1,
-            new_salary_commitment: BytesN::from_array(&[0u8; 32]),
-            new_is_suspended: false,
-        }];
-
-        let result = check_bulk_edit_conflicts(&current_versions, &edits);
-        assert!(matches!(
+        let result = check_bulk_edit_conflicts(&[], &edits);
+        assert_eq!(
             result,
             Err(BulkEditError::EmployeeNotFound { employee_id: 999 })
-        ));
+        );
     }
 
     #[test]
     fn test_increment_bulk_employee_versions() {
-        let mut records = vec![
-            EmployeeRecord {
-                employee_id: 1,
-                version: 5,
-                salary_commitment: BytesN::from_array(&[0u8; 32]),
-                is_suspended: false,
-                updated_at: 0,
-            },
-            EmployeeRecord {
-                employee_id: 2,
-                version: 3,
-                salary_commitment: BytesN::from_array(&[1u8; 32]),
-                is_suspended: true,
-                updated_at: 0,
-            },
-        ];
+        let env = Env::default();
+        let mut records = [record(&env, 1, 5, 0), record(&env, 2, 3, 1)];
 
         let result = increment_bulk_employee_versions(&mut records);
 
@@ -219,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_increment_bulk_employee_versions_empty() {
-        let mut records: Vec<EmployeeRecord> = vec![];
+        let mut records: [EmployeeRecord; 0] = [];
 
         let result = increment_bulk_employee_versions(&mut records);
 

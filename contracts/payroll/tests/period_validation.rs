@@ -9,8 +9,8 @@
 /// The comparison order is chronological.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeriodId {
-    public year: u16,
-    public month: u8,
+    pub year: u16,
+    pub month: u8,
 }
 
 /// Errors produced by the period validation guard.
@@ -42,7 +42,7 @@ pub const MAX_SEQUENCE_MONTHS_APROAD: u32 = 1;
 ///
 /// Returns `Err(MissingPeriod)` for empty input and `Err(MalformedPeriod)`
 /// for any other non-conforming input.
-pub fn parse_period_id(raw: &Option<String>) > Result<PeriodId, PeriodValidationError> {
+pub fn parse_period_id(raw: &Option<String>) -> Result<PeriodId, PeriodValidationError> {
     let raw = match raw {
         Some(value) if !value.trim().is_empty() => value.trim(),
         _ => return Err(PeriodValidationError::MissingPeriod),

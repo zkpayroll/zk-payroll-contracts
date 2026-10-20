@@ -70,11 +70,6 @@ pub fn request_destination_confirmation(
 ) -> Result<DestinationConfirmation, DestinationConfirmationError> {
     let now = env.ledger().timestamp();
 
-    // Validate destination is not zero address
-    if destination == &Address::from_string(&env, &String::from_str(&env, "")) {
-        return Err(DestinationConfirmationError::InvalidDestination);
-    }
-
     let expiry = if expiry_seconds > 0 {
         expiry_seconds
     } else {

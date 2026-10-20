@@ -1,16 +1,16 @@
 //! Payroll period configuration freeze guard tests (#248).
-///
-/// Covers: editable periods still accept configuration edits, explicit admin
-/// freezes block further edits, settlement-ready periods are implicitly
-/// frozen, submitting a run freezes the period it was prepared under, and
-/// non-admin freeze attempts are rejected.
+//!
+//! Covers: editable periods still accept configuration edits, explicit admin
+//! freezes block further edits, settlement-ready periods are implicitly
+//! frozen, submitting a run freezes the period it was prepared under, and
+//! non-admin freeze attempts are rejected.
 
 #![cfg(test)]
 
 use ::token::{Token, TokenClient};
 use payroll::{Payroll, PayrollClient, PeriodConfigState, SettlementWindowStatus};
-use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
-use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 use soroban_sdk:testutils:{Address as_, Ledger as_ };
 use soroban_sdk:{Address, BytesN, Env, Symbol, Vec};
 
@@ -63,7 +63,7 @@ fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Ad
     let treasury = Address::generate(env);
     let admin = Address::generate(env);
     let treasury_owner = Address::generate(env);
-    token_client.mint(&treasury, &`1_000_000i128`);
+    token_client.mint(&treasury, &1_000_000i128);
 
     payroll_client.initialize(
         &admin,
