@@ -235,6 +235,11 @@ const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 #[contract]
 pub struct Payroll;
 
+/// Pay-group effective-date validation (#783).
+pub mod pay_group_effective_date;
+mod validation_entrypoints;
+pub use pay_group_effective_date::{PayGroupDateError, PayGroupEffectivePeriod, PayGroupValidation};
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContractAddresses {
