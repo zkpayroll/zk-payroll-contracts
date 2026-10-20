@@ -179,6 +179,13 @@ pub use delegation_audit::{
     MAX_DELEGATION_AUDIT_PAGE,
 };
 
+/// Stalled payroll run recovery guidance (#XXX).
+pub mod stalled_run_recovery;
+pub use stalled_run_recovery::{
+    assess_stalled_run_recovery, StalledRunRecoveryAction, StalledRunRecoveryAssessment,
+    StalledRunRecoveryError, StalledRunRecoveryReason, STALLED_RUN_THRESHOLD_SECONDS,
+};
+
 const MAX_BATCH: u32 = 50;
 const MAX_DRAFT_DESCRIPTION_BYTES: u32 = 256;
 
@@ -1495,6 +1502,8 @@ pub enum DataKey {
     MemoHash(Address, Symbol, BytesN<32>),
     /// Latest accounting reconciliation marker for a payroll run (#722).
     ReconciliationMarker(u64),
+    /// Latest stalled-run recovery assessment recorded for a payroll run.
+    StalledRunRecoveryMarker(u64),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -1859,6 +1868,43 @@ impl Payroll {
     /// allowlist, company state) are rejected (issue #253).
     pub fn has_active_payroll_run(e: Env) -> bool {
         Self::pending_payroll_run_count(&e) > 0
+    }
+
+    /// Read-only recovery guidance for a stalled payroll run.
+    ///
+    /// A run is considered stalled when it is still pending (prepared but not
+    /// finalized or cancelled) and has been in that state for at least
+    /// [`STALLED_RUN_THRESHOLD_SECONDS`]. The assessment is privacy-safe: it
+    /// exposes only operational state, timestamps, and the recommended next
+    /// action — never employee identities, salary amounts, or proof material.
+    ///
+    /// Returns `None` when the run does not exist or is not pending, so
+    /// integrators can distinguish "nothing to recover" from "stalled, act now".
+    pub fn get_stalled_run_recovery(
+        e: Env,
+        run_id: u64,
+    ) -> Option<StalledRunRecoveryAssessment> {
+        stalled_run_recovery::assess(&e, run_id)
+    }
+
+    /// Record a stalled-run recovery assessment for a pending run.
+    ///
+    /// Only the admin may call this. The run must exist and be pending; the
+    /// assessment is persisted as a privacy-safe marker so dashboards and
+    /// indexers can observe that recovery guidance was surfaced. Rejects runs
+    /// that are not yet stalled with an actionable error.
+    pub fn record_stalled_run_recovery(
+        e: Env,
+        admin: Address,
+        run_id: u64,
+    ) -> StalledRunRecoveryAssessment {
+        admin.require_auth();
+        Self::require_admin(&e, &admin);
+        let assessment = stalled_run_recovery::require_stalled(&e, run_id);
+        e.storage()
+            .persistent()
+            .set(&DataKey::StalledRunRecoveryMarker(run_id), &assessment);
+        assessment
     }
 
     // ── Issue #620: contract execution initiator authorization ─────────────
@@ -15578,5 +15624,99 @@ mod tests {
         let bad_bytes = [b'E', b'M', b'P', 0x07, b'1']; // 0x07 is non-printable BEL
         let bad = String::from_str(&env, core::str::from_utf8(&bad_bytes).unwrap());
         payroll_client.normalize_employee_identifier(&bad);
+    }
+
+    // ============================================================================
+    // Stalled payroll run recovery guidance tests
+    // ============================================================================
+
+    #[test]
+    fn test_stalled_run_recovery_returns_none_for_unknown_run() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        assert!(payroll_client.get_stalled_run_recovery(&999).is_none());
+    }
+
+    #[test]
+    fn test_stalled_run_recovery_returns_none_for_fresh_pending_run() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 250);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        // Freshly prepared run is not yet stalled.
+        assert!(payroll_client.get_stalled_run_recovery(&run_id).is_none());
+    }
+
+    #[test]
+    fn test_stalled_run_recovery_success_path() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 251);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += STALLED_RUN_THRESHOLD_SECONDS + 1;
+        });
+
+        let assessment = payroll_client
+            .get_stalled_run_recovery(&run_id)
+            .expect("stalled run should be reported");
+        assert_eq!(assessment.run_id, run_id);
+        assert!(assessment.is_stalled);
+        assert_eq!(
+            assessment.recommended_action,
+            StalledRunRecoveryAction::CancelOrFinalize
+        );
+
+        // Recording the assessment persists a privacy-safe marker.
+        let recorded = payroll_client.record_stalled_run_recovery(&admin, &run_id);
+        assert_eq!(recorded.run_id, run_id);
+        assert!(recorded.is_stalled);
+    }
+
+    #[test]
+    #[should_panic(expected = "Payroll run is not stalled")]
+    fn test_record_stalled_run_recovery_rejects_fresh_run() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 252);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        payroll_client.record_stalled_run_recovery(&admin, &run_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_record_stalled_run_recovery_rejects_non_admin() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 253);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += STALLED_RUN_THRESHOLD_SECONDS + 1;
+        });
+
+        let outsider = Address::generate(&env);
+        payroll_client.record_stalled_run_recovery(&outsider, &run_id);
     }
 }

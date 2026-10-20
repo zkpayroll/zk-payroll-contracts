@@ -123,6 +123,37 @@ salary values. Keep the original proofs and payout inputs in the authorized
 payroll workflow; do not include them in user-facing errors or operational
 logs.
 
+### Interrupted Run Recovery
+
+When a bounded payroll batch is interrupted mid-execution (e.g. a transient
+failure or an operator stop), the contract persists a `BatchCheckpoint` keyed by
+`employer`, `batch_root`, `asset`, and `execution_nonce`. The checkpoint records
+the last processed index and a lifecycle state:
+
+| State | Meaning |
+| --- | --- |
+| `Pending` | Checkpoint opened; no payments recorded yet. |
+| `PartiallyCheckpointed` | Some payments processed; the run may be resumed. |
+| `Failed` | The run failed before completion and may be resumed after recovery. |
+| `Resumed` | The run was recovered and is ready to resume from the saved index. |
+| `Completed` | All payments in the batch have been processed. |
+
+The admin can inspect whether a run is recoverable with
+` is_interrupted_run_recoverable`, passing the checkpoint identity and the
+expected payment count. The view returns true only when the checkpoint is not
+completed, contains remaining payments, and has not already been resumed.
+
+To resume, the admin calls `recover_interrupted_payroll_run` with the same
+identity and expected payment count. The call transitions the checkpoint to
+`Resumed`, clears the `failed` flag, and preserves the last processed index
+so execution continues without repeating completed payouts. A completed run
+cannot be recovered; the contract returns an actionable error ("Nothing left
+ to recover" or "Cannot recover a fully completed payroll run").
+
+Recovery results, errors, and events are redacted: they contain only the
+checkpoint identity, the last processed index, and the lifecycle state. No
+employee identifiers, salary amounts, or bank details are included.
+
 ## Payroll Submission Sequence Validation
 
 Before a prepared run may be submitted, the contract enforces a monotonic submission
@@ -201,33 +232,9 @@ In addition to the run state machine, `RunDraftState` in `contracts/payroll/src/
 
 | State | Contract variant | Terminal | Semantics |
 | --- | --- | --- | --- |
-| `pending` | `Pending` | No | Draft is created or amended and open for corrections. |
-| `finalized` | `Finalized` | No | Draft is locked for review; no further amendments allowed. |
-| `submitted` | `Submitted` | Yes | Draft has been submitted for execution. |
-| `cancelled` | `Cancelled` | Yes | Draft was cancelled before submission. |
-| `expired` | `Expired` | Yes | Draft expired before submission. |
-
-### Allowed Draft Transitions
-
-| From | To | Initiator | User-visible meaning |
-| --- | --- | --- | --- |
-| `pending` | `finalized` | Admin | Finalize draft for review. |
-| `pending` | `submitted` | Admin | Submit draft directly for processing. |
-| `pending` | `cancelled` | Admin | Cancel draft. |
-| `pending` | `expired` | Admin / Automation | Expire stale draft. |
-| `finalized` | `submitted` | Admin | Submit finalized draft for processing. |
-| `finalized` | `cancelled` | Admin | Cancel finalized draft. |
-| `finalized` | `expired` | Admin / Automation | Expire finalized draft. |
-
-`Submitted`, `Cancelled`, and `Expired` are terminal draft states. Transitions out of terminal states are forbidden.
-
-### Draft Contract Entry Points
-
-| Entry point | State effect |
-| --- | --- |
-| `create_run_draft` | Creates a new draft in `Pending` state. |
-| `amend_run_draft` | Updates `total_amount` and `employee_count` for `Pending` draft. |
-| `finalize_run_draft` | Transitions `Pending` draft to `Finalized`. |
-| `submit_run_draft` | Transitions `Pending` or `Finalized` draft to `Submitted`. |
-| `cancel_run_draft` | Transitions `Pending` or `Finalized` draft to `Cancelled`. |
-| `expire_run_draft` | Transitions `Pending` or `Finalized` draft to `Expired`. |
+| `pending` | `Pending` | No | Draft is created and awaiting validation. |
+| `validating` | `Validating` | No | Draft is being validated. |
+| `ready` | `Ready` | No | Draft is ready to be submitted. |
+| `submitted` | `Submitted` | Yes | Draft was submitted as a payroll run. |
+| `failed` | `Failed` | Yes | Draft failed validation or submission. |
+| `cancelled` | `Cancelled` | Yes | Draft was intentionally discarded. }

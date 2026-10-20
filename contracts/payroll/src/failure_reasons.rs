@@ -1,4 +1,5 @@
 //! Stable payroll failure reason codes (issue #509) and dry-run preflight
+//! Stable payroll failure reason codes (issue #509) and dry-run preflight
 //! validation for payroll execution (issue #521).
 //!
 //! `batch_process_payroll`'s preconditions are enforced as bare `panic!"`//! calls with free-text messages (see `contracts/payroll/src/lib.rs`), which
@@ -20,6 +21,7 @@
 use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
 
 use crate::CapacityLimitKind;
+use crate::payroll_run::PayrollRunSequenceStatus;
 
 /// Stable, numbered reason a payroll batch would be rejected by
 /// `batch_process_payroll`. Values are append-only: once shipped, a
@@ -95,6 +97,10 @@ pub enum PayrollFailureReason {
     /// unavailable: use `prepare_payroll_run`, collect reviewer approvals,
     /// then `finalize_payroll_run`.
     ApprovalWorkflowRequired = 23,
+    /// The submitted payroll run sequence number is not the expected next
+    /// value for this employer (a previous sequence was skipped, or this
+    /// one was already submitted).
+    SequenceNotMonotonic = 15,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.
@@ -228,4 +234,111 @@ pub(crate) fn check_contract_period_consistency(
     // Ensure the report is not left in an inconsistent state when no
     // contract-period blockers were found.
     let _ = e;
+}
+
+/// Validates payroll run sequence monotonicity for a payroll batch.
+///
+/// Returns the list of sequence-related blockers found in the supplied
+/// `DryRunArgs`. This is a pure function over the arguments and does not
+/// touch storage, so it is safe to call from any context.
+pub(crate) fn check_sequence_consistency(
+    e: &Env,
+    args: &DryRunArgs,
+    last_accepted_sequence: Option<u32>,
+    report: &mut PayrollDryRunReport,
+) {
+    let Some(submitted) = args.sequence else {
+        return;
+    };
+
+    match last_accepted_sequence {
+        Some(last) => {
+            if submitted == last {
+                report.push(PayrollFailureReason::DuplicateSequence);
+            } else if submitted < last {
+                report.push(PayrollFailureReason::SequenceNotMonotonic);
+            } else if submitted != last.saturating_add(1) {
+                report.push(PayrollFailureReason::SequenceNotMonotonic);
+            }
+        }
+        None => {
+            if submitted != 0 {
+                report.push(PayrollFailureReason::SequenceNotMonotonic);
+            }
+        }
+    }
+
+    let _ = e;
+}
+
+/// Validates the import source for a payroll batch.
+///
+/// Returns `UnauthorizedImportSource` when a source address is supplied but
+/// is not present in the employer's allowlist of authorized import sources.
+pub(crate) fn check_import_source(
+    e: &Env,
+    args: &DryRunArgs,
+    authorized_sources: &Vec<Address>,
+    report: &mut PayrollDryRunReport,
+) {
+    let Some(source) = args.source_address.clone() else {
+        return;
+    };
+
+    let mut authorized = false;
+    for allowed in authorized_sources.iter() {
+        if allowed == source {
+            authorized = true;
+            break;
+        }
+    }
+
+    if !authorized {
+        report.push(PayrollFailureReason::UnauthorizedImportSource);
+    }
+
+    let _ = e;
+}
+
+/// Validates that every payout amount meets the configured minimum
+/// threshold.
+///
+/// Returns `AmountBelowMinimum` if any entry in `args.amounts` is strictly
+/// less than `min_amount`.
+pub(crate) fn check_minimum_amounts(
+    e: &Env,
+    args: &DryRunArgs,
+    min_amount: i128,
+    report: &mut PayrollDryRunReport,
+) {
+    for amount in args.amounts.iter() {
+        if amount < min_amount {
+            report.push(PayrollFailureReason::AmountBelowMinimum);
+            return;
+        }
+    }
+
+    let _ = e;
+}
+
+/// Returns `true` when an approval workflow is configured, meaning direct
+/// execution via `batch_process_payroll` is unavailable.
+pub(crate) fn approval_workflow_required(approval_threshold: Option<u32>) -> bool {
+    matches!(approval_threshold, Some(threshold) if threshold > 0)
+}
+
+/// Convenience wrapper returning the sequence status for a submitted
+/// sequence given the employer's last accepted sequence.
+pub(crate) fn sequence_status(
+    submitted: u32,
+    last_accepted: Option<u32>,
+) -> PayrollRunSequenceStatus {
+    match last_accepted {
+        Some(last) if submitted == last => PayrollRunSequenceStatus::Duplicate,
+        Some(last) if submitted < last => PayrollRunSequenceStatus::OutOfOrder,
+        Some(last) if submitted == last.saturating_add(1) => PayrollRunSequenceStatus::Next,
+        Some(_) => PayrollRunSequenceStatus::Skipped,
+        None if submitted == 0 => PayrollRunSequenceStatus::Next,
+        None => PayrollRunSequenceStatus::Skipped,
+    }
 }
