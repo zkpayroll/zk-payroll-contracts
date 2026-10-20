@@ -1263,6 +1263,21 @@ pub enum MultiBatchKey {
     MultiBatchProgress(BytesN<32>),
 }
 
+/// One persisted configuration change, mirroring the `ConfigChanged` event
+/// (#707). Holds only `sha256` references, never plaintext values.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigLedgerEntry {
+    pub key: Symbol,
+    pub actor: Address,
+    pub subject_ref: BytesN<32>,
+    pub previous_ref: BytesN<32>,
+    pub new_ref: BytesN<32>,
+    pub revision: u64,
+    pub ledger_sequence: u32,
+    pub timestamp: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Addresses,
@@ -1407,6 +1422,9 @@ pub enum DataKey {
     /// Contract-wide configuration revision, bumped once per audited
     /// configuration change (#490). Absent means `0`.
     ConfigRevision,
+    /// Persisted configuration change ledger entry, keyed by the revision it
+    /// created (#707). Absent for revision `0` and revisions not yet reached.
+    ConfigLedgerEntry(u64),
     /// Run-scoped audit hold awaiting authorized release (#546). Absent when
     /// no hold has been placed for the run.
     AuditHold(u64),
@@ -2632,6 +2650,20 @@ impl Payroll {
     /// missing.
     pub fn get_config_revision(e: Env) -> u64 {
         config_audit::config_revision(&e)
+    }
+
+    /// Return the persisted configuration change created at `revision`
+    /// (#707), or `None` for revision `0` or one not yet reached. Read-only.
+    pub fn get_config_change(e: Env, revision: u64) -> Option<ConfigLedgerEntry> {
+        config_audit::get_config_change(&e, revision)
+    }
+
+    /// Return up to `limit` consecutive configuration changes starting at
+    /// `start_revision` (#707), oldest first. `limit` is capped at
+    /// `MAX_CONFIG_LEDGER_PAGE` (50). Returns an empty list when
+    /// `start_revision` is `0` or past the latest revision. Read-only.
+    pub fn get_config_ledger(e: Env, start_revision: u64, limit: u32) -> Vec<ConfigLedgerEntry> {
+        config_audit::get_config_ledger(&e, start_revision, limit)
     }
 
     /// Allow or disallow an asset token for payroll payouts.

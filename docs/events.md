@@ -905,6 +905,20 @@ mean "no value/subject". `revision` is contract-wide and gap-free, and
 [config-audit-events.md](./config-audit-events.md) for the key table, how to
 verify a reference, and the privacy model.
 
+Each change is also persisted on-chain (#707) as a `ConfigLedgerEntry` keyed by
+revision, with exactly the event's fields (hashes only):
+
+```
+ConfigLedgerEntry { key: Symbol, actor: Address, subject_ref: BytesN<32>,
+                    previous_ref: BytesN<32>, new_ref: BytesN<32>,
+                    revision: u64, ledger_sequence: u32, timestamp: u64 }
+```
+
+Read it with `get_config_change(revision) -> Option<ConfigLedgerEntry>` or
+`get_config_ledger(start_revision, limit) -> Vec<ConfigLedgerEntry>` (`limit`
+capped at 50; empty when `start_revision` is `0` or past the latest revision).
+The event schema is unchanged.
+
 | Severity | Consumers |
 |----------|-----------|
 | `MEDIUM` (privileged configuration change) | Compliance auditors, security monitoring, admin dashboards, indexers |

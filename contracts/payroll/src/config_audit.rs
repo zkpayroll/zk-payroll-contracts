@@ -24,9 +24,12 @@
 
 use payroll_events::ConfigChanged;
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, Val};
+use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
 
-use crate::DataKey;
+use crate::{ConfigLedgerEntry, DataKey};
+
+/// Maximum entries returned by one `get_config_ledger` call.
+pub const MAX_CONFIG_LEDGER_PAGE: u32 = 50;
 
 /// Reference published when there is no value: the previous value of a
 /// setting that was never set, the new value of a setting that was removed,
@@ -121,7 +124,8 @@ pub(crate) fn config_revision(e: &Env) -> u64 {
 /// one `ConfigChanged` event. Call it after the new value has been written
 /// and only from a setter that has already authorized `actor`.
 //
-// Does nothing when `previous_ref == new_ref` (no-op change).
+// Does nothing when `previous_ref == new_ref` (no-op change). Also persists
+// the change as a `ConfigLedgerEntry` keyed by revision (#707).
 pub(crate) fn record_config_change(
     e: &Env,
     actor: &Address,
@@ -139,7 +143,7 @@ pub(crate) fn record_config_change(
         .persistent()
         .set(&DataKey::ConfigRevision, &revision);
 
-    ConfigChanged {
+    let entry = ConfigLedgerEntry {
         key: Symbol::new(e, config_key),
         actor: actor.clone(),
         subject_ref,
@@ -148,6 +152,50 @@ pub(crate) fn record_config_change(
         revision,
         ledger_sequence: e.ledger().sequence(),
         timestamp: e.ledger().timestamp(),
+    };
+    e.storage()
+        .persistent()
+        .set(&DataKey::ConfigLedgerEntry(revision), &entry);
+
+    ConfigChanged {
+        key: entry.key,
+        actor: entry.actor,
+        subject_ref: entry.subject_ref,
+        previous_ref: entry.previous_ref,
+        new_ref: entry.new_ref,
+        revision: entry.revision,
+        ledger_sequence: entry.ledger_sequence,
+        timestamp: entry.timestamp,
     }
     .publish(e);
+}
+
+/// The persisted change created at `revision`, if any.
+pub(crate) fn get_config_change(e: &Env, revision: u64) -> Option<ConfigLedgerEntry> {
+    e.storage()
+        .persistent()
+        .get(&DataKey::ConfigLedgerEntry(revision))
+}
+
+/// Up to `limit` (capped at [`MAX_CONFIG_LEDGER_PAGE`]) consecutive changes
+/// starting at `start_revision`; empty when `start_revision` is `0` or past
+/// the latest revision.
+pub(crate) fn get_config_ledger(
+    e: &Env,
+    start_revision: u64,
+    limit: u32,
+) -> Vec<ConfigLedgerEntry> {
+    let mut entries = Vec::new(e);
+    let latest = config_revision(e);
+    if start_revision == 0 || start_revision > latest {
+        return entries;
+    }
+    let count = u64::from(limit.min(MAX_CONFIG_LEDGER_PAGE));
+    let end = start_revision.saturating_add(count).min(latest + 1);
+    for revision in start_revision..end {
+        if let Some(entry) = get_config_change(e, revision) {
+            entries.push_back(entry);
+        }
+    }
+    entries
 }
