@@ -41,6 +41,9 @@ pub mod config_keys {
     pub const PAUSE_MANAGER: &str = "pause_manager";
     /// `set_asset_allowed` — subject: asset; value: `bool`.
     pub const ASSET_ALLOWED: &str = "asset_allowed";
+    /// `deprecate_asset` / `undeprecate_asset` — subject: asset; value:
+    /// `bool` (#708).
+    pub const ASSET_DEPRECATED: &str = "asset_deprecated";
     /// `set_company_state` — value: `CompanyState`.
     pub const COMPANY_STATE: &str = "company_state";
     /// `set_capacity_limits` — value: `CapacityLimits`.

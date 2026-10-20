@@ -93,6 +93,18 @@ pub fn emit_asset_allowlist_updated(e: &Env, asset: Address, allowed: bool) {
     );
 }
 
+/// Emitted when the admin deprecates or un-deprecates a payment asset (#708).
+///
+/// A deprecated asset accepts no new commitments but still settles runs that
+/// were prepared before deprecation. Carries only the asset and the resulting
+/// flag; no payroll data.
+pub fn emit_asset_deprecation_updated(e: &Env, asset: Address, deprecated: bool) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "asset_deprecation_updated")),
+        (asset, deprecated),
+    );
+}
+
 /// Emitted when a deposit is made to the treasury.
 pub fn emit_deposit(e: &Env, from: Address, amount: i128, deposit_id: BytesN<32>) {
     e.events().publish(

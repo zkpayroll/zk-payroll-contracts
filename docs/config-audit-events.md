@@ -40,6 +40,7 @@ used by the other `payroll` events).
 |-------|---------------|-----------------------|---------|------------------|
 | `pause_manager` | `set_pause_manager` | admin | — | pause manager `Address` |
 | `asset_allowed` | `set_asset_allowed` | admin | asset `Address` | `bool` |
+| `asset_deprecated` | `deprecate_asset` / `undeprecate_asset` | admin | asset `Address` | `bool` |
 | `company_state` | `set_company_state` | admin | — | `CompanyState` |
 | `capacity_limits` | `set_capacity_limits` | admin | — | `CapacityLimits` |
 | `settlement_window` | `set_settlement_window` | admin | period `Symbol` | `SettlementWindow` |

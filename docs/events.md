@@ -1004,6 +1004,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address ? single-value data)* |
 | `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address ? single-value data)* |
 | `payroll / config_changed` | `payroll` | `("payroll", "config_changed", key)` | `(actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp)` |
+| `payroll / asset_deprecation_updated` | `payroll` | `("payroll", "asset_deprecation_updated")` | `(Address asset, bool deprecated)` — emitted by `deprecate_asset` / `undeprecate_asset` (#708); also audited as `config_changed` key `asset_deprecated` |
 | `InterruptedRunRecovered` | `payroll` | `("InterruptedRunRecovered", Address employer, Address asset)` | `(batch_root, execution_nonce, resumed_checkpoint_index, total_checkpoints)` |
 
 

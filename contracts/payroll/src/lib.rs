@@ -1314,6 +1314,9 @@ pub enum DataKey {
     PayrollState(u64),
     /// Allowed asset token map for payroll payouts.
     AllowedAsset(Address),
+    /// Deprecation flag for a payment asset (#708). A deprecated asset stays
+    /// allowed so in-flight runs settle, but accepts no new commitments.
+    DeprecatedAsset(Address),
     /// Enumerable list backing the supported-assets read helper (#427).
     SupportedAssets,
     /// Count of payroll runs currently prepared but not yet resolved
@@ -2683,6 +2686,56 @@ impl Payroll {
             .set(&DataKey::SupportedAssets, &assets);
     }
 
+    /// Deprecate the canonical payment asset (#708).
+    ///
+    /// Unlike disallowing the asset, deprecation only stops *new* commitments
+    /// (`deposit`, `prepare_payroll_run`, `add_locked_funds`). Runs prepared
+    /// before deprecation still settle, cancel, expire, and refund. Not gated
+    /// by `require_no_active_payroll_run`, since it is safe mid-run. Idempotent.
+    pub fn deprecate_asset(e: Env, asset: Address) {
+        Self::set_asset_deprecated(&e, asset, true);
+    }
+
+    /// Reverse [`Self::deprecate_asset`], re-opening the asset to new
+    /// commitments (#708). Idempotent.
+    pub fn undeprecate_asset(e: Env, asset: Address) {
+        Self::set_asset_deprecated(&e, asset, false);
+    }
+
+    /// Whether the admin has deprecated this asset (#708). `false` for any
+    /// asset that is not this contract's canonical treasury asset.
+    pub fn is_asset_deprecated(e: Env, asset: Address) -> bool {
+        e.storage()
+            .persistent()
+            .get(&DataKey::DeprecatedAsset(asset))
+            .unwrap_or(false)
+    }
+
+    fn set_asset_deprecated(e: &Env, asset: Address, deprecated: bool) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        addrs.admin.require_auth();
+        if asset != addrs.token {
+            panic!("Cross-asset treasury mismatch");
+        }
+        let key = DataKey::DeprecatedAsset(asset.clone());
+        let previous_ref = stored_ref(e, &key);
+        e.storage().persistent().set(&key, &deprecated);
+
+        payroll_events::emit_asset_deprecation_updated(e, asset.clone(), deprecated);
+        record_config_change(
+            e,
+            &addrs.admin,
+            config_keys::ASSET_DEPRECATED,
+            value_ref(e, &asset),
+            previous_ref,
+            stored_ref(e, &key),
+        );
+    }
+
     /// Check if an asset token is allowlisted for payroll payouts.
     pub fn is_asset_allowed(e: Env, asset: Address) -> bool {
         let canonical_asset: Option<Address> = e
@@ -2760,6 +2813,17 @@ impl Payroll {
         }
     }
 
+    /// Guard for paths that create a *new* commitment against the asset
+    /// (#708): requires the asset to be allowed and not deprecated. Settle and
+    /// release paths use [`Self::require_active_treasury_asset`] instead, which
+    /// only requires `allowed = true`, so deprecated assets can still drain.
+    fn require_new_commitment_asset(e: &Env, asset: Address) {
+        Self::require_active_treasury_asset(e, asset.clone());
+        if Self::is_asset_deprecated(e.clone(), asset) {
+            panic!("Asset deprecated");
+        }
+    }
+
     /// Return the payroll assets currently enabled for this employer contract.
     pub fn get_supported_assets(e: Env) -> Vec<Address> {
         if let Some(assets) = e.storage().persistent().get(&DataKey::SupportedAssets) {
@@ -2795,6 +2859,10 @@ impl Payroll {
         // does not burn the caller's deposit id.
         if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
             panic!("Asset not allowed");
+        }
+
+        if Self::is_asset_deprecated(e.clone(), addrs.token.clone()) {
+            panic!("Asset deprecated");
         }
 
         let nonce_key = DataKey::DepositNonce(deposit_id.clone());
@@ -3974,6 +4042,10 @@ impl Payroll {
         // Validate treasury asset allowlist
         if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
             panic!("Asset not allowed");
+        }
+
+        if Self::is_asset_deprecated(e.clone(), addrs.token.clone()) {
+            panic!("Asset deprecated");
         }
 
         // Issue #699: the funds this run will lock must be unreserved in the treasury.
@@ -6737,7 +6809,7 @@ impl Payroll {
     }
 
     pub fn add_locked_funds(e: &Env, asset: Address, amount: i128) {
-        Self::require_active_treasury_asset(e, asset.clone());
+        Self::require_new_commitment_asset(e, asset.clone());
         let key = DataKey::LockedPayrollFunds(asset.clone());
         let current: i128 = e.storage().persistent().get(&key).unwrap_or(0i128);
         let new_locked = current.checked_add(amount).expect("Locked funds overflow");
