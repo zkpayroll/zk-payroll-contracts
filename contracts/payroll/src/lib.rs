@@ -1877,6 +1877,41 @@ impl Payroll {
         execution_authorization::require_authorized(e, &initiator);
     }
 
+    /// Reject an execution reference that already exists in any execution
+    /// keyspace (issue: reference collision prevention).
+    ///
+    /// A caller-supplied reference (nonce, idempotency key, or operator-auth
+    /// payload hash) must be unique across every execution path. Without this
+    /// guard the same 32-byte reference could be consumed by one flow (e.g. a
+    /// signed operator action) and later reused by another (e.g. a payroll
+    /// run nonce), silently binding two unrelated executions to the same
+    /// reference. This helper fails fast with an actionable error naming the
+    /// colliding keyspace so integrators can pick a fresh reference.
+    ///
+    /// Privacy-safe: only opaque 32-byte references and keyspace names are
+    /// inspected; no salary amounts, employee identities, or proof material
+    /// are read or emitted.
+    fn require_execution_reference_unused(e: &Env, reference: &BytesN<32>) {
+        if e.storage()
+            .persistent()
+            .has(&DataKey::RunNonce(reference.clone()))
+        {
+            panic!("Execution reference collision: this nonce has already been used by a payroll run");
+        }
+        if e.storage()
+            .persistent()
+            .has(&DataKey::PayrollExecutionIdempotency(reference.clone()))
+        {
+            panic!("Execution reference collision: this idempotency key is already bound to a payroll execution");
+        }
+        if e.storage()
+            .persistent()
+            .has(&DataKey::ConsumedOperatorAuth(reference.clone()))
+        {
+            panic!("Execution reference collision: this reference is already consumed by a signed operator action");
+        }
+    }
+
     /// Return the address currently authorized to initiate a contract execution
     /// (issue #620).
     ///

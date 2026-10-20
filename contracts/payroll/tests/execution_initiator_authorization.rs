@@ -4,7 +4,9 @@
 //! execution": the registered payroll admin. These tests cover the read-only
 //! preflight helpers, the auth-enforcing `validate_execution_initiator`
 //! entrypoint, and the enforcement wired into the execution/preparation
-//! entrypoints themselves.
+//! entrypoints themselves. They also cover execution reference collision
+//! prevention: a reference may only be consumed once, and a rejected execution
+//! must not burn its reference.
 
 mod common;
 
@@ -189,4 +191,102 @@ fn admin_rotation_moves_execution_initiator_authority() {
         !payroll.is_exec_initiator_authorized(&previous_admin),
         "the previous admin must lose initiator authority after rotation"
     );
+}
+
+// ── Execution reference collision prevention ────────────────────────────────
+
+#[test]
+fn execution_reference_is_consumed_on_success() {
+    let env = Env::default();
+    let (payroll, _, employee) = common::setup(&env);
+    let (proofs, amounts, employees) = common::one_payment(&env, &employee);
+    let source = common::authorized_source(&env, &payroll);
+    let reference = common::nonce(&env, 31);
+
+    assert!(!payroll.is_execution_reference_used(&reference));
+
+    payroll.batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &100,
+        &reference,
+        &None,
+        &source,
+    );
+
+    assert!(
+        payroll.is_execution_reference_used(&reference),
+        "a successful execution must consume its reference"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Execution reference already used")]
+fn execution_reference_collision_is_rejected() {
+    let env = Env::default();
+    let (payroll, _, employee) = common::setup(&env);
+    let (proofs, amounts, employees) = common::one_payment(&env, &employee);
+    let source = common::authorized_source(&env, &payroll);
+    let reference = common::nonce(&env, 32);
+
+    payroll.batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &100,
+        &reference,
+        &None,
+        &source,
+    );
+
+    // Reusing the same reference must be rejected, even with valid auth.
+    payroll.batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &100,
+        &reference,
+        &None,
+        &source,
+    );
+}
+
+#[test]
+fn rejected_execution_does_not_consume_its_reference() {
+    let env = Env::default();
+    let (payroll, _, employee) = common::setup(&env);
+    let (proofs, amounts, employees) = common::one_payment(&env, &employee);
+    let source = common::authorized_source(&env, &payroll);
+    let reference = common::nonce(&env, 33);
+
+    // Unauthorized initiator: the call is rejected before the reference is
+    // consumed, so the same reference remains usable afterwards.
+    env.mock_auths(&[]);
+    let rejected = payroll.try_batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &100,
+        &reference,
+        &None,
+        &source,
+    );
+    assert!(rejected.is_err());
+    assert!(
+        !payroll.is_execution_reference_used(&reference),
+        "a rejected execution must not burn its reference"
+    );
+
+    // The reference is still available for a properly authorized execution.
+    payroll.batch_process_payroll(
+        &proofs,
+        &amounts,
+        &employees,
+        &100,
+        &reference,
+        &None,
+        &source,
+    );
+    assert!(payroll.is_execution_reference_used(&reference));
 }

@@ -1,25 +1,25 @@
 //! Contract execution initiator authorization validation (issue #620).
-//!
-//! A *contract execution initiator* is the address that triggers an on-chain
-//! payroll execution — `prepare_payroll_run`, `batch_process_payroll`,
-//! `batch_process_payroll_idempotent`, or `batch_process_payroll_bounded`.
-//!
-//! Before this module, each of those entrypoints only checked
-//! `ContractAddresses::admin.require_auth()` deep inside the function body,
-//! after unrelated validation work had already run, and the contract exposed
-//! no way for a client to ask up front whether an address would be accepted as
-//! an initiator. This module centralizes that single decision so that:
-//!
-//! * every execution path shares one authorization check,
-//! * an unauthorized initiator fails fast with an actionable error instead of
-//!   after dozens of unrelated checks, and
-//! * SDKs and dashboards can preflight the answer with a read-only call.
-//!
-//! Everything here is privacy-safe: it inspects only the configured address
-//! book and caller-supplied addresses. It never reads, emits, or returns
-//! salary amounts, employee identities, or proof material.
+///
+/// A *contract execution initiator* is the address that triggers an on-chain
+/// payroll execution — `prepare_payroll_run`, `batch_process_payroll`,
+/// `batch_process_payroll_idempotent`, or `batch_process_payroll_bounded`.
+///
+/// Before this module, each of those entrypoints only checked
+/// `ContractAddresses::admin.require_auth()` deep inside the function body,
+/// after unrelated validation work had already run, and the contract exposed
+/// no way for a client to ask up front whether an address would be accepted as
+/// an initiator. This module centralizes that single decision so that:
+///
+/// * every execution path shares one authorization check,
+/// * an unauthorized initiator fails fast with an actionable error instead of
+///   after dozens of unrelated checks, and
+/// * SDKs and dashboards can preflight the answer with a read-only call.
+///
+/// Everything here is privacy-safe: it inspects only the configured address
+/// book and caller-supplied addresses. It never reads, emits, or returns
+/// salary amounts, employee identities, or proof material.
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdkz:{contracttype, Address, Env};
 
 use crate::{ContractAddresses, DataKey};
 
@@ -101,7 +101,7 @@ pub(crate) fn check(e: &Env, initiator: &Address) -> ExecutionInitiatorAuthoriza
 /// rotation entrypoints.
 ///
 /// # Panics
-/// * `initiator` is not the registered payroll admin.
+/// * initiator` is not the registered payroll admin.
 /// * The contract has not been initialized with an address book yet.
 /// * `initiator` failed host authorization (`require_auth`).
 pub(crate) fn require_authorized(e: &Env, initiator: &Address) {

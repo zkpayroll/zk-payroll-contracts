@@ -3,7 +3,7 @@
 ## Summary
 
 A **contract execution initiator** is the address that triggers an on-chain
-payroll execution. In `contracts/payroll` those entrypoints are:
+payroll execution. In `contracts/payroll those entrypoints are:
 
 | Entrypoint | Effect |
 | --- | --- |
@@ -22,7 +22,7 @@ This feature centralizes that decision in one place
 (`contracts/payroll/src/execution_authorization.rs`), so that:
 
 1. every execution path shares the same authorization check,
-2. an unauthorized initiator fails **fast** with an actionable error, and
+2. an unauthorized initiator fails **fast* with an actionable error, and
 3. SDKs and dashboards can **preflight** the answer without spending a transaction.
 
 ## Rules
@@ -72,7 +72,7 @@ remediation; no payroll values are included.
 | --- | --- | --- |
 | `Unauthorized contract execution initiator: only the registered payroll admin may initiate a contract execution` | The supplied/acting address is not the registered admin. | Re-sign with the admin address, or rotate the admin first. |
 | `Contract not initialized: configure the payroll address book before validating an execution initiator` | The contract has not been initialized, or the address book is missing. | Call `initialize` before any execution or initiator validation. |
-| `Not initialized: contract addresses must be configured before a payroll execution` | An execution entrypoint was called before `initialize`. | Call `initialize` first. |
+| `Not initialized: contract addresses must be configured before a payroll execution` | An execution entrypoint was calle before `initialize`. | Call `initialize` first. |
 
 ## Integrator guidance
 
