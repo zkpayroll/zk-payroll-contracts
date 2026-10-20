@@ -123,6 +123,10 @@ payroll.set_period_reopen_cooldown(&admin, &Symbol::new("2024M03"), &3600u64);  
 - **After expiry**: Reopen succeeds, last_reopen_at is updated
 - **Timestamp update**: Each successful reopen advances the cooldown timer
 - **Period independence**: Each period has its own cooldown tracking
+- **Configuration lock**: The cooldown cannot be changed while its period is
+  frozen, so the active restriction cannot be disabled or reset before reopen.
+- **Configuration updates**: Changing the duration while the period is
+  unfrozen preserves the last successful reopen timestamp.
 
 ### Error Handling
 
@@ -189,7 +193,9 @@ cargo test -p payroll period_reopen_cooldown
 
 ### Want to change cooldown mid-period?
 
-**Solution**: Simply call `set_period_reopen_cooldown` with a new value. The new duration applies immediately to future reopens.
+**Solution**: Call `set_period_reopen_cooldown` with a new value while the
+period is unfrozen. Configuration changes are rejected while the period is
+frozen, and changing the duration preserves the last successful reopen time.
 
 ## API Reference
 
@@ -211,7 +217,9 @@ pub fn set_period_reopen_cooldown(
 
 **Effects**:
 - Creates or updates cooldown configuration for the period
-- Initializes `last_reopen_at` to 0 if first time setting
+- Initializes `last_reopen_at` to 0 on first configuration; later updates
+  preserve the last successful reopen timestamp
+- Rejects empty period labels and updates while the period is frozen
 
 **Authorization**: Requires admin authentication
 

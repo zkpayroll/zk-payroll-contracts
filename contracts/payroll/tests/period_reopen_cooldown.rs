@@ -153,6 +153,13 @@ fn test_update_cooldown_duration() {
 
     // Set initial cooldown
     payroll.set_period_reopen_cooldown(&admin, &period, &1000u64);
+    payroll.freeze_payroll_period(&admin, &period, &Symbol::new(&env, "first"));
+    payroll.reopen_payroll_period(&admin, &period);
+    let last_reopen_at = payroll
+        .get_period_reopen_cooldown(&period)
+        .unwrap()
+        .last_reopen_at;
+
     assert_eq!(
         payroll
             .get_period_reopen_cooldown(&period)
@@ -170,6 +177,43 @@ fn test_update_cooldown_duration() {
             .cooldown_seconds,
         500
     );
+    assert_eq!(
+        payroll
+            .get_period_reopen_cooldown(&period)
+            .unwrap()
+            .last_reopen_at,
+        last_reopen_at
+    );
+}
+
+#[test]
+fn test_cooldown_cannot_be_changed_while_period_is_frozen() {
+    let env = Env::default();
+    let (payroll, admin, period) = setup(&env);
+    payroll.set_period_reopen_cooldown(&admin, &period, &3600u64);
+    payroll.freeze_payroll_period(&admin, &period, &Symbol::new(&env, "manual"));
+
+    let result = payroll.try_set_period_reopen_cooldown(&admin, &period, &0u64);
+
+    assert!(result.is_err());
+    assert_eq!(
+        payroll
+            .get_period_reopen_cooldown(&period)
+            .unwrap()
+            .cooldown_seconds,
+        3600
+    );
+}
+
+#[test]
+fn test_cooldown_rejects_empty_period_label() {
+    let env = Env::default();
+    let (payroll, admin, _) = setup(&env);
+    let empty_period = Symbol::new(&env, "");
+
+    assert!(payroll
+        .try_set_period_reopen_cooldown(&admin, &empty_period, &3600u64)
+        .is_err());
 }
 
 #[test]

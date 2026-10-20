@@ -6218,6 +6218,7 @@ impl Payroll {
         cooldown_seconds: u64,
     ) {
         Self::require_not_paused(&e);
+        Self::validate_symbol_not_empty(&e, &period_label, "period_label");
         let addrs: ContractAddresses = e
             .storage()
             .persistent()
@@ -6229,9 +6230,22 @@ impl Payroll {
         admin.require_auth();
 
         let cooldown_key = DataKey::PeriodReopenCooldown(period_label.clone());
+        if e
+            .storage()
+            .persistent()
+            .has(&DataKey::PeriodFreeze(period_label.clone()))
+        {
+            panic!("Cannot update reopen cooldown while payroll period is frozen");
+        }
+        let last_reopen_at = e
+            .storage()
+            .persistent()
+            .get::<_, PeriodReopenCooldown>(&cooldown_key)
+            .map(|cooldown| cooldown.last_reopen_at)
+            .unwrap_or(0);
         let cooldown = PeriodReopenCooldown {
             cooldown_seconds,
-            last_reopen_at: 0,
+            last_reopen_at,
         };
         e.storage().persistent().set(&cooldown_key, &cooldown);
     }
