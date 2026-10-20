@@ -1,7 +1,9 @@
 # Contract Error Cases
 
 This guide maps common ZK Payroll contract failures to likely causes and
-client recovery guidance for SDK, dashboard, and indexer contributors.
+client recovery guidance for SDK, dashboard, and indexer contributors. Error
+context surfaced to clients is filtered to be privacy-safe: it must never leak
+salary commitments, blinding factors, nullifiers, or other contributor secrets.
 
 ## How to Classify Failures
 
@@ -13,6 +15,24 @@ client recovery guidance for SDK, dashboard, and indexer contributors.
 Soroban host authorization failures and explicit `panic!` messages are surfaced
 as invocation failures. `#[contracterror]` values are returned as typed errors
 where the contract exposes `Result<_, Error>`.
+
+## Privacy-Safe Error Context
+
+Contract errors may include a human-readable context string to help integrators
+diagnose failures. That context is filtered before it leaves the contract so it
+cannot be used to reconstruct private payroll data.
+
+| Rule | Guarantee | Client behavior |
+|------|-----------|-----------------|
+| Secret redaction | Commitment values, blinding factors, nullifiers, and proof bytes are replaced with a fixed redaction marker. | Never attempt to parse redacted segments; treat them as opaque. |
+| Length cap | Context is truncated to a bounded length so oversized inputs cannot be echoed back. | Do not rely on full input echo for debugging; log inputs client-side instead. |
+| Allow-listed fields | Only non-sensitive identifiers (company ID, employee index, period label, run ID, error code) are preserved verbatim. | Use these identifiers to correlate with local state and events. |
+| Deterministic output | The same failure produces the same filtered context, so it is safe to deduplicate and cache. | Deduplicate by error code plus filtered context. |
+
+Filtered context is still actionable: it names the failing entrypoint, the
+invariant that was violated, and the recovery step. If a message appears to
+contain a raw commitment, nullifier, or proof, treat it as a contract bug and
+report it rather than displaying it to end users.
 
 ## Company Setup and Administration
 
@@ -123,6 +143,8 @@ where the contract exposes `Result<_, Error>`.
 - Treat paused contracts, missing/stale state, expired audit keys, expired
   proofs, and insufficient treasury funds as retryable only after a specific
   recovery action.
+- Treat any error context containing a redaction marker as safe to display, but
+  never re-derive secrets from surrounding identifiers.
 - Related client guidance: [SDK Contract Interface](./sdk-contract-interface.md),
   [Client Fallback Behavior](./interop/client-fallback-behavior.md), and
   [Proof Schema Version Negotiation](./interop/proof-schema-version-negotiation.md).

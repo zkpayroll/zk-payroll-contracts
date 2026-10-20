@@ -19,6 +19,14 @@ use config_audit::{config_keys, no_value_ref, record_config_change, stored_ref, 
 pub mod failure_reasons;
 use failure_reasons::{DryRunArgs, PayrollDryRunReport, PayrollFailureReason};
 
+/// Privacy-safe error context filtering for build/contract errors.
+pub mod error_context_filter;
+pub use error_context_filter::{
+    filter_error_context, redact_error_context, ErrorContext, ErrorContextFilter,
+    ErrorContextFilterError, ErrorContextRedaction, MAX_ERROR_CONTEXT_FIELDS,
+    MAX_ERROR_CONTEXT_VALUE_BYTES,
+};
+
 pub mod signed_operator_actions;
 use signed_operator_actions::{
     consumed_key, require_not_expired, SignedOperatorAction, SignedOperatorPayload,
