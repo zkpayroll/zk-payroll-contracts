@@ -49,3 +49,25 @@ Only hashes/references are supplied, never plaintext salary amounts.
 Errors: `7840` invalid/mismatched run, `7841` empty expectations, `7842` input
 too large, `7843` invalid reference, `7844` duplicate payout, `7845` unknown
 payout, `7846` mismatched payout details, and `7847` invalid confirmation time.
+
+## Configuration-ledger export consistency (#785)
+
+`validate_ledger_export(first_revision, last_revision, entries)` validates a
+complete inclusive revision range of 1–50 entries exported by the existing
+`get_config_ledger` API. The contract reads the canonical page itself; the
+exporter cannot supply the expected records. Every field of every entry must
+match storage, including actor, key, subject/value references, revision,
+ledger sequence, and timestamp. Missing, extra, duplicate, reordered, or
+tampered entries are rejected. Revision zero and reversed ranges are invalid.
+Historical pages remain valid when new revisions are appended.
+
+Success returns bounds, count, and a deterministic SHA-256 integrity hash of
+the domain separator `zkpayroll_ledger_export_v1`, the contract address, range
+bounds, and canonical XDR entries. This binds the digest to one contract.
+No additional export records or plaintext configuration values are stored.
+An unavailable canonical record fails closed; restore archived state before
+retrying. Empty exports cannot be reported as successfully reconciled ranges.
+
+Errors: `7850` invalid range, `7851` page too large, `7852` entry-count mismatch,
+`7853` nonconsecutive revisions, `7854` unavailable canonical entries, and
+`7855` an exported entry differs from storage.

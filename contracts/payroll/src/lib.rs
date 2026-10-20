@@ -247,6 +247,10 @@ pub use payout_confirmation::{
     PayoutConfirmationValidation, PayoutReconciliation,
 };
 
+/// Configuration-ledger export consistency validation (#785).
+pub mod ledger_export;
+pub use ledger_export::{LedgerExportError, LedgerExportValidation, LedgerExportVerification};
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ContractAddresses {

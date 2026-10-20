@@ -2,6 +2,9 @@
 
 use soroban_sdk::{contractimpl, Env, Vec};
 
+use crate::ledger_export::{
+    self, LedgerExportError, LedgerExportValidation, LedgerExportVerification,
+};
 use crate::pay_group_effective_date::{
     self, PayGroupDateError, PayGroupEffectivePeriod, PayGroupValidation,
 };
@@ -9,6 +12,7 @@ use crate::payout_confirmation::{
     self, ExpectedPayout, PayoutConfirmation, PayoutConfirmationError,
     PayoutConfirmationValidation, PayoutReconciliation,
 };
+use crate::ConfigLedgerEntry;
 use crate::Payroll;
 
 #[contractimpl]
@@ -38,5 +42,25 @@ impl PayoutConfirmationValidation for Payroll {
         confirmations: Vec<PayoutConfirmation>,
     ) -> Result<PayoutReconciliation, PayoutConfirmationError> {
         payout_confirmation::reconcile_payout_confirmations(&env, run_id, &expected, &confirmations)
+    }
+}
+
+#[contractimpl]
+impl LedgerExportVerification for Payroll {
+    fn validate_ledger_export(
+        env: Env,
+        first_revision: u64,
+        last_revision: u64,
+        entries: Vec<ConfigLedgerEntry>,
+    ) -> Result<LedgerExportValidation, LedgerExportError> {
+        let count = ledger_export::ledger_export_count(first_revision, last_revision)?;
+        let canonical = crate::config_audit::get_config_ledger(&env, first_revision, count);
+        ledger_export::validate_ledger_export(
+            &env,
+            first_revision,
+            last_revision,
+            &entries,
+            &canonical,
+        )
     }
 }
