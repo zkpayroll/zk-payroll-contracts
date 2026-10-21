@@ -26,7 +26,6 @@ use crate::CapacityLimitKind;
 /// `batch_process_payroll`. Values are append-only: once shipped, a
 /// variant's discriminant never changes and is never reused for a different
 /// meaning, so off-chain consumers can safely persist and pattern-match on
-/// it across contract upgrades.
 @contracttype
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
