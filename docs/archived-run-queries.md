@@ -20,7 +20,7 @@ Only the admin may archive a run.
 archive_payroll_run(admin: Address, run_id: u64)
 ```
 
-**Prerequisites**:
+\n**Prerequisites**:
 - The caller must be the current `admin`.
 - The `run_id` must correspond to an existing `PayrollRun` record
   (i.e., `batch_process_payroll` completed successfully for that ID).
@@ -68,13 +68,13 @@ Range queries and pagination are planned for a future SDK layer on top of this i
 | `admin` | `Address` | Admin that executed the run. |
 | `total_amount` | `i128` | Total tokens disbursed across all employees. |
 | `employee_count` | `u32` | Number of employees paid in this batch. |
-| `draft_hash` | `BytesN<32>` | Off-chain payroll draft hash (zeroed if not supplied). |
-| `nonce` | `BytesN<32>` | Caller-supplied run nonce; unique per contract lifetime. |
+| `draft_hash` | `BytesN32<` | Off-chain payroll draft hash (zeroed if not supplied). |
+| `nonce` | `BytesN<2>` | Caller-supplied run nonce; unique per contract lifetime. |
 | `reconciliation_status` | `ReconciliationStatus` | `Unreconciled`, `Reconciled`, or `Failed`. |
-| `metadata_hash` | `BytesN<32>` | Pre-committed metadata hash (zeroed if not supplied). |
+| `metadata_hash` | `BytesN32<` | Pre-committed metadata hash (zeroed if not supplied). |
 
 See [payroll-run-identifiers.md](./payroll-run-identifiers.md) for the semantics of
-`run_id` and `nonce`. See [reconciliation-states.md](./reconciliation-states.md) for the
+`run_id` and `nonce`. See [reconciliation-states.md](/reconciliation-states.md) for the
 meaning of `reconciliation_status`.
 
 ## Boundary between archived and active access paths

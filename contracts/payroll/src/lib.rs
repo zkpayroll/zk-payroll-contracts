@@ -207,6 +207,13 @@ pub use stalled_run_recovery::{
     StalledRunRecoveryError, StalledRunRecoveryReason, STALLED_RUN_THRESHOLD_SECONDS,
 };
 
+/// Contract historic data retrieval safeguards (#XXX).
+pub mod historic_data_safeguards;
+pub use historic_data_safeguards::{
+    HistoricDataAccess, HistoricDataError, HistoricDataQuery, HistoricDataSafeguard,
+    HistoricDataScope, MAX_HISTORIC_QUERY_RANGE, MAX_HISTORIC_PAGE_SIZE,
+};
+
 /// Temporary approver delegation controls (#636).
 pub mod approver_delegation;
 pub use approver_delegation::{
@@ -1977,6 +1984,44 @@ impl Payroll {
             .persistent()
             .set(&DataKey::StalledRunRecoveryMarker(run_id), &assessment);
         assessment
+    }
+
+    // ── Contract historic data retrieval safeguards ──────────────────────────
+
+    /// Preflight whether `caller` may retrieve historic payroll data for the
+    /// given scope, without performing the retrieval.
+    ///
+    /// Historic records (archived runs, cancelled batches, reconciliation
+    /// markers) are sensitive operational data. This read-only check lets
+    /// integrators and dashboards determine access before submitting a
+    /// retrieval transaction, and returns an actionable error code when
+    /// access would be denied.
+    ///
+    /// Privacy-safe: exposes only the verdict, resolved scope, and a stable
+    /// error code — never salary amounts, employee identities, or proof
+    /// material.
+    pub fn check_historic_data_access(
+        e: Env,
+        caller: Address,
+        scope: HistoricDataScope,
+    ) -> HistoricDataAccess {
+        historic_data_safeguards::check_access(&e, &caller, scope)
+    }
+
+    /// Retrieve a bounded, privacy-safe page of historic payroll run ids for
+    /// the given scope.
+    ///
+    /// Enforces the historic-data safeguards: the caller must be authorized
+    /// for the requested scope, the range must be bounded by
+    /// [`MAX_HISTORIC_QUERY_RANGE`], and the page size must not exceed
+    /// [`MAX_HISTORIC_PAGE_SIZE`]. Returns only opaque run ids so no payroll
+    /// values or employee identities are disclosed.
+    pub fn get_historic_run_ids(
+        e: Env,
+        caller: Address,
+        query: HistoricDataQuery,
+    ) -> Vec<u64> {
+        historic_data_safeguards::retrieve_run_ids(&e, &caller, query)
     }
 
     // ── Issue #349: scoped emergency pause recovery ──────────────────────────
