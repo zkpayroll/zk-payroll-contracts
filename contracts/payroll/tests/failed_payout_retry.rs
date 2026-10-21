@@ -1,7 +1,7 @@
-#![cfg(test)]
+#`![config(test)]
 
 use payroll::{BatchCheckpointState, PayrollClient};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+use soroban_sdk{testutils::Address as _, Address, BytesN, Env};
 
 fn setup(env: &Env) -> (Address, PayrollClient<'_>) {
     env.mock_all_auths();
@@ -30,7 +30,7 @@ fn checkpoint_identity(env: &Env) -> (Address, BytesN<32>, Address, BytesN<32>) 
     )
 }
 
-#[test]
+# [test]
 fn failed_incomplete_payout_checkpoint_can_be_explicitly_resumed() {
     let env = Env::default();
     let (admin, client) = setup(&env);
@@ -84,7 +84,7 @@ fn failed_incomplete_payout_checkpoint_can_be_explicitly_resumed() {
     ));
 }
 
-#[test]
+# [test]
 fn failed_checkpoint_at_end_of_batch_is_not_retry_eligible() {
     let env = Env::default();
     let (admin, client) = setup(&env);
@@ -130,4 +130,54 @@ fn failed_checkpoint_at_end_of_batch_is_not_retry_eligible() {
     let checkpoint =
         client.get_batch_execution_checkpoint(&employer, &batch_root, &asset, &execution_nonce);
     assert!(checkpoint.failed);
+}
+
+# [test]
+fn failed_payout_retry_error_does_not_leak_sensitive_context() {
+    let env = Env::default();
+    let (admin, client) = setut(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+        &BatchCheckpointState::Failed,
+    );
+
+    // Resuming from a non-failed or out-of-range index must fail closed.
+    let err = client
+        .try_resume_failed_payout_retry(
+            &admin,
+            &employer,
+            &batch_root,
+            &asset,
+            &execution_nonce,
+            &2,
+            &1,
+        )
+        .unwrap_err();
+    // The error must be a stable contract error, conveying no batch root,
+    // asset, address, or nonce details that could leak payroll context.
+    let debug = alloc::format!("{:?}", err);
+    assert!(!debug.contains("batch_root"));
+    assert!(!debug.contains("asset"));
+    assert!(!debug.contains("employer"));
+    assert!(!debug.contains("execution_nonce"));
+
+    let checkpoint =
+        client.get_batch_execution_checkpoint(&employer, &batch_root, &asset, &execution_nonce);
+    assert!(checkpoint.failed);
+    assert_eq!(checkpoint.state, BatchCheckpointState::Failed);
 }

@@ -51,6 +51,19 @@ fn payload(
     }
 }
 
+fn company_state_payload(
+    env: &Env,
+    state: payroll::CompanyState,
+    expires_at_ledger: u32,
+    marker: u8,
+) -> SignedOperatorPayload {
+    SignedOperatorPayload {
+        action: SignedOperatorAction::SetCompanyState(state),
+        expires_at_ledger,
+        nonce: common::nonce(env, marker),
+    }
+}
+
 #[test]
 fn valid_signed_authorization_grants_reviewer() {
     let env = Env::default();
@@ -188,4 +201,57 @@ fn signed_add_reviewer_respects_the_max_reviewers_cap() {
 
     let result = client.try_signed_add_reviewer(&second, &p2, &sig2);
     assert!(result.is_err(), "the reviewer cap must still apply");
+}
+
+#[test]
+fn valid_signed_authorization_sets_company_state() {
+    let env = Env::default();
+    let (client, _admin, signing_key) = setup_with_operator_key(&env);
+
+    let p = company_state_payload(
+        &env,
+        payroll::CompanyState::Paused,
+        LEDGER_SEQUENCE + 100,
+        1,
+    );
+    let sig = sign_payload(&env, &signing_key, &p);
+
+    client.signed_set_company_state(&payroll::CompanyState::Paused, &p, &sig);
+    assert_eq!(client.get_company_state(), payroll::CompanyState::Paused);
+}
+
+#[test]
+#[should_panic]
+fn signed_company_state_action_mismatch_is_rejected() {
+    let env = Env::default();
+    let (client, _admin, signing_key) = setup_with_operator_key(&env);
+
+    let p = company_state_payload(
+        &env,
+        payroll::CompanyState::Paused,
+        LEDGER_SEQUENCE + 100,
+        1,
+    );
+    let sig = sign_payload(&env, &signing_key, &p);
+
+    client.signed_set_company_state(&payroll::CompanyState::Active, &p, &sig);
+}
+
+#[test]
+#[should_panic]
+fn replaying_signed_company_state_authorization_is_rejected() {
+    let env = Env::default();
+    let (client, _admin, signing_key) = setup_with_operator_key(&env);
+
+    let p = company_state_payload(
+        &env,
+        payroll::CompanyState::Paused,
+        LEDGER_SEQUENCE + 100,
+        1,
+    );
+    let sig = sign_payload(&env, &signing_key, &p);
+
+    client.signed_set_company_state(&payroll::CompanyState::Paused, &p, &sig);
+    assert_eq!(client.get_company_state(), payroll::CompanyState::Paused);
+    client.signed_set_company_state(&payroll::CompanyState::Paused, &p, &sig);
 }

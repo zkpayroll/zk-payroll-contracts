@@ -21,18 +21,17 @@ its expiration ledger, and can never be replayed once consumed.**
 **unchanged** by this feature — it is an additional, parallel authorization
 mechanism, not a replacement.
 
-## Scope of this reference implementation
+## Scope
 
 Issue #519 asks for the *mechanism* ("require privileged off-chain
 authorizations to include and enforce an expiration time"), not a survey of
 every privileged action in this contract suite. This implementation
-introduces the full signing/verification/expiry/replay-protection plumbing
-and applies it to exactly one action — granting reviewer authorization
-(`signed_add_reviewer`, an alternative path to `add_reviewer`) — as the
-reference wiring. Extending `SignedOperatorAction` with additional variants
-to cover other privileged actions is straightforward future work; the
-signing, expiry, and replay-protection plumbing (`require_not_expired`,
-`consumed_key`, `MAX_AUTHORIZATION_TTL_LEDGERS`) is written to be reused as-is.
+introduces reusable signing/verification/expiry/replay-protection plumbing.
+It supports reviewer authorization (`signed_add_reviewer`, an alternative
+path to `add_reviewer`) and, for issue #730, company lifecycle changes
+(`signed_set_company_state`, an alternative path to `set_company_state`).
+Each signed action binds the exact arguments accepted by its entrypoint.
+Other admin actions continue to use their existing authorization paths.
 
 ## Contract surface
 
@@ -42,9 +41,10 @@ All of the following live in `contracts/payroll/src/lib.rs` and
 | Function | Purpose |
 | --- | --- |
 | `register_operator_key(admin, operator_key)` | Admin-only. Registers (or replaces) the ed25519 public key that signs operator authorizations. At most one key at a time. |
-| `revoke_operator_key(admin)` | Admin-only. Removes the registered key; `signed_add_reviewer` becomes unusable until a new key is registered. |
+| `revoke_operator_key(admin)` | Admin-only. Removes the registered key; signed operator actions become unusable until a new key is registered. |
 | `get_operator_key()` | Returns the currently registered public key, if any. |
 | `signed_add_reviewer(reviewer, payload, signature)` | Callable by anyone holding a validly signed `payload`. Grants reviewer authorization to `reviewer` exactly like `add_reviewer`, including the `MaxReviewers` cap (issue #539). |
+| `signed_set_company_state(state, payload, signature)` | Callable by anyone holding a validly signed `payload`. Sets the company lifecycle state bound in the payload, with the same active-payroll-run guard and audit events as `set_company_state`. |
 
 ## The signed payload
 
@@ -87,13 +87,18 @@ for consistency rather than inventing a second encoding scheme.
    prior authorization.
 5. **Action binding**: `payload.action` must match the entrypoint's own
    arguments (e.g. `signed_add_reviewer`'s `reviewer` parameter must equal
-   the `AddReviewer` payload's wrapped address) — a payload signed to
-   authorize one target can never be submitted against a different one.
+   the `AddReviewer` payload's wrapped address, and
+   `signed_set_company_state`'s state must equal its `SetCompanyState`
+   payload) — a payload signed to authorize one action can never be submitted
+   against a different one.
 
 ## What this does NOT change
 
 - `add_reviewer` (the existing `require_auth()`-gated path) is untouched and
   remains the primary way an admin grants reviewer authorization directly.
+- `set_company_state` (the existing admin-authenticated path) is untouched.
+  The signed alternative uses the same active-run guard and emits the existing
+  `state_changed` and `config_changed` audit events.
 - No existing entrypoint's authorization model changed. This is additive.
 - The `MaxReviewers` cap (issue #539) applies identically to both paths —
   `signed_add_reviewer` calls the same internal `grant_reviewer_internal`
@@ -112,3 +117,6 @@ Covered in `contracts/payroll/tests/signed_operator_actions.rs`:
 - Calling with no operator key registered is rejected.
 - Calling after the operator key has been revoked is rejected.
 - The `MaxReviewers` cap (#539) is enforced identically through this path.
+- A valid signed `SetCompanyState` action updates lifecycle state and emits
+  the existing configuration audit event.
+- A payload authorizing one company state cannot be submitted to set another.

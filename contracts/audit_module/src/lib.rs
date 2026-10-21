@@ -6,6 +6,8 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+pub mod challenge;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -39,6 +41,20 @@ pub enum AuditError {
     DelegationExceedsParentExpiry = 11,
     /// A delegated grant is no longer valid because its parent grant was revoked.
     DelegationRevoked = 12,
+    /// The proof reference hash is invalid (empty or all-zero sentinel).
+    InvalidProofReference = 13,
+    /// A challenge with this ID does not exist.
+    ChallengeNotFound = 14,
+    /// The challenge deadline has passed - no further responses accepted.
+    ChallengeExpired = 15,
+    /// The challenge has already been resolved.
+    ChallengeAlreadyResolved = 16,
+    /// An invalid challenge ID or out-of-scope challenge was submitted.
+    InvalidChallenge = 17,
+    /// The supplied export has no integrity marker (all-zero) and cannot be verified.
+    IntegrityMarkerMissing = 18,
+    /// An audit event sequence violation was detected (Issue #701).
+    InvalidEventSequence = 19,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +84,18 @@ pub enum AuditScope {
     TimeRange = 1,
     EmployeeList = 2,
     AggregateOnly = 3,
+}
+
+/// Lifecycle stage of an auditor's view-key grant.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AuditLifecycleStage {
+    None = 0,
+    Granted = 1,
+    Active = 2,
+    Revoked = 3,
+    Pruned = 4,
 }
 
 /// An audit log entry written each time an auditor performs a verification
@@ -120,6 +148,8 @@ pub struct AuditQueryResult {
 /// - `verification_fail_count`  — entries where `matched == false`.
 /// - `exported_at`              — ledger timestamp of the export call.
 /// - `exported_by`              — auditor address that triggered the export.
+/// - `integrity_marker`         — deterministic digest binding every other
+///   field of this summary (see `verify_audit_export_integrity`).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AuditMetadataSummary {
@@ -131,6 +161,7 @@ pub struct AuditMetadataSummary {
     pub verification_fail_count: u32,
     pub exported_at: u64,
     pub exported_by: Address,
+    pub integrity_marker: BytesN<32>,
 }
 
 /// Storage key namespace.
@@ -146,6 +177,8 @@ pub enum DataKey {
     AuditLog(Symbol, u32),
     /// Pause manager address (issue #167).
     PauseManager,
+    /// Tracks an auditor's lifecycle stage (Issue #701).
+    AuditLifecycle(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +241,9 @@ impl AuditModule {
         env.storage()
             .persistent()
             .set(&DataKey::AuditorKey(auditor.clone()), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditLifecycle(auditor.clone()), &AuditLifecycleStage::Granted);
 
         payroll_events::emit_view_key_generated(&env, auditor, expiration_ledger);
 
@@ -269,6 +305,9 @@ impl AuditModule {
         env.storage()
             .persistent()
             .remove(&DataKey::AuditorKey(auditor.clone()));
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditLifecycle(auditor.clone()), &AuditLifecycleStage::Revoked);
 
         payroll_events::emit_audit_access_revoked(&env, admin, auditor);
 
@@ -303,8 +342,90 @@ impl AuditModule {
         env.storage()
             .persistent()
             .remove(&DataKey::AuditorKey(auditor.clone()));
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditLifecycle(auditor.clone()), &AuditLifecycleStage::Pruned);
         payroll_events::emit_audit_grant_pruned(&env, admin, auditor);
         Ok(())
+    }
+
+    /// Returns the current lifecycle stage of an auditor (Issue #701).
+    pub fn get_audit_lifecycle_stage(env: Env, auditor: Address) -> AuditLifecycleStage {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AuditLifecycle(auditor))
+            .unwrap_or(AuditLifecycleStage::None)
+    }
+
+    /// Verifies that a sequence of audit event topic symbols follows the canonical
+    /// lifecycle sequence (Issue #701):
+    ///
+    /// 1. Initialization: Must begin with `ViewKeyGenerated`.
+    /// 2. Active Operations: `ViewKeyRefreshed`, `AuditSuccessful`, `MetadataVerified`,
+    ///    `MetadataMismatch`, `AggregateAuditGenerated`, `AuditSummaryExported`.
+    /// 3. Termination: `AuditAccessExpired` or `AuditAccessRevoked`.
+    /// 4. Cleanup: `AuditGrantPruned` (only valid after termination).
+    ///
+    /// Returns `Ok(true)` if sequence is valid, or `Err(AuditError::InvalidEventSequence)`
+    /// if out of order, empty, or improperly terminated.
+    pub fn verify_audit_event_sequence(env: Env, event_names: Vec<Symbol>) -> Result<bool, AuditError> {
+        if event_names.is_empty() {
+            return Err(AuditError::InvalidEventSequence);
+        }
+
+        let sym_generated = Symbol::new(&env, "ViewKeyGenerated");
+        let sym_refreshed = Symbol::new(&env, "ViewKeyRefreshed");
+        let sym_audit_ok = Symbol::new(&env, "AuditSuccessful");
+        let sym_meta_ok = Symbol::new(&env, "MetadataVerified");
+        let sym_meta_mismatch = Symbol::new(&env, "MetadataMismatch");
+        let sym_agg_gen = Symbol::new(&env, "AggregateAuditGenerated");
+        let sym_summary_exp = Symbol::new(&env, "AuditSummaryExported");
+        let sym_expired = Symbol::new(&env, "AuditAccessExpired");
+        let sym_revoked = Symbol::new(&env, "AuditAccessRevoked");
+        let sym_pruned = Symbol::new(&env, "AuditGrantPruned");
+
+        if event_names.get(0).unwrap() != sym_generated {
+            return Err(AuditError::InvalidEventSequence);
+        }
+
+        let mut stage = AuditLifecycleStage::Granted;
+        let mut has_terminated = false;
+
+        for i in 1..event_names.len() {
+            let event = event_names.get(i).unwrap();
+
+            if stage == AuditLifecycleStage::Pruned {
+                return Err(AuditError::InvalidEventSequence);
+            }
+
+            if event == sym_refreshed
+                || event == sym_audit_ok
+                || event == sym_meta_ok
+                || event == sym_meta_mismatch
+                || event == sym_agg_gen
+                || event == sym_summary_exp
+            {
+                if has_terminated || stage == AuditLifecycleStage::Revoked || stage == AuditLifecycleStage::Pruned {
+                    return Err(AuditError::InvalidEventSequence);
+                }
+                stage = AuditLifecycleStage::Active;
+            } else if event == sym_expired || event == sym_revoked {
+                if has_terminated || stage == AuditLifecycleStage::Revoked || stage == AuditLifecycleStage::Pruned {
+                    return Err(AuditError::InvalidEventSequence);
+                }
+                stage = AuditLifecycleStage::Revoked;
+                has_terminated = true;
+            } else if event == sym_pruned {
+                if !has_terminated && stage != AuditLifecycleStage::Revoked {
+                    return Err(AuditError::InvalidEventSequence);
+                }
+                stage = AuditLifecycleStage::Pruned;
+            } else {
+                return Err(AuditError::InvalidEventSequence);
+            }
+        }
+
+        Ok(true)
     }
 
     pub fn get_view_key(env: Env, auditor: Address) -> Result<ViewKeyRecord, AuditError> {
@@ -381,6 +502,9 @@ impl AuditModule {
         env.storage()
             .persistent()
             .set(&DataKey::AuditorKey(auditor.clone()), &updated);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditLifecycle(auditor.clone()), &AuditLifecycleStage::Active);
 
         env.events().publish(
             (Symbol::new(&env, "ViewKeyRefreshed"), admin, auditor),
@@ -840,6 +964,19 @@ impl AuditModule {
             }
         }
 
+        let exported_at = env.ledger().timestamp();
+        let integrity_marker = Self::compute_audit_export_integrity_marker(
+            &env,
+            &company_id,
+            period_start,
+            period_end,
+            total,
+            pass_count,
+            fail_count,
+            exported_at,
+            &auditor,
+        );
+
         let summary = AuditMetadataSummary {
             company_id: company_id.clone(),
             period_start,
@@ -847,8 +984,9 @@ impl AuditModule {
             total_audit_entries: total,
             verification_pass_count: pass_count,
             verification_fail_count: fail_count,
-            exported_at: env.ledger().timestamp(),
+            exported_at,
             exported_by: auditor.clone(),
+            integrity_marker,
         };
 
         payroll_events::emit_audit_summary_exported(
@@ -861,6 +999,45 @@ impl AuditModule {
         );
 
         Ok(summary)
+    }
+
+    // ── Issue #607: audit export integrity marker ────────────────────────────
+
+    /// Verify that an exported summary's integrity marker binds its contents.
+    ///
+    /// Every export carries a deterministic `integrity_marker` computed at
+    /// export time. This entrypoint recomputes the marker from the summary's
+    /// metadata fields and compares it to the exported value, so an external
+    /// consumer can detect a post-export mutation of any field (period bounds,
+    /// verification counts, exporter, or export timestamp).
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — the marker matches; the export is intact.
+    /// - `Ok(false)` — the marker does not match; the export was altered.
+    /// - `Err(AuditError::IntegrityMarkerMissing)` — no marker was supplied
+    ///   (all-zero), so integrity cannot be established.
+    pub fn verify_audit_export_integrity(
+        env: Env,
+        summary: AuditMetadataSummary,
+    ) -> Result<bool, AuditError> {
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if summary.integrity_marker == zero {
+            return Err(AuditError::IntegrityMarkerMissing);
+        }
+
+        let expected = Self::compute_audit_export_integrity_marker(
+            &env,
+            &summary.company_id,
+            summary.period_start,
+            summary.period_end,
+            summary.total_audit_entries,
+            summary.verification_pass_count,
+            summary.verification_fail_count,
+            summary.exported_at,
+            &summary.exported_by,
+        );
+
+        Ok(expected == summary.integrity_marker)
     }
 
     // ── Issue #177: metadata hash verification via audit scope ───────────────
@@ -951,6 +1128,17 @@ impl AuditModule {
             .get(&DataKey::AuditLogCounter(company_id.clone()))
             .unwrap_or(0);
 
+        // Keep the counter monotonic for stable pagination, while deleting the
+        // oldest retained record before the next append.
+        if counter >= MAX_AUDIT_LOG_ENTRIES {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::AuditLog(
+                    company_id.clone(),
+                    counter - MAX_AUDIT_LOG_ENTRIES,
+                ));
+        }
+
         let entry = AuditLogEntry {
             auditor: auditor.clone(),
             company_id: company_id.clone(),
@@ -983,6 +1171,38 @@ impl AuditModule {
         preimage.extend_from_array(&amount.to_le_bytes());
         let blinding_slice: [u8; 32] = blinding.into();
         preimage.extend_from_array(&blinding_slice);
+        env.crypto().sha256(&preimage).into()
+    }
+
+    /// Compute the deterministic integrity marker for an audit metadata
+    /// export (#607).
+    ///
+    /// The digest is `SHA-256` over a domain separator (`zkpayroll_audit_export_v1`)
+    /// followed by every exported field in a canonical encoding. Binding all
+    /// fields means any change to the summary — including its exporter and
+    /// export timestamp — produces a different marker.
+    #[allow(clippy::too_many_arguments)]
+    fn compute_audit_export_integrity_marker(
+        env: &Env,
+        company_id: &Symbol,
+        period_start: u64,
+        period_end: u64,
+        total_audit_entries: u32,
+        verification_pass_count: u32,
+        verification_fail_count: u32,
+        exported_at: u64,
+        exported_by: &Address,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.extend_from_slice(b"zkpayroll_audit_export_v1");
+        preimage.append(&company_id.to_xdr(env));
+        preimage.extend_from_array(&period_start.to_le_bytes());
+        preimage.extend_from_array(&period_end.to_le_bytes());
+        preimage.extend_from_array(&total_audit_entries.to_le_bytes());
+        preimage.extend_from_array(&verification_pass_count.to_le_bytes());
+        preimage.extend_from_array(&verification_fail_count.to_le_bytes());
+        preimage.extend_from_array(&exported_at.to_le_bytes());
+        preimage.append(&exported_by.to_xdr(env));
         env.crypto().sha256(&preimage).into()
     }
 

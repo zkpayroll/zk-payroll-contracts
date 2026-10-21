@@ -43,6 +43,7 @@ mod error_taxonomy_tests {
         assert_eq!(AuditError::ChallengeAlreadyResolved as u32, 207);
         assert_eq!(AuditError::InvalidChallenge as u32, 208);
         assert_eq!(AuditError::InvalidResponseTimestamp as u32, 209);
+        assert_eq!(AuditError::InvalidProofReference as u32, 210);
 
         // Payment (300-399)
         assert_eq!(PaymentError::PeriodNotFound as u32, 300);
@@ -106,7 +107,7 @@ mod error_taxonomy_tests {
         assert!((proof_error as u32) >= 100 && (proof_error as u32) < 200);
 
         // Audit: 200-299
-        let audit_error = AuditError::InvalidResponseTimestamp;
+        let audit_error = AuditError::InvalidProofReference;
         assert!((audit_error as u32) >= 200 && (audit_error as u32) < 300);
 
         // Payment: 300-399

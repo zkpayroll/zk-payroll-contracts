@@ -20,7 +20,7 @@ use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::{
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger as _},
     Address, BytesN, Env, Symbol, TryFromVal, TryIntoVal, Vec,
 };
 use token::{Token, TokenClient};
@@ -70,6 +70,7 @@ struct Ctx {
     payroll_id: Address,
     token_id: Address,
     commitment_id: Address,
+    import_source: Address,
 }
 
 impl Ctx {
@@ -124,6 +125,9 @@ fn setup() -> Ctx {
     token.mint(&treasury, &1_000_000i128);
     commitment.store_commitment(&employee, &BytesN::from_array(&env, &[0u8; 32]));
 
+    let import_source = Address::generate(&env);
+    payroll.register_import_source(&import_source, &0u32);
+
     Ctx {
         env,
         admin,
@@ -132,6 +136,7 @@ fn setup() -> Ctx {
         payroll_id,
         token_id,
         commitment_id,
+        import_source,
     }
 }
 
@@ -157,6 +162,7 @@ fn run_payroll(ctx: &Ctx, nonce_seed: u8) -> u64 {
         &1_000i128,
         &test_nonce(&ctx.env, nonce_seed),
         &None,
+        &ctx.import_source,
     )
 }
 
@@ -472,6 +478,53 @@ fn test_review_resolved_event_emitted() {
         resolved_event.is_some(),
         "review_resolved event must be emitted"
     );
+}
+
+/// The resolution audit event identifies who resolved the review, why, and
+/// when, while leaving payment amounts and employee details out of the event.
+#[test]
+fn test_review_resolution_audit_records_actor_reason_and_time() {
+    let ctx = setup();
+    let run_id = run_payroll(&ctx, 22);
+    let reason = Symbol::new(&ctx.env, "audit_complete");
+
+    ctx.payroll().open_overpayment_review(&ctx.admin, &run_id);
+    let review = ctx.payroll().get_overpayment_review(&run_id).unwrap();
+    ctx.payroll()
+        .resolve_overpayment_review(&ctx.admin, &run_id, &reason);
+
+    let events = ctx.env.events().all();
+    let audit_event = events.iter().find(|(_, topics, _)| {
+        if let Some(value) = topics.get(1) {
+            if let Ok(symbol) = Symbol::try_from_val(&ctx.env, &value) {
+                return symbol == Symbol::new(&ctx.env, "review_resolution_audit");
+            }
+        }
+        false
+    });
+    let (_, topics, data) = audit_event.expect("review resolution audit event must be emitted");
+    assert_eq!(
+        Symbol::try_from_val(&ctx.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&ctx.env, "payroll")
+    );
+    let audit: (u64, u64, Address, Symbol, u64) =
+        TryFromVal::try_from_val(&ctx.env, data).unwrap();
+
+    assert_eq!(
+        audit,
+        (
+            review.review_id,
+            run_id,
+            ctx.admin.clone(),
+            reason.clone(),
+            ctx.env.ledger().timestamp(),
+        )
+    );
+
+    let resolved = ctx.payroll().get_overpayment_review(&run_id).unwrap();
+    assert_eq!(resolved.resolved_by, Some(ctx.admin));
+    assert_eq!(resolved.resolution_reason, reason);
+    assert_eq!(resolved.resolved_at, audit.4);
 }
 
 /// Attempting to resolve an already-resolved review is rejected.

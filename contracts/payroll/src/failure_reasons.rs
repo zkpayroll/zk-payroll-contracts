@@ -1,8 +1,8 @@
 //! Stable payroll failure reason codes (issue #509) and dry-run preflight
+//! Stable payroll failure reason codes (issue #509) and dry-run preflight
 //! validation for payroll execution (issue #521).
 //!
-//! `batch_process_payroll`'s preconditions are enforced as bare `panic!`"
-//! calls with free-text messages (see `contracts/payroll/src/lib.rs`), which
+//! `batch_process_payroll`'s preconditions are enforced as bare `panic!"`//! calls with free-text messages (see `contracts/payroll/src/lib.rs`), which
 //! abort the whole transaction with no structured, stable-for-off-chain-use
 //! identifier and stop at the first failure. This module adds a stable,
 //! numbered reason-code registry — mirroring the existing
@@ -21,12 +21,14 @@
 use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
 
 use crate::CapacityLimitKind;
+use crate::payroll_run::PayrollRunSequenceStatus;
 
 /// Stable, numbered reason a payroll batch would be rejected by
 /// `batch_process_payroll`. Values are append-only: once shipped, a
 /// variant's discriminant never changes and is never reused for a different
 /// meaning, so off-chain consumers can safely persist and pattern-match on
-@contracttype
+/// it across contract upgrades.
+#[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PayrollFailureReason {
@@ -74,6 +76,31 @@ pub enum PayrollFailureReason {
     /// The submitted payroll run sequence number has already been
     /// consumed by a different run.
     DuplicateSequence = 16,
+    /// One or more payout amounts is below the configured minimum threshold.
+    AmountBelowMinimum = 17,
+    /// The import source for this payroll batch is not authorized.
+    UnauthorizedImportSource = 18,
+    /// The contract period being submitted does not match the expected
+    /// contract period for this employer (contract period transition
+    /// inconsistency).
+    ContractPeriodNotConsistent = 19,
+    /// The contract period being submitted has already been closed and
+    /// cannot be transitioned again.
+    ContractPeriodAlreadyClosed = 20,
+    /// The contract period transition would skip one or more expected
+    /// intermediate periods.
+    ContractPeriodSkipped = 21,
+    /// The contract period transition is not allowed from the current
+    /// period state.
+    ContractPeriodTransitionInvalid = 22,
+    /// An approval threshold is configured, so direct execution is
+    /// unavailable: use `prepare_payroll_run`, collect reviewer approvals,
+    /// then `finalize_payroll_run`.
+    ApprovalWorkflowRequired = 23,
+    /// The submitted payroll run sequence number is not the expected next
+    /// value for this employer (a previous sequence was skipped, or this
+    /// one was already submitted).
+    SequenceNotMonotonic = 15,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.
@@ -84,7 +111,7 @@ pub enum PayrollFailureReason {
 /// off-chain dashboard or agent the same way
 /// `payment_executor::check_upgrade_compatibility`'s report is documented to
 /// be.
-@contracttype
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct PayrollDryRunReport {
     /// `true` if and only if `blockers` is empty — the batch would be
@@ -125,7 +152,7 @@ impl PayrollDryRunReport {
 /// Arguments for a dry-run check, mirroring `batch_process_payroll`'s
 /// signature minus the proofs (proof verification is out of scope for this
 /// preflight — see the module doc comment).
-@contracttype
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct DryRunArgs {
     pub amounts: Vec<i128>,
@@ -135,8 +162,183 @@ pub struct DryRunArgs {
     pub draft_hash: Option<BytesN<32>>,
     pub proof_count: u32,
     /// Optional caller-declared payroll submission sequence number. When
-    /// `SOME`, the dry-run checks it against the employer's last accepted
+    /// `SOME`\, the dry-run checks it against the employer's last accepted
     /// sequence and reports `SequenceNotMonotonic` or `DuplicateSequence`
     /// as appropriate. When `NONE`, no sequence check is performed.
     pub sequence: Option<u32>,
+    /// Optional import source address for validation.
+    pub source_address: Option<Address>,
+    /// Optional contract period identifier being submitted. When `SOME`\,
+    /// the dry-run checks it against the employer's expected contract
+    /// period and reports contract period transition inconsistencies.
+    pub contract_period: Option<u32>,
+    /// Optional expected next contract period for this employer. When
+    /// `SOME`, it is used to detect skipped or out-of-order contract
+    /// period transitions.
+    pub expected_contract_period: Option<u32>,
+    /// Optional flag indicating the contract period being submitted has
+    /// already been closed. When `true`, the dry-run reports
+    /// `ContractPeriodAlreadyClosed`.
+    pub contract_period_closed: bool,
+}
+
+/// Validates contract period transition consistency for a payroll batch.
+///
+/// Returns the list of contract-period-related blockers found in the
+/// supplied `DryRunArgs`. This is a pure function over the arguments and
+/// does not touch storage, so it is safe to call from any context.
+pub(crate) fn check_contract_period_consistency(
+    e: &Env,
+    args: &DryRunArgs,
+    report: &mut PayrollDryRunReport,
+) {
+    // A contract period that has already been closed cannot be
+    // transitioned again.
+    if args.contract_period_closed {
+        report.push(PayrollFailureReason::ContractPeriodAlreadyClosed);
+        return;
+    }
+
+    // When an expected contract period is declared, ensure the submitted
+    // contract period matches it exactly.
+    if let Some(expected) = args.expected_contract_period {
+        if let Some(actual) = args.contract_period {
+            if actual != expected {
+                // Allow a forward transition only to the immediately next
+                // period; anything else is either a skip or an invalid
+                // transition.
+                if actual > expected {
+                    if actual == expected.saturating_add(1) {
+                        report.push(PayrollFailureReason::ContractPeriodNotConsistent);
+                    } else {
+                        report.push(PayrollFailureReason::ContractPeriodSkipped);
+                    }
+                } else {
+                    report.push(PayrollFailureReason::ContractPeriodTransitionInvalid);
+                }
+            }
+        } else {
+            // An expected contract period was declared but the caller
+            // did not supply the actual contract period.
+            report.push(PayrollFailureReason::ContractPeriodNotConsistent);
+        }
+    }
+
+    // When an expected contract period is not declared but an actual
+    // contract period is supplied, there is nothing to compare against,
+    // so the transition is considered inconsistent.
+    if args.expected_contract_period.is_none() && args.contract_period.is_some() {
+        report.push(PayrollFailureReason::ContractPeriodNotConsistent);
+    }
+
+    // Ensure the report is not left in an inconsistent state when no
+    // contract-period blockers were found.
+    let _ = e;
+}
+
+/// Validates payroll run sequence monotonicity for a payroll batch.
+///
+/// Returns the list of sequence-related blockers found in the supplied
+/// `DryRunArgs`. This is a pure function over the arguments and does not
+/// touch storage, so it is safe to call from any context.
+pub(crate) fn check_sequence_consistency(
+    e: &Env,
+    args: &DryRunArgs,
+    last_accepted_sequence: Option<u32>,
+    report: &mut PayrollDryRunReport,
+) {
+    let Some(submitted) = args.sequence else {
+        return;
+    };
+
+    match last_accepted_sequence {
+        Some(last) => {
+            if submitted == last {
+                report.push(PayrollFailureReason::DuplicateSequence);
+            } else if submitted < last {
+                report.push(PayrollFailureReason::SequenceNotMonotonic);
+            } else if submitted != last.saturating_add(1) {
+                report.push(PayrollFailureReason::SequenceNotMonotonic);
+            }
+        }
+        None => {
+            if submitted != 0 {
+                report.push(PayrollFailureReason::SequenceNotMonotonic);
+            }
+        }
+    }
+
+    let _ = e;
+}
+
+/// Validates the import source for a payroll batch.
+///
+/// Returns `UnauthorizedImportSource` when a source address is supplied but
+/// is not present in the employer's allowlist of authorized import sources.
+pub(crate) fn check_import_source(
+    e: &Env,
+    args: &DryRunArgs,
+    authorized_sources: &Vec<Address>,
+    report: &mut PayrollDryRunReport,
+) {
+    let Some(source) = args.source_address.clone() else {
+        return;
+    };
+
+    let mut authorized = false;
+    for allowed in authorized_sources.iter() {
+        if allowed == source {
+            authorized = true;
+            break;
+        }
+    }
+
+    if !authorized {
+        report.push(PayrollFailureReason::UnauthorizedImportSource);
+    }
+
+    let _ = e;
+}
+
+/// Validates that every payout amount meets the configured minimum
+/// threshold.
+///
+/// Returns `AmountBelowMinimum` if any entry in `args.amounts` is strictly
+/// less than `min_amount`.
+pub(crate) fn check_minimum_amounts(
+    e: &Env,
+    args: &DryRunArgs,
+    min_amount: i128,
+    report: &mut PayrollDryRunReport,
+) {
+    for amount in args.amounts.iter() {
+        if amount < min_amount {
+            report.push(PayrollFailureReason::AmountBelowMinimum);
+            return;
+        }
+    }
+
+    let _ = e;
+}
+
+/// Returns `true` when an approval workflow is configured, meaning direct
+/// execution via `batch_process_payroll` is unavailable.
+pub(crate) fn approval_workflow_required(approval_threshold: Option<u32>) -> bool {
+    matches!(approval_threshold, Some(threshold) if threshold > 0)
+}
+
+/// Convenience wrapper returning the sequence status for a submitted
+/// sequence given the employer's last accepted sequence.
+pub(crate) fn sequence_status(
+    submitted: u32,
+    last_accepted: Option<u32>,
+) -> PayrollRunSequenceStatus {
+    match last_accepted {
+        Some(last) if submitted == last => PayrollRunSequenceStatus::Duplicate,
+        Some(last) if submitted < last => PayrollRunSequenceStatus::OutOfOrder,
+        Some(last) if submitted == last.saturating_add(1) => PayrollRunSequenceStatus::Next,
+        Some(_) => PayrollRunSequenceStatus::Skipped,
+        None if submitted == 0 => PayrollRunSequenceStatus::Next,
+        None => PayrollRunSequenceStatus::Skipped,
+    }
 }

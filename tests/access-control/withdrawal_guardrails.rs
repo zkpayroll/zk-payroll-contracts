@@ -147,7 +147,7 @@ fn test_withdrawal_before_lock_and_after_cancellation() {
 
 #[test]
 #[should_panic(
-    expected = "Insufficient available treasury balance: funds locked for pending payroll"
+    expected = "Insufficient available treasury balance: funds are locked for pending payroll or reserved by the treasury buffer"
 )]
 fn test_withdrawal_attempt_exceeding_surplus_rejected() {
     let env = Env::default();

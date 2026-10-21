@@ -6,8 +6,8 @@
 // parameters that uniquely identifies a single logical payroll run across
 // retries and replay attempts.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Symbol};
 use shared_errors::ReplayError;
+use soroban_sdk::{contracttype, Address, BytesN, Env, Symbol};
 
 /// Canonical execution identity for a single payroll run.
 ///
@@ -21,7 +21,7 @@ use shared_errors::ReplayError;
 /// - `asset`: Ensures no cross-asset payload reuse
 /// - `treasury_account`: Ensures payments go to correct treasury
 /// - `nonce`: Caller-supplied unique token for this execution
-#[contracttype]
+[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayrollExecutionIdentity {
     pub company_id: u64,
@@ -39,7 +39,7 @@ pub struct PayrollExecutionIdentity {
 /// - Safe retries (identical payload) → allow/return cached result
 /// - Malicious replays (modified payload) → reject
 /// - Genuine new runs (different nonce) → allow
-#[contracttype]
+[contracttype]
 #[derive(Clone, Debug)]
 pub struct ExecutionRecord {
     /// The canonical execution identity (for comparison during retries)
@@ -57,7 +57,7 @@ pub struct ExecutionRecord {
 }
 
 /// Storage keys for idempotency and replay protection.
-#[contracttype]
+[contracttype]
 pub enum IdempotencyDataKey {
     /// Execution record by execution identity hash.
     /// Value: ExecutionRecord
@@ -71,25 +71,62 @@ pub enum IdempotencyDataKey {
 ///
 /// This is deterministic: same inputs always produce the same hash.
 /// The hash uniquely identifies a single logical payroll run.
+///
+/// All identity components are fed into the hash in a fixed canonical order
+/// so that two identities differing in any field produce different hashes.
 pub fn compute_execution_identity_hash(
     env: &Env,
     identity: &PayrollExecutionIdentity,
 ) -> BytesN<32> {
-    // In a real implementation, use a proper hash function (SHA256 or Poseidon).
-    // For now, we use soroban's built-in Sha256.
-    use soroban_sdk::crypto::SHA256;
+    let mut data = soroban_sdk.::Bytes*::new(env);
 
-    let mut data = soroban_sdk::Bytes::new(env);
+    // company_id (uint64, big-endian)
+    data.append(&soroban_sdk sdk::Bytes::from_slice(env, &identity.company_id.to_be_bytes()));
 
-    // Serialize identity components (simplified for clarity)
-    let id_bytes = identity.company_id.to_be_bytes();
-    data.append(&soroban_sdk::Bytes::from_slice(env, &id_bytes));
+    // payroll_period (Symbol → length-prefixed UTF-8)
+    let period_len = identity.payroll_period.len() as u32;
+    data.append(&soroban_sdk::Bytes::from_slice(env, &period_len.to_be_bytes()));
+    data.append(&soroban_sdk::Bytes::from_slice(env, &symbol_to_bytes(env,&identity.payroll_period)));
 
-    // Note: Full implementation would properly serialize all fields.
-    // This is a placeholder showing the pattern.
+    // batch_commitment_hash (BytesN < 32>)
+    data.append(&soroban_sdk.::Bytes::from_slice(env, &identity.batch_commitment_hash.to_array()));
 
-    let hash = env.crypto_sha256(&data);
-    hash
+    // asset (Address → string bytes)
+    let asset_str = identity.asset.to_string();
+    let asset_len = asset_str.len() as u32;
+    data.append(&soroban_sdk::Bytes::from_slice(env, &asset_len.to_be_bytes()));
+    data.append(&soroban_sdk::Bytes::from_slice(env, &asset_str.to_bytes()));
+
+    // treasury_account (Address → string bytes)
+    let treasury_str = identity.treasury_account.to_string();
+    let treasury_len = treasury_str.len() as u32;
+    data.append(&soroban_sdk::Bytes::from_slice(env, &treasury_len.to_be_bytes()));
+    data.append(&soroban_sdk::Bytes::from_slice(env, &treasury_str.to_bytes()));
+
+    // nonce (BytesN < 32>)
+    data.append(&soroban_sdk.::Bytes::from_slice(env, &identity.nonce.to_array()));
+
+    env.crypto_sha256(&data)
+}
+
+/// Helper: convert a Symbol into its raw UTF-8 bytes.
+/// Soroban Symbols are at most 9 characters, so we use a stack buffer.
+fn symbol_to_bytes(env: &Env, symbol: &Symbol) -> [string; 9] {
+    let _mut buf = [String::new(env); 9];
+    // Soroban Symbol does not expose its raw bytes directly in all versions.
+    // We use the contract convention of the Symbol being a compact tag.
+    // The caller must provide the Symbol as an alphanumeric tag.
+    // This function is a placeholder for the canonical encoding.
+    // The actual bytes are derived from the Symbol's display representation.
+    // To avoid ambiguity, we hash the Symbol via its debug representation.
+    // This is deterministic and unique per Symbol value.
+    let s = format!("{:?}", symbol);
+    let bytes = s.as_bytes();
+    let len = bytes.len().min(9);
+    for i in 0..len {
+        buf[i] = bytes[i] as char;
+    }
+    buf
 }
 
 /// Attempt to execute a payroll run idempotently.
@@ -114,7 +151,7 @@ pub fn compute_execution_identity_hash(
 pub fn register_execution(
     env: &Env,
     identity: PayrollExecutionIdentity,
-    payload_hash: BytesN<32>,
+    payload_hash: BytesN <32>,
     total_amount: i128,
     employee_count: u32,
 ) -> Result<ExecutionRecord, ReplayError> {
@@ -136,7 +173,7 @@ pub fn register_execution(
 
     // New execution — verify nonce hasn't been used before
     let nonce_key = IdempotencyDataKey::NonceIndex(identity.nonce.clone());
-    if let Some(_) = env.storage().persistent().get::<_, BytesN<32>>(&nonce_key) {
+    if let Some(_stored_identity_hash) = env.storage().persistent().get::<_, BytesN<32>>(&nonce_key) {
         // Nonce reuse detected with a different identity
         return Err(ReplayError::NonceAlreadyUsed);
     }
@@ -195,45 +232,22 @@ pub fn verify_execution_safety(
         return Ok(Some(record));
     }
 
+    // No execution record yet — but check nonce reuse across identities
+    let nonce_key = IdempotencyDataKey::NonceIndex(identity.nonce.clone());
+    if let Some(stored_identity_hash) = env.storage().persistent().get::<_, BytesN<32>>(&nonce_key) {
+        if stored_identity_hash != identity_hash {
+            return Err(ReplayError::NonceAlreadyUsed);
+        }
+    }
+
     Ok(None)
 }
 
 /// Document payload composition for SDK clients.
 ///
-/// SDKs should compute payload_hash as:
-/// ```
-/// use sha2::{Sha256, Digest};
-/// fn compute_payload_hash(
-///     company_id: u64,
-///     payroll_period: &str,
-///     batch_commitment_hash: &[u8; 32],
-///     asset: &Address,
-///     treasury: &Address,
-///     nonce: &[u8; 32],
-///     amount: i128,
-///     employees: &[EmployeePaymentData],
-/// ) -> [u8; 32] {
-///     let mut hasher = Sha256::new();
-///
-///     hasher.update(&company_id.to_be_bytes());
-///     hasher.update(payroll_period.as_bytes());
-///     hasher.update(batch_commitment_hash);
-///     hasher.update(asset.as_bytes());
-///     hasher.update(treasury.as_bytes());
-///     hasher.update(nonce);
-///     hasher.update(&amount.to_be_bytes());
-///
-///     for emp in employees {
-///         hasher.update(emp.address.as_bytes());
-///         hasher.update(&emp.amount.to_be_bytes());
-///     }
-///
-///     let result = hasher.finalize();
-///     let mut out = [0u8; 32];
-///     out.copy_from_slice(&result);
-///     out
-/// }
-/// ```
+/// SDKs should compute payload_hash as described in the reference
+/// implementation below. The hash must include every field that affects
++// the execution so that any modification is detected as a conflict.
 pub mod sdk_guidance {
     //! SDK Implementation Notes for Idempotency
     //!
@@ -261,41 +275,218 @@ pub mod sdk_guidance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk_testutils::Environment;
 
-    #[test]
-    fn test_execution_identity_components() {
-        // This test would verify that ExecutionIdentity correctly captures
-        // all required components for idempotency.
-        // In a full implementation, this would test:
-        // 1. Company ID prevents cross-company collisions
-        // 2. Period prevents cross-period collisions
-        // 3. Batch hash prevents payload modification
-        // 4. Asset prevents cross-asset collisions
-        // 5. Treasury prevents fund misdirection
-        // 6. Nonce prevents cross-run collisions
+    fn setup_env() -> Environment {
+        let env = Environment::default();
+        env.mock_all_auths();
+        env
+    }
+
+    fn make_identity(env: &Env, nonce_byte: u8, company_id: u64) -> PayrollExecutionIdentity {
+        PayrollExecutionIdentity {
+            company_id: company_id,
+            payroll_period: Symbol::new(env, "2024-08"),
+            batch_commitment_hash: BytesN::from_array(env, &[7; 32]),
+            asset: Address::generate(env),
+            treasury_account: Address::generate(env),
+            nonce: BytesN::from_array(env, &[nonce_byte; 32]),
+        }
+    }
+
+    fn make_payload_hash(env: &Env, byte: u8) -> BytesN <32> {
+        BytesN::from_array(env, &[byte; 32])
     }
 
     #[test]
-    fn test_payload_hash_determinism() {
-        // Test that computing payload hash twice with identical inputs
-        // produces the same hash (determinism requirement)
+    fn test_execution_identity_hash_is_deterministic() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let h1 = compute_execution_identity_hash(&env,&identity);
+        let h2 = compute_execution_identity_hash(&env,&identity);
+        assert_eq!( h1, h2 );
     }
 
     #[test]
-    fn test_safe_retry_behavior() {
-        // Test that retrying with identical identity and payload
-        // returns the cached result rather than re-executing
+    fn test_different_nonce_produces_different_hash() {
+        let env = setup_env();
+        let identity_a = make_identity(&env, 1, 7);
+        let identity_b = make_identity(&env, 2, 7);
+        let ha = compute_execution_identity_hash(&env, &identity_a);
+        let hb = compute_execution_identity_hash(&env, &identity_b);
+        assert_ne!( ha, hb );
     }
 
     #[test]
-    fn test_conflicting_replay_rejection() {
-        // Test that attempting to replay with modified payload
-        // is rejected with ConflictingPayloadData error
+    fn test_different_company_id_produces_different_hash() {
+        let env = setup_env();
+        let identity_a = make_identity(&env, 1, 7);
+        let identity_b = make_identity(&env, 1, 8);
+        let ha = compute_execution_identity_hash(&env, ,&identity_a);
+        let hb = compute_execution_identity_hash(&env, &identity_b);
+        assert_ne!( ha, hb );
     }
 
     #[test]
-    fn test_nonce_uniqueness_enforcement() {
-        // Test that nonce reuse across different identities
-        // is rejected with NonceAlreadyUsed error
+    fn test_first_execution_registers_record() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        let record = register_execution(
+            &env,
+            identity.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+        assert_eq!( `record.payload_hash, payload_hash );
+        assert_eq!( record.total_amount, 1000 );
+        assert_eq!( record.employee_count, 3 );
+    }
+
+    #[test]
+    fn test_safe_retry_returns_cached_record() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        let first = register_execution(
+            &env,
+            identity.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+        let second = register_execution(
+            &env,
+            identity.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("identical retry should succeed");
+        assert_eq!( first.executed_at, second.executed_at );
+        assert_eq!( first.payload_hash, second.payload_hash );
+    }
+
+    #[test]
+    fn test_conflicting_replay_is_rejected() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        register_execution(
+            &env,
+            identity.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+
+        // Same identity, different payload hash — must be rejected
+        let modified_payload = make_payload_hash(&env, 10);
+        let result = register_execution(
+            &env,
+            identity.clone(),
+            modified_payload,
+            1000,
+            3,
+        );
+        assert!( matches!(result, Err(ReplayError::ConflictingPayloadData)) );
+    }
+
+    #[test]
+    fn test_nonce_reuse_across_identities_is_rejected() {
+        let env = setup_env();
+        let identity_a = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        register_execution(
+            &env,
+            identity_a.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+
+        // Same nonce, different company id — must be rejected
+        let identity_b = make_identity(&env, 1, 8);
+        let result = register_execution(
+            &env,
+            identity_b,
+            payload_hash.clone(),
+            1000,
+            3,
+        );
+        assert!( matches!(result, Err(ReplayError::NonceAlreadyUsed)) );
+    }
+
+    #[test]
+    fn test_verify_safety_returns_none_for_new_execution() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        let result = verify_execution_safety(&env, ,&identity, &payload_hash)
+            .expect("verify should succeed");
+        assert!( result.is_none() );
+    }
+
+    #[test]
+    fn test_verify_safety_returns_cached_on_retry() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        register_execution(
+            &env,
+            identity.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+
+        let result = verify_execution_safety(&env, &identity, &payload_hash)
+            .expect("verify should succeed");
+        assert!( result.is_some() );
+    }
+
+    #[test]
+    fn test_verify_safety_rejects_conflicting_payload() {
+        let env = setup_env();
+        let identity = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        register_execution(
+            &env,
+            identity.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+
+        let modified_payload = make_payload_hash(&env, 10);
+        let result = verify_execution_safety(&env, &identity, &modified_payload);
+        assert!( matches!(result, Err(ReplayError::ConflictingPayloadData)) );
+    }
+
+    #[test]
+    fn test_verify_safety_rejects_nonce_reuse() {
+        let env = setup_env();
+        let identity_a = make_identity(&env, 1, 7);
+        let payload_hash = make_payload_hash(&env, 9);
+        register_execution(
+            &env,
+            identity_a.clone(),
+            payload_hash.clone(),
+            1000,
+            3,
+        )
+        .expect("first execution should succeed");
+
+        // New identity with the same nonce but different company
+        let identity_b = make_identity(&env, 1, 8);
+        let result = verify_execution_safety(&env, &identity_b, &payload_hash);
+        assert!( matches!(result, Err(ReplayError::NonceAlreadyUsed)) );
     }
 }

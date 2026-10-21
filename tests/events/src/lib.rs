@@ -209,3 +209,4 @@ mod tests {
         assert_eq!(key_bytes.len(), 32);
     }
 }
+mod wallet_update_event_tests;

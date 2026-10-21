@@ -8,9 +8,8 @@
 //! authorize specific privileged actions off-chain by signing a payload that
 //! MUST carry an expiration ledger, submitted on-chain later by anyone
 //! (the operator key's signature is the authorization; the submitter does
-//! not need to be the admin or hold any role). This is useful for an
-//! operator workflow where the signing key is offline/air-gapped from the
-//! submitting infrastructure.
+//! not need to be the admin or hold any role). It currently covers reviewer
+//! grants and company lifecycle-state changes.
 //!
 //! `require_auth()`-gated entrypoints (`add_reviewer` itself, etc.) are
 //! UNCHANGED — this is an additional, parallel authorization mechanism, not
@@ -34,15 +33,17 @@ use shared_errors::ReplayError;
 pub const MAX_AUTHORIZATION_TTL_LEDGERS: u32 = 518_400;
 
 /// The specific privileged action a signed operator authorization grants.
-/// Deliberately narrow at introduction (issue #519's reference
-/// implementation covers `add_reviewer`); extend this enum, not the
-/// signing/verification plumbing, when a second action needs this path.
+/// Each variant binds all action arguments so a signature cannot be reused
+/// for a different operation.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignedOperatorAction {
     /// Authorizes `add_reviewer(reviewer)` — the wrapped `Address` is the
     /// reviewer being granted authorization.
     AddReviewer(Address),
+    /// Authorizes `set_company_state(state)` — the wrapped lifecycle state
+    /// is the exact value being applied.
+    SetCompanyState(crate::CompanyState),
 }
 
 /// The payload an operator key signs off-chain. XDR-encoded and SHA-256'd

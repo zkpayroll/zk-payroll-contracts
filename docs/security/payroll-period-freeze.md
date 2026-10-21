@@ -35,6 +35,16 @@ default for backward compatibility.
 `set_settlement_window` rejects edits with a frozen period. The explicit freeze
 is permanent: there is no unfreeze entry point.
 
+## Calendar overlap detection
+
+`set_settlement_window` also rejects a window whose inclusive range
+`[open_at, close_at]` intersects another configured payroll period. Periods may
+be configured in any order, and a period may replace its own window provided
+the new range does not overlap another period. Sharing an endpoint counts as an
+overlap; leave at least one second between a period's `close_at` and the next
+period's `open_at`. Overlap failures use payment error code `313` and do not
+include payroll amounts or employee data.
+
 ## Test coverage
 
 `contracts/payroll/tests/period_freeze_guard.rs` covers:

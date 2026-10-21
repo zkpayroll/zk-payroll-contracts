@@ -123,6 +123,37 @@ salary values. Keep the original proofs and payout inputs in the authorized
 payroll workflow; do not include them in user-facing errors or operational
 logs.
 
+### Interrupted Run Recovery
+
+When a bounded payroll batch is interrupted mid-execution (e.g. a transient
+failure or an operator stop), the contract persists a `BatchCheckpoint` keyed by
+`employer`, `batch_root`, `asset`, and `execution_nonce`. The checkpoint records
+the last processed index and a lifecycle state:
+
+| State | Meaning |
+| --- | --- |
+| `Pending` | Checkpoint opened; no payments recorded yet. |
+| `PartiallyCheckpointed` | Some payments processed; the run may be resumed. |
+| `Failed` | The run failed before completion and may be resumed after recovery. |
+| `Resumed` | The run was recovered and is ready to resume from the saved index. |
+| `Completed` | All payments in the batch have been processed. |
+
+The admin can inspect whether a run is recoverable with
+` is_interrupted_run_recoverable`, passing the checkpoint identity and the
+expected payment count. The view returns true only when the checkpoint is not
+completed, contains remaining payments, and has not already been resumed.
+
+To resume, the admin calls `recover_interrupted_payroll_run` with the same
+identity and expected payment count. The call transitions the checkpoint to
+`Resumed`, clears the `failed` flag, and preserves the last processed index
+so execution continues without repeating completed payouts. A completed run
+cannot be recovered; the contract returns an actionable error ("Nothing left
+ to recover" or "Cannot recover a fully completed payroll run").
+
+Recovery results, errors, and events are redacted: they contain only the
+checkpoint identity, the last processed index, and the lifecycle state. No
+employee identifiers, salary amounts, or bank details are included.
+
 ## Payroll Submission Sequence Validation
 
 Before a prepared run may be submitted, the contract enforces a monotonic submission
@@ -149,6 +180,34 @@ run identifier and the expected sequence number. No employee identifiers, salary
 amounts, bank details, or salary commitments are included in the error, events,
 telemetry, or contract state.
 
+## Contract Period Transition Consistency
+
+Payroll runs carry a contract period (a start and end timestamp) that defines
+the salary interval being settled. To keep the canonical state machine and the
+contract period mutually consistent, the contract validates the period on every
+state transition that moves a run forward.
+
+- A contract period must have a start that is strictly before its end.
+- The period must not be in the future relative to the transition timestamp.
+- The period must not be older than the configured maximum contract period age.
+- Transitions that do not move the run forward (e.g. cancellation or failure)
+  do not revalidate the period, so a run can always be stopped even if its
+  period has since become invalid.
+
+Errors are actionable and redacted: they name the run and the field that failed
+validation (for example `invalid_contract_period` or `contract_period_expired`)
+without exposing employee identifiers, salary amounts, or bank details.
+
+| Entry point | Period consistency effect |
+| --- | --- |
+| `set_contract_period_policy` | Admin-only configuration of the maximum contract period age. |
+| `validate_contract_period` | Read-only check that returns an actionable error when the period is invalid for the given transition timestamp. |
+| `transition_payroll_run_state` | Rejects forward transitions whose contract period is invalid. |
+| `prepare_payroll_run` | Validates the contract period before storing `submitted`. |
+
+The contract exposes `is_contract_period_valid` so tests and off-chain mirrors
+can assert the same consistency rules without duplicating them.
+
 ## Future Additions
 
 When adding or renaming a state, update all of the following in the same pull
@@ -173,49 +232,9 @@ In addition to the run state machine, `RunDraftState` in `contracts/payroll/src/
 
 | State | Contract variant | Terminal | Semantics |
 | --- | --- | --- | --- |
-| `pending` | `Pending` | No | Draft is created or amended and open for corrections. |
-| `finalized` | `Finalized` | No | Draft is locked for review; no further amendments allowed. |
-| `submitted` | `Submitted` | Yes | Draft has been submitted for execution. |
-| `cancelled` | `Cancelled` | Yes | Draft was cancelled before submission. |
-| `expired` | `Expired` | Yes | Draft expired before submission. |
-
-### Allowed Draft Transitions
-
-| From | To | Initiator | User-visible meaning |
-| --- | --- | --- | --- |
-| `pending` | `finalized` | Admin | Finalize draft for review. |
-| `pending` | `submitted` | Admin | Submit draft directly for processing. |
-| `pending` | `cancelled` | Admin | Cancel draft. |
-| `pending` | `expired` | Admin / Automation | Expire stale draft. |
-| `finalized` | `submitted` | Admin | Submit finalized draft for processing. |
-| `finalized` | `cancelled` | Admin | Cancel finalized draft. |
-| `finalized` | `expired` | Admin / Automation | Expire finalized draft. |
-
-`Submitted`, `Cancelled`, and `Expired` are terminal draft states. Transitions out of terminal states are forbidden.
-
-### Draft Contract Entry Points
-
-| Entry point | State effect |
-| --- | --- |
-| `create_run_draft` | Creates a new draft in `Pending` state. |
-| `amend_run_draft` | Updates `total_amount` and `employee_count` for `Pending` draft. |
-| `finalize_run_draft` | Transitions `Pending` draft to `Finalized`. |
-| `submit_run_draft` | Transitions `Pending` or `Finalized` draft to `Submitted`. |
-| `cancel_run_draft` | Transitions `Pending` or `Finalized` draft to `Cancelled`. |
-| `expire_run_draft` | Transitions `Pending` or `Finalized` draft to `Expired`. |
-| `is_draft_transition_allowed` | Returns whether a draft transition is valid. |
-| `is_draft_state_terminal` | Returns whether a draft state is terminal. |
-
-### Privacy Guarantees
-
-All draft state transitions emit events containing only `(draft_id, admin)` identifiers. Individual employee salary values, bank details, and salary commitments remain redacted and unexposed in state logs, telemetry, and contract state.
-
----
-
-## Cancellation State Cleanup & Audit Preservation
-
-When an admin cancels a pending payroll run via `cancel_payroll_run_with_reason`:
-1. **Active Storage Cleanup**: The `PendingPayrollRun` record (`DataKey::PendingRun(run_id)`) is immediately removed from persistent storage to prevent execution race conditions and double-spending.
-2. **Audit State Preservation**: The canonical state `PayrollRunState::Cancelled` is permanently recorded in `DataKey::PayrollState(run_id)`. Reconcilers and auditors querying `get_payroll_run_state(run_id)` receive `Cancelled`, distinguishing an intentional cancellation from an invalid ID.
-3. **Replay Protection**: The `RunNonce` remains marked as spent in storage, preventing any replay of the exact same batch nonce.
-4. **Treasury Safety**: No token transfers or balance deductions occur; treasury balances remain correct.
+| `pending` | `Pending` | No | Draft is created and awaiting validation. |
+| `validating` | `Validating` | No | Draft is being validated. |
+| `ready` | `Ready` | No | Draft is ready to be submitted. |
+| `submitted` | `Submitted` | Yes | Draft was submitted as a payroll run. |
+| `failed` | `Failed` | Yes | Draft failed validation or submission. |
+| `cancelled` | `Cancelled` | Yes | Draft was intentionally discarded. }

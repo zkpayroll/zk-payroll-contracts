@@ -275,6 +275,30 @@ data       (BytesN<32> old_commitment, BytesN<32> new_commitment)
 
 ---
 
+### `ApprovedCommitmentRotated` ? `salary_commitment`
+
+Emitted when a **locked** (approved or already settled) commitment is rotated
+via `rotate_approved_commitment` (issue #520). The lock is retained, so the
+payroll record that caused the lock stays bound to the retired commitment
+value, which also remains available in `get_commitment_history`.
+
+```
+topics[0]  Symbol("ApprovedCommitmentRotated")
+topics[1]  Address employee
+data       (BytesN<32> old_commitment, BytesN<32> new_commitment)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` (authoritative invalidation signal for future runs only) | Indexers, salary-history rebuilders, audit trails |
+
+> ?? Unlike `CommitmentRotated`, this event does **not** require a preceding
+> `CommitmentUnlocked`: there is no window in which the approved binding is
+> unprotected. It is still preceded by `CommitmentUpdated` in the same
+> transaction (the new value becomes the active commitment).
+
+---
+
 ### `CommitmentLocked` ? `salary_commitment`
 
 Emitted when an employee's commitment is locked to prevent silent updates
@@ -385,6 +409,28 @@ data       ()
 These events cover payroll periods, individual payment execution, and the
 proof-verified settlement step. Reconciliation tools, payment dashboards,
 and indexers MUST subscribe to this domain.
+
+### `payroll / review_resolution_audit` ? overpayment review
+
+Emitted whenever an overpayment review is resolved. This additive audit event
+preserves the legacy `payroll / review_resolved` event while making the
+resolving administrator, mandatory reason, and resolution timestamp
+available to indexers. It contains no salary amounts, employee addresses, or
+proof data.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("review_resolution_audit")
+data       (u64 review_id, u64 run_id, Address resolved_by,
+            Symbol resolution_reason, u64 resolved_at)
+```
+
+`review_id` and `run_id` correlate the event with the stored review and
+payroll run. `resolved_at` is the ledger timestamp used in the review record.
+
+| Severity | Consumers |
+|----------|-----------|
+| `MEDIUM` (exception disposition) | Audit dashboards, reconciliation tools, compliance indexers |
 
 ### `PeriodCreated` ? `payment_executor`
 
@@ -509,6 +555,44 @@ assert topics only; they do not log or export payroll amounts, commitments, or
 employee addresses. A failed or unauthorized approval reverts and emits no
 `run_approved` event.
 
+#### `payroll / run_approval_withdrawn`
+
+Emitted when the reviewer that recorded a run's active approval withdraws it
+(#522). The stored review transitions to a `Withdrawn` decision, so downstream
+consumers treating the run as approved must stop doing so when this event is
+observed.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_approval_withdrawn")
+data       (u64 run_id, Address reviewer, Symbol reason)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Approval-workflow indexers, compliance dashboards |
+
+#### `payroll / run_approval_superseded`
+
+Emitted when a different authorized reviewer takes over an existing approval
+(#522). The active approval is re-pointed at the new reviewer and its #403
+expiry window restarts from the supersession time.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("run_approval_superseded")
+data       (u64 run_id, Address previous_reviewer, Address new_reviewer)
+```
+
+| Severity | Consumers |
+|----------|-----------|
+| `LOW` | Approval-workflow indexers, compliance dashboards |
+
+Both withdrawal and supersession events are privacy-safe: they carry only the
+opaque run id, reviewer addresses, and a short reason symbol (withdrawal
+only). A failed or unauthorized withdrawal or supersession reverts and emits
+no event.
+
 
 #### `payroll / draft_updated`
 
@@ -532,6 +616,28 @@ data       (Address from, i128 amount)
 | Severity | Consumers |
 |----------|-----------|
 | `LOW` (treasury deposits) | Funding dashboards, treasury monitors |
+
+#### `payroll / treasury_balance_snapshot`
+
+Emitted after a successful treasury or payroll lifecycle transition. The
+snapshot is the same aggregate view returned by `get_safe_treasury_summary`:
+it contains token-level liquidity and reservation totals, but no employee row,
+salary commitment, proof, or recipient data.
+
+```
+topics[0]  Symbol("payroll")
+topics[1]  Symbol("treasury_balance_snapshot")
+topics[2]  Address asset
+data       (i128 total_balance, i128 available_balance,
+            i128 reserved_balance, i128 blocked_balance,
+            u64 observed_at, Symbol trigger)
+```
+
+`trigger` identifies the completed boundary: `deposit`, `run_prepared`,
+`run_finalized`, `run_cancelled`, `run_expired`, `run_executed`, or
+`emergency_withdrawal`. Amounts are raw token units and should be normalized
+using the asset's decimals. Consumers should treat the event as an
+observability snapshot, not as an authorization signal.
 
 > ?? The legacy `payroll` contract emits additional event types beyond the
 > three enumerated above (for example `draft_amended`, run lifecycle and
@@ -799,6 +905,20 @@ mean "no value/subject". `revision` is contract-wide and gap-free, and
 [config-audit-events.md](./config-audit-events.md) for the key table, how to
 verify a reference, and the privacy model.
 
+Each change is also persisted on-chain (#707) as a `ConfigLedgerEntry` keyed by
+revision, with exactly the event's fields (hashes only):
+
+```
+ConfigLedgerEntry { key: Symbol, actor: Address, subject_ref: BytesN<32>,
+                    previous_ref: BytesN<32>, new_ref: BytesN<32>,
+                    revision: u64, ledger_sequence: u32, timestamp: u64 }
+```
+
+Read it with `get_config_change(revision) -> Option<ConfigLedgerEntry>` or
+`get_config_ledger(start_revision, limit) -> Vec<ConfigLedgerEntry>` (`limit`
+capped at 50; empty when `start_revision` is `0` or past the latest revision).
+The event schema is unchanged.
+
 | Severity | Consumers |
 |----------|-----------|
 | `MEDIUM` (privileged configuration change) | Compliance auditors, security monitoring, admin dashboards, indexers |
@@ -882,6 +1002,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `CommitmentUpdated` | `salary_commitment` | `(employee)` | `(commitment,)` |
 | `CommitmentUpdated` | `payroll_registry` | `(company_id, employee)` | `(new_commitment,)` |
 | `CommitmentRotated` | `salary_commitment` | `(employee)` | `(old, new)` |
+| `ApprovedCommitmentRotated` | `salary_commitment` | `(employee)` | `(old, new)` |
 | `ReferenceIdSet` | `salary_commitment` | `(employee)` | `(reference_id,)` |
 | `AdminRotationProposed` | `salary_commitment` | `(current_admin)` | `(new_admin,)` |
 | `CompanyRegistered` | `payroll_registry` | `(company_id)` | `(admin, treasury)` |
@@ -897,6 +1018,7 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `PauseManager / op_rotated` | `pause_manager` | `("PauseManager", "op_rotated")` | `Address new_operator` *(bare Address ? single-value data)* |
 | `PauseManager / op_cancelled` | `pause_manager` | `("PauseManager", "op_cancelled")` | `Address current_operator` *(bare Address ? single-value data)* |
 | `payroll / config_changed` | `payroll` | `("payroll", "config_changed", key)` | `(actor, subject_ref, previous_ref, new_ref, revision, ledger_sequence, timestamp)` |
+| `payroll / asset_deprecation_updated` | `payroll` | `("payroll", "asset_deprecation_updated")` | `(Address asset, bool deprecated)` — emitted by `deprecate_asset` / `undeprecate_asset` (#708); also audited as `config_changed` key `asset_deprecated` |
 | `InterruptedRunRecovered` | `payroll` | `("InterruptedRunRecovered", Address employer, Address asset)` | `(batch_root, execution_nonce, resumed_checkpoint_index, total_checkpoints)` |
 
 
@@ -919,3 +1041,72 @@ Quick-reference: which consumer types should subscribe to which domain.
 | `pause_manager` contract | `contracts/pause_manager/src/lib.rs` |
 | `proof_verifier` contract | `contracts/proof_verifier/src/lib.rs` |
 | Legacy `payroll` contract | `contracts/payroll/src/lib.rs` |
+
+---
+
+## Events Added by Issues #349, #269, #255, #252
+
+### Scoped Emergency Pause Events (#349)
+
+These events are emitted by `contracts/payroll/src/scoped_pause.rs` when an
+authorized admin activates or clears a per-scope pause. Each scope
+(`Funding`, `Approval`, `Execution`, `Audit`, `Archival`) is controlled
+independently — pausing `Execution` never affects `Audit`.
+
+| Event | Topics | Data | Notes |
+|-------|--------|------|-------|
+| `scope_paused` | `("payroll", "scope_paused", scope_name)` | `()` | Emitted by `activate_scope_pause`; idempotent (no duplicate emit). |
+| `scope_cleared` | `("payroll", "scope_cleared", scope_name)` | `()` | Emitted by `clear_scope_pause`; no-op if scope was not paused. |
+
+`scope_name` is one of: `Funding`, `Approval`, `Execution`, `Audit`, `Archival`.
+
+Privacy: no employee addresses, salary amounts, or commitment hashes appear in
+these events.
+
+### Employee Wallet Update Event (#269)
+
+Emitted by `payroll_registry` when `update_payout_destination` or
+`update_payout_destination_wallet` succeeds.
+
+| Event | Topics | Data | Notes |
+|-------|--------|------|-------|
+| `PayoutDestinationUpdated` | `("PayoutDestinationUpdated", company_id: u64, employee: Address)` | `(old_dest: Address, new_dest: Address)` | Never contains salary values or commitment hashes. |
+
+- A rejected update (invalid wallet format, duplicate destination, zero
+  address) emits **no event**.
+- Off-chain indexers can correlate the `employee` topic with their own
+  permissioned records; the event itself reveals only addresses, not salary.
+
+### Fee Reserve Validation (#255)
+
+Fee reserve validation runs as a pure-Rust guard before payroll execution.
+No on-chain event is emitted for successful validations; failures are
+signalled via panics using typed `FeeReserveError` codes. See
+`docs/treasury.md#fee-reserve-requirements` for the reserve formula and
+configuration guide.
+
+Error code strings (from `FeeReserveError::as_str()`):
+
+| Code | Meaning |
+|------|---------|
+| `insufficient_fee_reserve` | Treasury balance after payroll is below the required reserve. |
+| `invalid_fee_config` | `required_fee_reserve` is negative — deployer configuration error. |
+| `non_positive_payroll_total` | Payroll total is zero or negative. |
+
+### Admin Action Events (#252)
+
+All sensitive admin actions on `payroll_registry` emit structured events.
+These supplement the `payroll` contract's `config_changed` events (#490).
+
+| Event | Contract | Topics | Data |
+|-------|----------|--------|------|
+| `CompanyAdminProposed` | `payroll_registry` | `(Symbol, company_id: u64, current_admin: Address)` | `(proposed_admin: Address,)` |
+| `CompanyAdminRotated` | `payroll_registry` | `(Symbol, company_id: u64, old_admin: Address)` | `(new_admin: Address,)` |
+| `CompanyAdminRotCancelled` | `payroll_registry` | `(Symbol, company_id: u64, caller: Address)` | `()` |
+| `EmployeeRemoved` | `payroll_registry` | `(Symbol, company_id: u64, employee: Address)` | `()` |
+| `CommitmentUpdated` | `payroll_registry` | `(Symbol, company_id: u64, employee: Address)` | `(new_commitment: BytesN<32>,)` |
+
+Privacy guarantee: none of the above events carry salary values, blinding
+factors, or private payroll run data. The `CommitmentUpdated` event carries
+the new commitment hash (already public in the registry) but never the
+underlying salary amount.

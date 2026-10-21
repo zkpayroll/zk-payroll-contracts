@@ -11,6 +11,7 @@ doctest = false
 [dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 audit_module = { path = "../../contracts/audit_module" }
+payroll_registry = { path = "../../contracts/payroll_registry", features = ["testutils"] }
 
 [dev-dependencies]
 payroll = { path = "../../contracts/payroll" }

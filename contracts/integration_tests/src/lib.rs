@@ -315,6 +315,68 @@ mod e2e {
         );
     }
 
+    #[test]
+    fn test_payroll_uses_fallback_when_primary_is_underfunded() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let fallback_treasury = Address::generate(env);
+        ctx.payroll_client
+            .configure_fallback_treasury(&fallback_treasury);
+
+        let commitment = alice_salary_commitment(&ctx.commitment_client);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &ctx.alice, &commitment);
+        ctx.token_client.mint(&fallback_treasury, &5_000);
+
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        let mut amounts = Vec::new(env);
+        amounts.push_back(5_000);
+        let mut employees = Vec::new(env);
+        employees.push_back(ctx.alice.clone());
+
+        ctx.payroll_client
+            .batch_process_payroll(&proofs, &amounts, &employees, &5_000);
+
+        assert_eq!(ctx.token_client.balance(&ctx.treasury), 0);
+        assert_eq!(ctx.token_client.balance(&fallback_treasury), 0);
+        assert_eq!(ctx.token_client.balance(&ctx.alice), 5_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient funds in primary and fallback treasuries")]
+    fn test_payroll_rejects_underfunded_primary_and_fallback() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let fallback_treasury = Address::generate(env);
+        ctx.payroll_client
+            .configure_fallback_treasury(&fallback_treasury);
+
+        let commitment = alice_salary_commitment(&ctx.commitment_client);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &commitment);
+
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        let mut amounts = Vec::new(env);
+        amounts.push_back(5_000);
+        let mut employees = Vec::new(env);
+        employees.push_back(ctx.alice.clone());
+
+        ctx.payroll_client
+            .batch_process_payroll(&proofs, &amounts, &employees, &5_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Fallback treasury must differ from primary treasury")]
+    fn test_payroll_rejects_primary_as_fallback() {
+        let ctx = setup();
+        ctx.payroll_client
+            .configure_fallback_treasury(&ctx.treasury);
+    }
+
     /// Paying an employee who has no commitment on-chain must panic.
     #[test]
     #[should_panic(expected = "Commitment not found")]

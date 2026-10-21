@@ -18,6 +18,17 @@
       { "name": "new_commitment", "type": "BytesN<32>" }
     ]
   },
+  "salary_commitment.ApprovedCommitmentRotated": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "ApprovedCommitmentRotated" },
+      { "type": "Address" }
+    ],
+    "data": [
+      { "name": "old_commitment", "type": "BytesN<32>" },
+      { "name": "new_commitment", "type": "BytesN<32>" }
+    ]
+  },
   "salary_commitment.CommitmentLocked": {
     "schema_version": 1,
     "topics": [

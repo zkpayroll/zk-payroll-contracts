@@ -65,6 +65,15 @@ pub fn nonce(env: &Env, marker: u8) -> BytesN<32> {
     BytesN::from_array(env, &bytes)
 }
 
+/// Registers and returns a fresh authorized import source (#617/#657), for
+/// tests that only need `batch_process_payroll`'s required `source_address`
+/// to be valid and aren't themselves exercising import source validation.
+pub fn authorized_source(env: &Env, payroll: &PayrollClient) -> Address {
+    let source = Address::generate(env);
+    payroll.register_import_source(&source, &0u32);
+    source
+}
+
 pub fn one_payment(env: &Env, employee: &Address) -> (Vec<BytesN<256>>, Vec<i128>, Vec<Address>) {
     (
         Vec::from_array(env, [BytesN::from_array(env, &[1; 256])]),

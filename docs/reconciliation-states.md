@@ -91,6 +91,12 @@ Only the `admin` address may call `update_reconciliation_status`. The contract v
 this before accepting the update and emits a `("payroll", "reconciliation_updated")` event
 with `(run_id, new_status)` for every accepted transition.
 
+Each accepted update also replaces the run's `ReconciliationMarker`, recording the
+status, ledger timestamp, and admin address. Clients can retrieve the latest marker with
+`get_reconciliation_marker(run_id)`; it returns `None` when no explicit status update
+has been recorded. Markers contain no payroll amounts or employee data, and do not
+change payment execution.
+
 ## On-chain event
 
 | Event topic | Data payload |

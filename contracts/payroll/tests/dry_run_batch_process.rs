@@ -18,6 +18,11 @@ fn args(env: &Env, employee: &Address, amount: i128, nonce_marker: u8) -> DryRun
         nonce: common::nonce(env, nonce_marker),
         draft_hash: None,
         proof_count: 1,
+        sequence: None,
+        source_address: None,
+        contract_period: None,
+        expected_contract_period: None,
+        contract_period_closed: false,
     }
 }
 
@@ -52,6 +57,11 @@ fn zero_proofs_is_reported_as_missing_proof() {
         nonce: common::nonce(&env, 1),
         draft_hash: None,
         proof_count: 0,
+        sequence: None,
+        source_address: None,
+        contract_period: None,
+        expected_contract_period: None,
+        contract_period_closed: false,
     };
     let report = client.dry_run_batch_process_payroll(&a);
     assert!(!report.would_succeed);
@@ -101,6 +111,11 @@ fn duplicate_employee_is_reported() {
         nonce: common::nonce(&env, 1),
         draft_hash: None,
         proof_count: 2,
+        sequence: None,
+        source_address: None,
+        contract_period: None,
+        expected_contract_period: None,
+        contract_period_closed: false,
     };
     let report = client.dry_run_batch_process_payroll(&a);
     assert!(!report.would_succeed);
@@ -172,9 +187,9 @@ fn dry_run_never_writes_run_nonce_state() {
 #[test]
 fn asset_not_allowed_is_reported_by_default() {
     let env = Env::default();
-    let (client, _token, employee) = common::setup(&env);
-    // Deliberately skip allow_token: common::setup never allowlists its
-    // token on its own.
+    let (client, token, employee) = common::setup(&env);
+    // `initialize` allowlists the payout token, so remove it explicitly.
+    client.set_asset_allowed(&token, &false);
 
     let report = client.dry_run_batch_process_payroll(&args(&env, &employee, 100, 1));
     assert!(report

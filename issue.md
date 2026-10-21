@@ -84,6 +84,6 @@ Acceptance Criteria
 System.Object[]
 
 Coordination
-Join the Telegram channel for proper coordination: https://t.me/zkpayroll
+Join the Telegram channel for proper coordination: https://t.me/zkpayroll.
 
-
+.

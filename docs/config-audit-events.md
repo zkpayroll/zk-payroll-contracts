@@ -40,6 +40,7 @@ used by the other `payroll` events).
 |-------|---------------|-----------------------|---------|------------------|
 | `pause_manager` | `set_pause_manager` | admin | — | pause manager `Address` |
 | `asset_allowed` | `set_asset_allowed` | admin | asset `Address` | `bool` |
+| `asset_deprecated` | `deprecate_asset` / `undeprecate_asset` | admin | asset `Address` | `bool` |
 | `company_state` | `set_company_state` | admin | — | `CompanyState` |
 | `capacity_limits` | `set_capacity_limits` | admin | — | `CapacityLimits` |
 | `settlement_window` | `set_settlement_window` | admin | period `Symbol` | `SettlementWindow` |
@@ -47,6 +48,7 @@ used by the other `payroll` events).
 | `retention_policy` | `set_retention_policy` | admin | — | `RetentionPolicy` |
 | `dispute_authority` | `add_dispute_authority`, `remove_dispute_authority` | admin | authority `Address` | `bool` (absent once removed) |
 | `reviewer` | `add_reviewer`, `remove_reviewer` | admin | reviewer `Address` | `bool` (absent once removed) |
+| `approval_threshold` | `set_approval_threshold`, `clear_approval_threshold` | admin | — | `u32` (absent once cleared) |
 | `reservation_expiry` | `set_reservation_expiry_policy` | admin | asset `Address` | `ReservationExpiry` |
 | `payroll_currency` | `set_payroll_currency` | admin | — | `PayrollCurrencyConfig` |
 | `storage_version` | `set_storage_version` | admin | — | `StorageVersionState` |
@@ -75,8 +77,42 @@ current value. Because the counter is global, an indexer that has events
 `1..=N` with no gaps and `get_config_revision() == N` knows it has not missed
 any configuration change.
 
-The events are the audit trail: the contract stores only the counter, not a
-history of changes.
+## On-chain change ledger (#707)
+
+Besides the event, each audited change is persisted in contract storage as a
+`ConfigLedgerEntry` keyed by the revision it created
+(`DataKey::ConfigLedgerEntry(revision)`), so history can be queried on-chain
+without an indexer. The entry has exactly the fields of the event, and, like the
+event, holds only `sha256` references, never plaintext values.
+
+```
+ConfigLedgerEntry {
+    key: Symbol,              // which setting changed (same as topics[2])
+    actor: Address,           // authenticated address that made the change
+    subject_ref: BytesN<32>,  // same as event data[1]
+    previous_ref: BytesN<32>, // same as event data[2]
+    new_ref: BytesN<32>,      // same as event data[3]
+    revision: u64,            // contract-wide revision created by this change
+    ledger_sequence: u32,     // env.ledger().sequence()
+    timestamp: u64,           // env.ledger().timestamp()
+}
+```
+
+Read-only entrypoints:
+
+| Function | Returns |
+|----------|---------|
+| `get_config_change(revision: u64)` | `Option<ConfigLedgerEntry>`: the entry for `revision`, or `None` for revision `0` or one not yet reached |
+| `get_config_ledger(start_revision: u64, limit: u32)` | `Vec<ConfigLedgerEntry>`: up to `limit` consecutive entries from `start_revision`, oldest first |
+
+`limit` is capped at 50 per call. `get_config_ledger` returns an empty list when
+`start_revision` is `0` or greater than `get_config_revision()`. To page
+through the history, call it again with `start_revision` advanced by the number
+of entries returned until the result is empty.
+
+No-op and failed changes create no entry, so entries exist for exactly the
+revisions `1..=get_config_revision()`. The event schema, revision semantics,
+and setters are unchanged.
 
 ## No-op, failed, and rejected changes
 
@@ -176,8 +212,14 @@ covers:
 - a full payroll run after configuration changes,
 - the actor's `require_auth`.
 
+[`contracts/payroll/tests/config_ledger.rs`](../contracts/payroll/tests/config_ledger.rs)
+covers the on-chain ledger: entries matching their events, contiguous
+revisions, the `previous_ref`/`new_ref` chain, no entry for no-op, failed, or
+unauthorized changes, pagination, the 50-entry cap, and unknown revisions.
+
 Run them with:
 
 ```bash
 cargo test -p payroll --test config_audit_events
+cargo test -p payroll --test config_ledger
 ```

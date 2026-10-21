@@ -193,7 +193,10 @@ pub fn open_overpayment_review(env: &Env, admin: &Address, run_id: u64) -> u64 {
 ///
 /// # Events
 ///
-/// Emits `("payroll", "review_resolved")` with `(review_id, run_id, resolved_at)`.
+/// Emits `("payroll", "review_resolved")` with
+/// `(review_id, run_id, resolved_at)` for compatibility, plus
+/// `("payroll", "review_resolution_audit")` with
+/// `(review_id, run_id, resolved_by, resolution_reason, resolved_at)`.
 pub fn resolve_overpayment_review(
     env: &Env,
     admin: &Address,
@@ -236,7 +239,7 @@ pub fn resolve_overpayment_review(
     review.status = ReviewStatus::Resolved;
     review.resolved_at = resolved_at;
     review.resolved_by = Some(admin.clone());
-    review.resolution_reason = reason;
+    review.resolution_reason = reason.clone();
 
     env.storage().persistent().set(&key, &review);
 
@@ -249,6 +252,14 @@ pub fn resolve_overpayment_review(
     );
     // topics : ("payroll", "review_resolved")
     // data   : (review_id, run_id, resolved_at)
+    payroll_events::emit_review_resolution_audit(
+        env,
+        review.review_id,
+        run_id,
+        admin.clone(),
+        reason,
+        resolved_at,
+    );
 }
 
 /// Return the overpayment review record for a run, if one exists.

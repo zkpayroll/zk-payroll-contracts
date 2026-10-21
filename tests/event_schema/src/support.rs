@@ -19,8 +19,10 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use soroban_sdk::testutils::Events;
-use soroban_sdk::{contract, contractimpl, Address, Env, Val, Vec as SVec};
+use soroban_sdk::testutils::{Address as _, Events};
+use soroban_sdk::{
+    contract, contractimpl, xdr::ContractEventBody, Address, Env, TryFromVal, Val, Vec as SVec,
+};
 
 /// A no-op contract whose only purpose is to give `as_contract` a real,
 /// registered contract instance to publish events under. `payroll_events`
@@ -101,11 +103,34 @@ pub fn new_env() -> (Env, Address) {
 }
 
 /// Returns the most recently published event as `(contract, topics, data)`.
+///
+/// In SDK 28 the `ContractEvents` snapshot only exposes its raw XDR form, so
+/// this helper decodes the topics/data back into `Val` form for the structural
+/// comparisons the callers perform. The contract id is returned as an
+/// `Address` so the tuple shape is preserved for callers that need it.
 pub fn last_event(env: &Env) -> (Address, SVec<Val>, Val) {
     let all = env.events().all();
-    let len = all.len();
-    assert!(len > 0, "expected an event to have been published");
-    all.get(len - 1).unwrap()
+    let last = all
+        .events()
+        .last()
+        .expect("expected an event to have been published");
+    let v0 = match &last.body {
+        ContractEventBody::V0(v0) => v0,
+    };
+
+    let topics: Vec<Val> = v0
+        .topics
+        .iter()
+        .map(|scv| Val::try_from_val(env, scv).unwrap())
+        .collect();
+    let data = Val::try_from_val(env, &v0.data).unwrap();
+    let topics = SVec::from_slice(env, topics.as_slice());
+
+    // All call sites currently ignore the contract id; generate a placeholder
+    // address so the returned tuple keeps its documented shape.
+    let contract_addr = Address::generate(env);
+
+    (contract_addr, topics, data)
 }
 
 /// Compares the schemas observed in this test run against the checked-in

@@ -4,7 +4,7 @@
 //! by exercising the real registry contract emitters on success and failure paths.
 
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
-use soroban_sdk::testutils::{Address as _, Events};
+use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::{Address, BytesN, Env, String, Symbol, TryIntoVal};
 
 const VALID_EMPLOYEE_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";

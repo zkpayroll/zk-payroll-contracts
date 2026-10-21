@@ -23,3 +23,21 @@ Treasury reservation reads have two surfaces:
 - `get_required_reservation_expiry(asset)` fails with `Treasury reservation not found` when callers require a reservation to exist before continuing.
 
 SDKs and treasury screens should use the required helper when a missing reservation is a user-actionable not-found state, and should map `TreasuryError::ReservationNotFound` to a non-retryable configuration message.
+
+## Fee Reserve Requirements
+
+Before payroll execution, the treasury balance must cover both the total payroll amount plus the configured fee reserve. Deployers must configure the reserve with `set_required_fee_reserve`. An unconfigured (zero) reserve returns `ZeroReserveConfigured`. Insufficient balance returns `InsufficientReserve`.
+
+The `fee_reserve_validation` module validates the condition:
+
+```
+treasury_balance - already_reserved - payroll_total >= required_fee_reserve
+```
+
+An optional BPS cap (`max_fee_reserve_bps`) scales the effective reserve proportionally to the payroll total, taking the larger of the flat minimum and the BPS-derived amount.
+
+| Error code | Meaning |
+|---|---|
+| `InsufficientReserve` | Treasury covers the payroll but not the reserve on top. |
+| `ZeroReserveConfigured` | The stored fee reserve is `0`; deployer action required. |
+| `TreasuryBalanceUnavailable` | Treasury token contract could not be queried. |

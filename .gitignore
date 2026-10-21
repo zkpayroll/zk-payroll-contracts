@@ -4,6 +4,12 @@ target/
 *.diff
 **/test_snapshots/
 
+# Test snapshots (insta / similar snapshot testing tools)
+*.snap
+*.snap.new
+tests/snapshots/
+**/__snapshots__/
+
 # ZK trusted setup artifacts — large files, never commit
 ptau/
 build/circuits/
@@ -16,7 +22,69 @@ build/circuits/
 *.sym
 *.wtns
 
+# Proof artifacts (generated, never committed)
+proof.json
+public.json
+witness.wtns
+circuits/build/
+
 # Environment / secrets
 .env
 .env.*
 .opencode
+
+# Editor and IDE files
+.idea/
+*.swp
+*.swo
+*~
+
+# Node.js (circom/snarkjs)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+Thumbs.db
+
+# CI/CD temp files
+*.tmp
+*.bak
+Cargo.lock.bak
+
+# Fuzz artifacts
+fuzz/corpus/
+fuzz/artifacts/
+
+# Deployment artifacts
+deployment-keys/
+*.deploy.json
+
+# PR description scratch files
+PR_DESCRIPTION_*.md
+pr.md
+
+# Implementation notes and scratch files
+IMPLEMENTATION_NOTES.md
+README_UPDATES.md
+
+# Additional test snapshot formats
+*.snap.new
+insta.yaml
+**/*.insta.yaml
+
+# Coverage reports
+coverage/
+lcov.info
+*.profraw
+*.profdata
+tarpaulin-report.html
+
+# Rust build artifacts (redundant with target/ but explicit)
+**/*.rlib
+**/*.rmeta
+
+# Temporary editor swap files
+.#*
+\#*#

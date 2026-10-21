@@ -281,14 +281,58 @@ Company identifiers in the AuditModule use Soroban `Symbol` (max 32 bytes UTF-8)
 | **Returns**    | `SalaryCommitment` | New active commitment         |
 
 **Behavior**:
+- Rejects the call while the employee's commitment is locked.
 - Archives the current commitment to history.
-- Marks the existing record as `revoked = true` (cannot be used in future proofs).
-- Stores the new commitment as active via `store_commitment`.
-- Emits `(Symbol("CommitmentRotated"), employee) → (old_commitment, new_commitment)` event.
+- Reserves the new value for the life of the contract (issue #242).
+- Stores the new commitment as active with `version = previous + 1`.
+- Emits `(Symbol("CommitmentUpdated"), employee) → (commitment)` followed by
+  `(Symbol("CommitmentRotated"), employee) → (old_commitment, new_commitment)`.
 
 **Errors**:
+- `panic!("Commitment is locked: cannot rotate until unlocked by admin (or use rotate_approved_commitment to rotate it in place)")`
 - `panic!("Commitment not found")`
+- `panic!("Commitment already in use: commitments must be unique across employees and payroll runs")`
 - `panic!("Not initialized")`
+
+---
+
+#### `rotate_approved_commitment`
+
+| Field          | Type        | Description                          |
+|----------------|-------------|--------------------------------------|
+| `employee`     | `Address`   | Employee address                     |
+| `new_commitment`| `BytesN<32>`| New Poseidon commitment              |
+| **Returns**    | `SalaryCommitment` | New active commitment         |
+
+**Behavior**:
+- Rotates a commitment that is currently **locked** by an approved or settled
+  payroll run, in a single authorized call (issue #520).
+- Archives the previous value to history and keeps it permanently reserved,
+  so settled payroll records stay attributable to the commitment they were
+  paid against.
+- Increments `version` monotonically.
+- **Retains the lock**, so the approved binding is still enforced afterwards.
+- Emits `(Symbol("CommitmentUpdated"), employee) → (commitment)` followed by
+  `(Symbol("ApprovedCommitmentRotated"), employee) → (old_commitment, new_commitment)`.
+- No salary, blinding factor, or other sensitive value appears in any event or
+  error message.
+
+**Errors**:
+- `panic!("Commitment is not locked: use rotate_commitment to rotate an unlocked commitment")`
+- `panic!("Commitment not found")`
+- `panic!("New commitment must differ from the current commitment")`
+- `panic!("Commitment already in use: commitments must be unique across employees and payroll runs")`
+
+---
+
+#### `can_rotate_approved_commitment`
+
+| Field      | Type      | Description    |
+|------------|-----------|----------------|
+| `employee` | `Address` | Employee       |
+| **Returns**| `bool`    | `true` when `rotate_approved_commitment` would currently succeed |
+
+Privacy-safe read-only preflight: returns no commitment values.
 
 ---
 

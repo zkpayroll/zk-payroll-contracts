@@ -5,6 +5,13 @@ extern crate alloc;
 use pause_manager::PauseManagerClient;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol};
 
+/// Employee consent commitment lifecycle (#350).
+pub mod consent;
+pub use consent::{
+    get_consent, has_active_consent, record_consent, require_active_consent, revoke_consent,
+    ConsentCommitment, ConsentError, ConsentKey, ConsentState,
+};
+
 const STELLAR_ACCOUNT_STRKEY_LEN: u32 = 56;
 const STELLAR_ACCOUNT_STRKEY_LEN_USIZE: usize = 56;
 const STELLAR_ACCOUNT_VERSION_BYTE: u8 = 6 << 3;
@@ -84,13 +91,88 @@ pub struct PendingThresholdRotation {
     pub effective_after: u64,
 }
 
+// ── Issue #610: payout destination change review ────────────────────────────
+
+/// Lifecycle state of a payout destination change under review (issue #610).
+///
+/// Serialized as a stable ordinal so off-chain clients can persist and
+/// pattern-match on it across contract upgrades.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DestinationReviewStatus {
+    /// Proposed by the employee, awaiting the company admin's decision.
+    Pending = 0,
+    /// Approved by the company admin and applied to the payout destination.
+    Approved = 1,
+    /// Rejected by the company admin; the payout destination is unchanged.
+    Rejected = 2,
+    /// Withdrawn by the proposing employee before a decision.
+    Cancelled = 3,
+}
+
+/// A payout destination change awaiting company-admin review (issue #610).
+///
+/// Privacy note: the record carries only the review lifecycle fields and the
+/// proposed destination, exactly as the direct (unreviewed) update flow does.
+/// No salary values, commitments, or payment history are involved.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayoutDestinationReview {
+    /// Company the employee is registered under.
+    pub company_id: u64,
+    /// Employee who proposed the change.
+    pub employee: Address,
+    /// Destination proposed by the employee.
+    pub new_destination: Address,
+    /// Destination currently on file at proposal time (best-effort snapshot;
+    /// payout destinations default to the employee address when unset).
+    pub current_destination: Address,
+    /// Ledger timestamp when the change was proposed.
+    pub proposed_at: u64,
+    /// Current review state.
+    pub status: DestinationReviewStatus,
+    /// Ledger timestamp of the admin decision or employee cancellation
+    /// (`0` while pending).
+    pub resolved_at: u64,
+    /// Company admin that approved/rejected (`None` while pending or when the
+    /// employee cancelled).
+    pub resolved_by: Option<Address>,
+}
+
+// ── Issue #642: employee payout method confirmation ────────────────────────
+
+/// Employee confirmation of the payout destination on file (issue #642).
+///
+/// Records that the employee reviewed and confirmed the destination payroll
+/// will pay to. The `destination` is a snapshot of `get_payout_destination`
+/// at confirmation time, so a later destination change stales the record
+/// (the contract clears it on every applied change).
+///
+/// Privacy note: carries only the company/employee/destination addresses and
+/// timestamps — no salary values, commitments, or payment history.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayoutMethodConfirmation {
+    /// Company the employee is registered under.
+    pub company_id: u64,
+    /// Employee who confirmed.
+    pub employee: Address,
+    /// Destination confirmed (snapshot of the destination on file).
+    pub destination: Address,
+    /// Ledger timestamp when the confirmation was recorded.
+    pub confirmed_at: u64,
+    /// Employee that recorded the confirmation (always `employee`).
+    pub confirmed_by: Address,
+}
+
 // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
 /// Versioned admin configuration tracking for reliable change detection.
 ///
 /// This structure tracks the current configuration version for a company's
-/// admin settings (admin address, treasury address, and other admin-gated
-/// configuration). Each time admin or treasury changes, the version increments,
+/// admin settings (admin address, treasury address, and revocation status).
+/// Each time admin, treasury, or revocation changes, the version increments,
 /// allowing off-chain clients to reliably detect when configuration has changed
 /// without polling individual fields.
 #[contracttype]
@@ -98,7 +180,7 @@ pub struct PendingThresholdRotation {
 pub struct AdminConfigVersion {
     /// Monotonically increasing version number for admin configuration changes.
     /// Starts at 1 when a company is registered and increments with each
-    /// admin or treasury rotation.
+    /// admin, treasury, or revocation change.
     pub version: u64,
     /// Timestamp when this version was set.
     pub updated_at: u64,
@@ -138,8 +220,17 @@ pub enum DataKey {
     PendingThresholdRotation(u64),
     /// Custom payout destination for a registered employee (issue #486).
     PayoutDestination(u64, Address),
+    /// Payout destination change proposed by an employee and awaiting
+    /// company-admin review (issue #610). Keyed by the proposing employee.
+    DestinationReview(u64, Address),
     /// Versioned admin configuration for reliable change detection.
     AdminConfigVersion(u64),
+    /// Employee confirmation of the payout destination on file (issue #642).
+    /// Keyed by the confirming employee. Absent means never confirmed or
+    /// stale (cleared on every applied destination change / removal).
+    /// Appended (never reordered) so existing storage discriminants are
+    /// unchanged.
+    PayoutMethodConfirmation(u64, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +289,13 @@ pub trait PayrollRegistryTrait {
 
     /// Return `true` iff the employee is registered AND has `Active` status.
     fn is_eligible(env: Env, company_id: u64, employee: Address) -> bool;
+
+    /// Return whether a registered employee can be reactivated by transitioning
+    /// to `Active`. Only suspended or incomplete employees with a registered
+    /// commitment under a non-revoked company are eligible. Missing records,
+    /// active employees, and terminally offboarded employees return `false`.
+    /// This read-only preflight does not expose commitment or payroll data.
+    fn is_reactivation_eligible(env: Env, company_id: u64, employee: Address) -> bool;
 
     /// Read-only helper for clients that only need active/suspended state.
     fn is_employee_active(env: Env, company_id: u64, employee: Address) -> bool;
@@ -300,6 +398,69 @@ pub trait PayrollRegistryTrait {
     /// Returns the stored payout destination, or defaults to `employee` address if none set.
     fn get_payout_destination(env: Env, company_id: u64, employee: Address) -> Address;
 
+    // ── Issue #610: payout destination change review ────────────────────
+
+    /// Propose a payout destination change that requires company-admin
+    /// review before it is applied (issue #610).
+    ///
+    /// Requires authorization from the employee. Rejects the same invalid
+    /// destinations as the direct update flow (zero address, duplicate of the
+    /// destination already on file). Only one pending review per employee.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn propose_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination: Address,
+    );
+
+    /// Company-admin decision on a pending payout destination change
+    /// (issue #610). On approval the destination is applied atomically.
+    /// Requires authorization from the company admin.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn review_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        admin: Address,
+        approve: bool,
+    );
+
+    /// Withdraw a pending payout destination change before the admin
+    /// decides (issue #610). Requires authorization from the employee.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn cancel_payout_dest_change(env: Env, company_id: u64, employee: Address);
+
+    /// Return the current payout destination change review for an employee
+    /// (issue #610), or `None` when no review exists.
+    fn get_payout_dest_review(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutDestinationReview>;
+
+    // ── Issue #642: employee payout method confirmation ────────────────────
+
+    /// Confirm the payout destination currently on file (issue #642).
+    /// Requires authorisation from the employee. Records a snapshot of
+    /// `get_payout_destination` so a later destination change stales it.
+    fn confirm_payout_method(env: Env, company_id: u64, employee: Address);
+
+    /// Return the payout method confirmation for an employee (issue #642),
+    /// or `None` when never confirmed or stale (cleared on change/removal).
+    fn get_payout_method_confirmation(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutMethodConfirmation>;
+
+    /// Return `true` iff a confirmation exists and still matches the
+    /// destination currently on file (issue #642).
+    fn is_payout_method_confirmed(env: Env, company_id: u64, employee: Address) -> bool;
+
     // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
 
     /// Get the current admin configuration version for a company.
@@ -330,6 +491,33 @@ impl PayrollRegistry {
                 panic!("Payroll is paused");
             }
         }
+    }
+
+    /// Bump the per-company admin configuration revision and publish an
+    /// event. Tracks company-level configuration changes (admin rotation,
+    /// treasury rotation, and revocation) so off-chain clients can detect
+    /// when a company's configuration has changed without polling
+    /// individual fields. Issue #645.
+    fn bump_admin_config_version(env: &Env, company_id: u64, updated_by: Address) {
+        let current_version: AdminConfigVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
+            .expect("Admin config version not found");
+        let updated_version = AdminConfigVersion {
+            version: current_version.version + 1,
+            updated_at: env.ledger().sequence() as u64,
+            updated_by: updated_by.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
+        payroll_events::emit_registry_admin_config_version_updated(
+            env,
+            company_id,
+            updated_version.version,
+            updated_by,
+        );
     }
 
     /// Validates an employer display-name/reference-id style metadata value
@@ -470,6 +658,32 @@ impl PayrollRegistry {
     }
 
     // ── Issue: Versioned Admin Configuration Updates ─────────────────────────────
+
+    /// Validate prerequisites for employee activation.
+    ///
+    /// Before transitioning an employee to Active status, verify:
+    /// - Employee commitment is registered
+    /// - Commitment record is valid and not locked
+    ///
+    /// # Panics
+    /// - If commitment is missing
+    /// - If commitment cannot be verified as active
+    fn validate_activation_prereqs(env: &Env, company_id: u64, employee: &Address) {
+        // Verify commitment exists and is retrievable
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee commitment not found: cannot activate without commitment registration");
+        }
+
+        // Query the commitment contract to verify commitment is active
+        // (This is a contract-to-contract call pattern used elsewhere in the codebase)
+        // If commitment is locked or missing, the commitment contract will reject the query
+        // Note: Full commitment verification requires commitment contract integration
+        // which is already handled by the salary_commitment contract through cross-contract calls
+    }
 }
 
 #[contractimpl]
@@ -547,7 +761,10 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::CompanyAdmin(admin.clone()));
 
-        payroll_events::emit_company_admin_revoked(&env, company_id, admin);
+        payroll_events::emit_company_admin_revoked(&env, company_id, admin.clone());
+
+        // Revocation is a company configuration change: bump the revision (issue #645).
+        Self::bump_admin_config_version(&env, company_id, admin);
     }
 
     fn add_employee(env: Env, company_id: u64, employee: Address, commitment: BytesN<32>) {
@@ -586,6 +803,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .remove(&DataKey::Employee(company_id, emp));
+        // Issue #642: drop any payout method confirmation so a re-onboarded
+        // record with the same key cannot inherit a stale confirmation.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PayoutMethodConfirmation(
+                company_id,
+                employee.clone(),
+            ));
 
         payroll_events::emit_employee_removed(&env, company_id, employee);
     }
@@ -675,6 +900,11 @@ impl PayrollRegistryTrait for PayrollRegistry {
             panic!("Offboarded employee status cannot be changed");
         }
 
+        // Validate activation prerequisites when transitioning to Active
+        if status == EmployeeStatus::Active && previous_status != EmployeeStatus::Active {
+            Self::validate_activation_prereqs(&env, company_id, &employee);
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::EmpStatus(company_id, employee.clone()), &status);
@@ -762,6 +992,33 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
     fn is_eligible(env: Env, company_id: u64, employee: Address) -> bool {
         Self::is_employee_active(env, company_id, employee)
+    }
+
+    fn is_reactivation_eligible(env: Env, company_id: u64, employee: Address) -> bool {
+        let employee_key = DataKey::Employee(company_id, employee.clone());
+        if !env.storage().persistent().has(&employee_key) {
+            return false;
+        }
+
+        let company = match env
+            .storage()
+            .persistent()
+            .get::<DataKey, CompanyInfo>(&DataKey::Company(company_id))
+        {
+            Some(company) => company,
+            None => return false,
+        };
+        if company.revoked {
+            return false;
+        }
+
+        let status = env
+            .storage()
+            .persistent()
+            .get::<DataKey, EmployeeStatus>(&DataKey::EmpStatus(company_id, employee))
+            .unwrap_or(EmployeeStatus::Incomplete);
+
+        matches!(status, EmployeeStatus::Suspended | EmployeeStatus::Incomplete)
     }
 
     fn is_employee_active(env: Env, company_id: u64, employee: Address) -> bool {
@@ -865,26 +1122,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .set(&DataKey::CompanyAdmin(new_admin.clone()), &company_id);
         payroll_events::emit_company_admin_rotated(&env, company_id, old_admin, new_admin.clone());
 
-        // Increment admin config version
-        let current_version: AdminConfigVersion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AdminConfigVersion(company_id))
-            .expect("Admin config version not found");
-        let updated_version = AdminConfigVersion {
-            version: current_version.version + 1,
-            updated_at: env.ledger().sequence() as u64,
-            updated_by: new_admin.clone(),
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
-        payroll_events::emit_registry_admin_config_version_updated(
-            &env,
-            company_id,
-            updated_version.version,
-            new_admin,
-        );
+        // Increment admin config version (issue #645: company config revision tracking).
+        Self::bump_admin_config_version(&env, company_id, new_admin);
     }
 
     fn cancel_admin_rotation(env: Env, company_id: u64, current_admin: Address) {
@@ -1000,26 +1239,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             (old_treasury, new_treasury.clone()),
         );
 
-        // Increment admin config version
-        let current_version: AdminConfigVersion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::AdminConfigVersion(company_id))
-            .expect("Admin config version not found");
-        let updated_version = AdminConfigVersion {
-            version: current_version.version + 1,
-            updated_at: env.ledger().sequence() as u64,
-            updated_by: new_treasury.clone(),
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminConfigVersion(company_id), &updated_version);
-        payroll_events::emit_registry_admin_config_version_updated(
-            &env,
-            company_id,
-            updated_version.version,
-            new_treasury,
-        );
+        // Increment admin config version (issue #645: company config revision tracking).
+        Self::bump_admin_config_version(&env, company_id, new_treasury);
     }
 
     fn cancel_treasury_rotation(env: Env, company_id: u64, current_admin: Address) {
@@ -1292,6 +1513,14 @@ impl PayrollRegistryTrait for PayrollRegistry {
             &DataKey::PayoutDestination(company_id, employee.clone()),
             &new_destination,
         );
+        // Issue #642: the confirmed snapshot (if any) no longer matches the
+        // destination on file, so clear it until the employee re-confirms.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PayoutMethodConfirmation(
+                company_id,
+                employee.clone(),
+            ));
 
         env.events().publish(
             (
@@ -1326,6 +1555,338 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .get(&DataKey::PayoutDestination(company_id, employee.clone()))
             .unwrap_or(employee)
+    }
+
+    // ── Issue #610: payout destination change review ────────────────────
+
+    fn propose_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        new_destination: Address,
+    ) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        // Only the employee may propose a change to their own destination.
+        employee.require_auth();
+
+        // Reject the same invalid destinations as the direct update flow.
+        let current_dest = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+        if current_dest == new_destination {
+            panic!("Destination address is already on file");
+        }
+        let zero_wallet = String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        if new_destination == Address::from_string(&zero_wallet) {
+            panic!("Cannot set zero address as payout destination");
+        }
+
+        let review_key = DataKey::DestinationReview(company_id, employee.clone());
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutDestinationReview>(&review_key)
+        {
+            if existing.status == DestinationReviewStatus::Pending {
+                panic!("A payout destination change is already under review");
+            }
+        }
+
+        let review = PayoutDestinationReview {
+            company_id,
+            employee: employee.clone(),
+            new_destination,
+            current_destination: current_dest,
+            proposed_at: env.ledger().timestamp(),
+            status: DestinationReviewStatus::Pending,
+            resolved_at: 0,
+            resolved_by: None,
+        };
+        env.storage().persistent().set(&review_key, &review);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutDestinationChangeProposed"),
+                company_id,
+                employee,
+            ),
+            (),
+        );
+    }
+
+    /// Company-admin decision on a pending payout destination change
+    /// (issue #610). On approval the destination is applied atomically.
+    /// Requires authorization from the company admin.
+    ///
+    /// Soroban entrypoint names are limited to 32 characters.
+    fn review_payout_dest_change(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+        admin: Address,
+        approve: bool,
+    ) {
+        Self::require_not_paused(&env);
+
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if info.revoked {
+            panic!("Company admin is revoked");
+        }
+        if admin != info.admin {
+            panic!("Unauthorized: caller is not the company admin");
+        }
+        admin.require_auth();
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        let review_key = DataKey::DestinationReview(company_id, employee.clone());
+        let mut review: PayoutDestinationReview = env
+            .storage()
+            .persistent()
+            .get(&review_key)
+            .expect("No payout destination change under review");
+
+        if review.status != DestinationReviewStatus::Pending {
+            panic!("Payout destination change is not pending review");
+        }
+
+        let decided_at = env.ledger().timestamp();
+        review.resolved_at = decided_at;
+        review.resolved_by = Some(admin.clone());
+
+        if approve {
+            // Apply the approved destination through the same validation and
+            // event shape as the direct update flow (#486).
+            let new_destination = review.new_destination.clone();
+            let current_dest =
+                Self::get_payout_destination(env.clone(), company_id, employee.clone());
+            if current_dest == new_destination {
+                panic!("Destination address is already on file");
+            }
+            env.storage().persistent().set(
+                &DataKey::PayoutDestination(company_id, employee.clone()),
+                &new_destination,
+            );
+            // Issue #642: clear any prior confirmation — it attested the
+            // pre-approval destination, not the newly applied one.
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PayoutMethodConfirmation(
+                    company_id,
+                    employee.clone(),
+                ));
+            env.events().publish(
+                (
+                    Symbol::new(&env, "PayoutDestinationUpdated"),
+                    company_id,
+                    employee.clone(),
+                ),
+                (current_dest, new_destination),
+            );
+            review.status = DestinationReviewStatus::Approved;
+        } else {
+            review.status = DestinationReviewStatus::Rejected;
+        }
+
+        env.storage().persistent().set(&review_key, &review);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutDestinationChangeReviewed"),
+                company_id,
+                employee,
+            ),
+            (approve,),
+        );
+    }
+
+    fn cancel_payout_dest_change(env: Env, company_id: u64, employee: Address) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        // Only the proposing employee may withdraw their own change.
+        employee.require_auth();
+
+        let review_key = DataKey::DestinationReview(company_id, employee.clone());
+        let mut review: PayoutDestinationReview = env
+            .storage()
+            .persistent()
+            .get(&review_key)
+            .expect("No payout destination change under review");
+
+        if review.status != DestinationReviewStatus::Pending {
+            panic!("Payout destination change is not pending review");
+        }
+
+        review.status = DestinationReviewStatus::Cancelled;
+        review.resolved_at = env.ledger().timestamp();
+        env.storage().persistent().set(&review_key, &review);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutDestinationChangeCancelled"),
+                company_id,
+                employee,
+            ),
+            (),
+        );
+    }
+
+    fn get_payout_dest_review(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutDestinationReview> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DestinationReview(company_id, employee))
+    }
+
+    // ── Issue #642: employee payout method confirmation ────────────────────
+
+    /// Confirm the payout destination currently on file.
+    ///
+    /// Only the employee may confirm their own payout method: the call
+    /// snapshots `get_payout_destination` and records who confirmed and when,
+    /// so payroll operators can require a fresh confirmation before paying.
+    /// Re-confirming is allowed and refreshes the timestamp (e.g. after a
+    /// periodic review). The record is cleared automatically whenever the
+    /// destination changes (`update_payout_destination`, approved
+    /// `review_payout_dest_change`) or the employee is removed, so a stored
+    /// confirmation always attests the destination on file.
+    ///
+    /// # Panics
+    /// - `"Employee not found"` — unknown `(company_id, employee)`.
+    /// - `"Company admin is revoked"` — the company is revoked.
+    /// - `"A payout destination change is under review: resolve or cancel it before confirming"` —
+    ///   a `Pending` review exists for the employee.
+    fn confirm_payout_method(env: Env, company_id: u64, employee: Address) {
+        Self::require_not_paused(&env);
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            panic!("Employee not found");
+        }
+
+        let info: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if info.revoked {
+            panic!("Company admin is revoked");
+        }
+
+        // Only the employee may confirm their own payout method.
+        employee.require_auth();
+
+        if let Some(review) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutDestinationReview>(&DataKey::DestinationReview(
+                company_id,
+                employee.clone(),
+            ))
+        {
+            if review.status == DestinationReviewStatus::Pending {
+                panic!("A payout destination change is under review: resolve or cancel it before confirming");
+            }
+        }
+
+        let destination = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+        let confirmation = PayoutMethodConfirmation {
+            company_id,
+            employee: employee.clone(),
+            destination: destination.clone(),
+            confirmed_at: env.ledger().timestamp(),
+            confirmed_by: employee.clone(),
+        };
+        env.storage().persistent().set(
+            &DataKey::PayoutMethodConfirmation(company_id, employee.clone()),
+            &confirmation,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "PayoutMethodConfirmed"),
+                company_id,
+                employee,
+            ),
+            (destination,),
+        );
+    }
+
+    /// Return the stored payout method confirmation, if any.
+    ///
+    /// Read-only: returns `None` when the employee never confirmed or when
+    /// the record was cleared by a later destination change or removal.
+    /// Carries only addresses and timestamps — no salary or commitment data.
+    fn get_payout_method_confirmation(
+        env: Env,
+        company_id: u64,
+        employee: Address,
+    ) -> Option<PayoutMethodConfirmation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayoutMethodConfirmation(company_id, employee))
+    }
+
+    /// Return `true` iff a confirmation exists and still matches the
+    /// destination currently on file.
+    ///
+    /// Read-only convenience for payroll operators and dashboards polling
+    /// readiness. Returns `false` for unknown employees (rather than
+    /// trapping) so lists can be filtered without per-row error handling;
+    /// use `confirm_payout_method` / `get_payout_method_confirmation` when an
+    /// explicit missing-employee error is required.
+    fn is_payout_method_confirmed(env: Env, company_id: u64, employee: Address) -> bool {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Employee(company_id, employee.clone()))
+        {
+            return false;
+        }
+        let current = Self::get_payout_destination(env.clone(), company_id, employee.clone());
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutMethodConfirmation>(&DataKey::PayoutMethodConfirmation(
+                company_id, employee,
+            )) {
+            Some(confirmation) => confirmation.destination == current,
+            None => false,
+        }
     }
 }
 

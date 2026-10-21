@@ -1,3 +1,5 @@
+mod admin_action_events_test;
+
 //! # Admin Configuration Lock Tests (issue #253)
 //!
 //! Verifies that unsafe admin configuration changes are rejected while a

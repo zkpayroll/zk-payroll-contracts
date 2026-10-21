@@ -73,6 +73,8 @@ Audit errors relate to auditor permissions, view keys, and audit scope constrain
 | 207 | ChallengeAlreadyResolved | Challenge already has a response | No | Load existing response |
 | 208 | InvalidChallenge | Challenge is malformed or out of scope | No | Verify challenge data |
 | 209 | InvalidResponseTimestamp | Response outside acceptance window | No | Verify timestamp and retry |
+| 210 | InvalidProofReference | Proof reference hash is empty or all-zero | No | Provide valid proof reference hash |
+
 
 **SDK Guidance**: Most audit errors are non-retryable and indicate insufficient
 permissions or stale state. `ViewKeyExpired` (202) is retryable after requesting
@@ -94,6 +96,10 @@ Payment errors occur during payment processing and employee payment state transi
 | 307 | CommitmentLocked | Commitment locked by audit hold | Yes | Wait for lock release |
 | 308 | EmptyBatch | Batch is empty | No | Add employees to batch |
 | 309 | ArrayLengthMismatch | Array lengths do not match | No | Validate batch arrays |
+| 310 | SettlementWindowNotYetOpen | Execution attempted before the configured execution start | No | Wait until the period's execution window opens |
+| 311 | SettlementWindowClosed | Execution attempted after the configured execution window | No | Open a later payroll period |
+| 312 | InvalidSettlementWindowConfig | Window timestamps are not chronologically ordered | No | Correct the timestamp order |
+| 313 | SettlementWindowOverlap | Window calendar range intersects another configured period | No | Choose a range that does not overlap another period |
 
 **SDK Guidance**: Retryable payment errors (`PeriodNotFound`, `EmployeeNotFound`,
 `CommitmentLocked`) indicate incomplete setup or temporary locks. Non-retryable

@@ -84,6 +84,24 @@ Notes:
 - Requires dual authorisation: the `from` address and the `treasury_owner` must both sign.
 - Raw `i128` token units; divide by the token contract's decimal precision before display.
 
+### `treasury_balance_snapshot`
+
+Emitted after deposits, payroll reservation/finalization/cancellation/expiry,
+payroll execution, and approved emergency withdrawals. It gives indexers a push-based
+aggregate treasury health update without exposing employee-level salary rows.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| topic[0] | `Symbol` | `"payroll"` |
+| topic[1] | `Symbol` | `"treasury_balance_snapshot"` |
+| topic[2] | `Address` | Canonical treasury asset |
+| data[0..3] | `i128` | Total, available, reserved, and blocked balances |
+| data[4] | `u64` | Ledger timestamp when the snapshot was observed |
+| data[5] | `Symbol` | Lifecycle trigger |
+
+The values are aggregate observability metadata. They must not be used as a
+replacement for authorization or proof verification.
+
 ---
 
 ## EXE — Execution Events

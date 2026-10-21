@@ -26,6 +26,7 @@ a custom indexer and apply the levels below to drive alert routing and triage.
 |-------------|------|----------|-----------|
 | `CommitmentUpdated` | `(employee: Address, commitment: BytesN<32>)` | `LOW` | Normal employee onboarding / salary change |
 | `CommitmentRotated` | `(employee: Address, old: BytesN<32>, new: BytesN<32>)` | `MEDIUM` | Proactive commitment rotation; confirm it was authorised |
+| `ApprovedCommitmentRotated` | `(employee: Address, old: BytesN<32>, new: BytesN<32>)` | `MEDIUM` | Rotation of an approved/locked commitment; the lock is retained, so no `CommitmentUnlocked` should be needed to explain it |
 
 ### `payment_executor` contract
 

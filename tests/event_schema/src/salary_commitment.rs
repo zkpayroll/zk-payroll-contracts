@@ -76,6 +76,47 @@ fn case_commitment_rotated(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_commitment_approved_rotated(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let employee = Address::generate(env);
+    let old_commitment = BytesN::from_array(env, &[24u8; 32]);
+    let new_commitment = BytesN::from_array(env, &[25u8; 32]);
+    env.as_contract(cid, || {
+        payroll_events::emit_commitment_approved_rotated(
+            env,
+            employee.clone(),
+            old_commitment.clone(),
+            new_commitment.clone(),
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    let expected_topics: SVec<Val> = (
+        Symbol::new(env, "ApprovedCommitmentRotated"),
+        employee.clone(),
+    )
+        .into_val(env);
+    assert_eq!(
+        topics, expected_topics,
+        "salary_commitment.ApprovedCommitmentRotated topics changed"
+    );
+    let decoded: (BytesN<32>, BytesN<32>) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (old_commitment, new_commitment),
+        "salary_commitment.ApprovedCommitmentRotated payload changed"
+    );
+    out.insert(
+        "salary_commitment.ApprovedCommitmentRotated".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("ApprovedCommitmentRotated"), dynamic("Address")],
+            data: vec![
+                field("old_commitment", "BytesN<32>"),
+                field("new_commitment", "BytesN<32>"),
+            ],
+        },
+    );
+}
+
 fn case_commitment_locked(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let employee = Address::generate(env);
     env.as_contract(cid, || {
@@ -344,6 +385,7 @@ fn salary_commitment_events_match_fixture() {
 
     case_commitment_stored(&env, &cid, &mut observed);
     case_commitment_rotated(&env, &cid, &mut observed);
+    case_commitment_approved_rotated(&env, &cid, &mut observed);
     case_commitment_locked(&env, &cid, &mut observed);
     case_commitment_unlocked(&env, &cid, &mut observed);
     case_reference_id_set(&env, &cid, &mut observed);
