@@ -40,6 +40,13 @@ pub const REVIEW_RESOLVED: &str = "review_resolved";
 /// Topics name for the "archival blocked" guard event.
 pub const ARCHIVAL_BLOCKED: &str = "archival_blocked";
 
+/// Topics name for the "operations health scored" event.
+///
+/// Emitted when a payroll run's operational health is scored.  The payload
+/// carries only the opaque run identifier and a bounded health score so that
+/// off-chain monitors can track reliability without learning salary details.
+pub const HEALTH_SCORED: &str = "health_scored";
+
 /// Top-level contract namespace used in all event topics.
 pub const PAYROLL_NS: &str = "payroll";
 
@@ -57,3 +64,10 @@ pub const PERIOD_TRANSITION: &str = "period_transition";
 /// non-monotonic or skipped period).  Carries the same opaque identifiers as
 /// the success event so auditors can correlate the rejection with the run.
 pub const PERIOD_TRANSITION_REJECTED: &str = "period_transition_rejected";
+
+/// Topics name for the "health score rejected" guard event.
+///
+/// Emitted when a caller attempts to record an out-of-range health score.
+/// Carries the same opaque run identifier as the success event so auditors can
+/// correlate the rejection with the run.
+pub const HEALTH_SCORE_REJECTED: &str = "health_score_rejected";

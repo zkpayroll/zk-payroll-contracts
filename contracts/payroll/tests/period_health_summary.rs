@@ -1,10 +1,10 @@
-//! Tests for Issue #552: Expose payroll period health summary.
-//!
-//! Covers:
-//! - Operational health states: Healthy, Warning, Blocked.
-//! - Actionable reasons: Normal, PreOpen, GracePeriod, WindowClosed, ContractPaused, PeriodFrozen, CapacityExceeded.
-//! - Non-leaking privacy guarantees: only operational metrics and aggregate counts exposed.
-//! - Validation and edge cases: empty period symbol rejection, unconfigured periods, active drafts.
+/// Tests for Issue #552: Expose payroll period health summary.
+///
+/// Covers:
+/// - Operational health states: Healthy, Warning, Blocked.
+/// - Actionable reasons: Normal, PreOpen, GracePeriod, WindowClosed, ContractPaused, PeriodFrozen, CapacityExceeded.
+/// - Non-leaking privacy guarantees: only operational metrics and aggregate counts exposed.
+/// - Validation and edge cases: empty period symbol rejection, unconfigured periods, active drafts.
 
 #![cfg(test)]
 
@@ -16,7 +16,7 @@ use payroll::{
 };
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::Ledger as _;
 use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 
 fn mock_proof(env: &Env) -> BytesN<256> {
@@ -34,14 +34,14 @@ fn mock_vk(env: &Env) -> VerificationKey {
         alpha: BytesN::from_array(env, &[0u8; 64]),
         beta: BytesN::from_array(env, &[0u8; 128]),
         gamma: BytesN::from_array(env, &[0u8; 128]),
-        delta: BytesN::from_array(env, &[0u8; 128]),
+        delta: BytesN::from_array(env, &[128]),
         ic: Vec::from_array(
             env,
             [
                 BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[164]),
                 BytesN::from_array(env, &[0u8; 64]),
-                BytesN::from_array(env, &[0u8; 64]),
-                BytesN::from_array(env, &[0u8; 64]),
+                BytesN::from_array(env, &[64]),
             ],
         ),
     }
@@ -98,7 +98,7 @@ fn setup_payroll(env: &Env) -> TestContext {
     commitment_client.set_payroll_operator(&payroll_id);
 
     let employee = Address::generate(env);
-    commitment_client.store_commitment(&employee, &BytesN::from_array(env, &[0u8; 32]));
+    commitment_client.store_commitment(&employee, &BytesN::from_array(env, &[128]));
 
     let import_source = Address::generate(env);
     payroll_client.register_import_source(&import_source, &0u32);
@@ -317,4 +317,50 @@ fn test_period_health_summary_rejects_empty_symbol() {
     let ctx = setup_payroll(&env);
     let empty_period = Symbol::new(&env, "");
     ctx.payroll.get_period_health_summary(&empty_period);
+}
+
+#[test]
+fn test_period_health_summary_unconfigured_period_blocked() {
+    let env = Env::default();
+    let ctx = setup_payroll(&env);
+    let period = Symbol::new(&env, "2026_Q6");
+
+    // No open_capacity_period call for this period.
+    let summary = ctx.payroll.get_period_health_summary(&period);
+    assert_eq!(summary.period, period);
+    assert_eq!(summary.status, PeriodHealthStatus::Blocked);
+    assert_eq!(summary.reason, PeriodHealthReason::PeriodNotConfigured);
+    assert_eq!(summary.readiness_score, 0);
+    assert!(!summary.can_execute);
+    assert!(!summary.capacity_configured);
+    assert_eq!(summary.batch_count, 0);
+    assert_eq!(summary.employee_count, 0);
+}
+
+#[test]
+fn test_period_health_summary_active_draft_warning() {
+    let env = Env::default();
+    let ctx = setup_payroll(&env);
+    let period = Symbol::new(&env, "2026_Q7");
+
+    ctx.payroll.open_capacity_period(&ctx.admin, &period);
+
+    // Create a draft batch for the period.
+    let mut employees = Vec::new(&env);
+    employees.push_back(ctx.employee.clone());
+    let mut amounts = Vec::new(&env);
+    amounts.push_back(100i128);
+    ctx.payroll.create_payroll_draft(
+        &ctx.admin,
+        &period,
+        &employees,
+        &amounts,
+    );
+
+    let summary = ctx.payroll.get_period_health_summary(&period);
+    assert!(summary.has_active_draft);
+    assert_eq!(summary.status, PeriodHealthStatus::Warning);
+    assert_eq!(summary.reason, PeriodHealthReason::ActiveDraftPending);
+    assert_eq!(summary.readiness_score, 50);
+    assert!(!summary.can_execute);
 }
