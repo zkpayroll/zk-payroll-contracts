@@ -1890,6 +1890,7 @@ impl Payroll {
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
+
         if admin != &addrs.admin {
             panic!("Unauthorized");
         }
@@ -2695,6 +2696,7 @@ impl Payroll {
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
+
         if admin != addrs.admin {
             panic!("Unauthorized");
         }
@@ -4449,6 +4451,13 @@ impl Payroll {
             .get(&DataKey::Addresses)
             .expect("Not initialized");
 
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+        for employee in employees.iter() {
+            if !commitment_client.is_commitment_active(&employee) {
+                panic!("Payroll batch references an inactive or removed employee");
+            }
+        }
+
         // #362 ? validate nonce monotonicity for this employer
         Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
 
@@ -5059,6 +5068,13 @@ impl Payroll {
             .persistent()
             .get(&DataKey::Addresses)
             .expect("Not initialized");
+
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+        for employee in employees.iter() {
+            if !commitment_client.is_commitment_active(&employee) {
+                panic!("Payroll batch references an inactive or removed employee");
+            }
+        }
 
         // #362 ? validate nonce monotonicity for this employer
         Self::validate_nonce_monotonicity(&e, &addrs.admin, &nonce);
@@ -5803,6 +5819,13 @@ impl Payroll {
         let end_index = core::cmp::min(start_index + batch_size, count);
 
         Self::validate_no_duplicate_employees(&employees);
+
+        let commitment_client = SalaryCommitmentContractClient::new(&e, &addrs.commitment);
+        for employee in employees.iter() {
+            if !commitment_client.is_commitment_active(&employee) {
+                panic!("Payroll batch references an inactive or removed employee");
+            }
+        }
 
         if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
             panic!("Asset not allowed");

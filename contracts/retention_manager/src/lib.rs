@@ -115,6 +115,8 @@ pub struct RetentionRecord {
 pub enum DataKey {
     /// Admin address.
     Admin,
+    /// Address authorized to purge retention records. Defaults to admin.
+    Purger,
     /// Optional pause manager.
     PauseManager,
     /// `RetentionRecord` keyed by (company_id, record_id, record_type).
@@ -144,6 +146,7 @@ impl RetentionManagerContract {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Purger, &admin);
         payroll_events::emit_retention_manager_initialized(&env, admin);
     }
 
@@ -153,6 +156,23 @@ impl RetentionManagerContract {
         env.storage()
             .persistent()
             .set(&DataKey::PauseManager, &pause_manager);
+    }
+
+    /// Set the independent retention-purge operator. Archive/configuration
+    /// administration remains controlled by `Admin`.
+    pub fn set_purger(env: Env, purger: Address) {
+        Self::require_admin(&env);
+        env.storage().persistent().set(&DataKey::Purger, &purger);
+    }
+
+    /// Return the current purge operator, falling back to the admin for
+    /// instances initialized before the separate role was introduced.
+    pub fn get_purger(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Purger)
+            .or_else(|| env.storage().persistent().get(&DataKey::Admin))
+            .expect("Not initialized")
     }
 
     // -----------------------------------------------------------------------
@@ -299,7 +319,7 @@ impl RetentionManagerContract {
         record_type: RecordType,
     ) -> Result<(), RetentionError> {
         Self::require_not_paused(&env);
-        Self::require_admin(&env);
+        Self::require_purger(&env);
 
         let key = Self::record_key(company_id, record_id, &record_type);
         let mut entry: RetentionRecord = env
@@ -414,6 +434,10 @@ impl RetentionManagerContract {
             .get(&DataKey::Admin)
             .expect("Not initialized");
         admin.require_auth();
+    }
+
+    fn require_purger(env: &Env) {
+        Self::get_purger(env).require_auth();
     }
 
     fn require_not_paused(env: &Env) {

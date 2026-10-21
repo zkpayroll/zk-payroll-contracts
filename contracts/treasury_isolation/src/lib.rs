@@ -21,7 +21,7 @@
 //! No salary amounts or employee data flow through this contract — it is a
 //! purely structural accounting layer.
 
-use pause_manager::PauseManagerClient;
+use pause_manager::{PauseCategory, PauseManagerClient};
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
 
 // ---------------------------------------------------------------------------
@@ -427,8 +427,8 @@ impl TreasuryIsolationContract {
                 .get(&DataKey::PauseManager)
                 .unwrap();
             let client = PauseManagerClient::new(env, &addr);
-            if client.is_paused() {
-                panic!("Payroll is paused");
+            if client.is_paused() || client.is_category_paused(&PauseCategory::Treasury) {
+                panic!("Treasury operations are paused");
             }
         }
     }
