@@ -1,6 +1,5 @@
 #![no_std]
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, Bytes,
     BytesN, Env, String, Symbol, Vec,
@@ -10522,6 +10521,50 @@ impl Payroll {
             reviewed_at: review.reviewed_at,
             expired_at: expiry_time,
         }
+    }
+
+    /// Read-only check for whether a payroll run holds a stale approval.
+    ///
+    /// Returns `Ok` when the approval is stale (an `Approved` decision whose
+    /// `reviewed_at` is older than `max_age_seconds`), and `Err` otherwise.
+    /// Does not modify any state — use [`cleanup_stale_approval`] to actually
+    /// remove a stale approval record.
+    pub fn check_stale_approval(
+        e: Env,
+        admin: Address,
+        run_id: u64,
+        max_age_seconds: u64,
+    ) -> Result<(), ()> {
+        Self::require_not_paused(&e);
+        Self::validate_run_id(run_id);
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let review: RunReview = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunReview(run_id))
+            .unwrap_or_else(|| panic!("No approval exists for this payroll run"));
+
+        // Reuse the single definition of staleness so try_cleanup and the
+        // finalize-time guard can never disagree about the cutoff.
+        if review.decision != ReviewDecision::Approved {
+            return Err(());
+        }
+        let expiry_time = review.reviewed_at.saturating_add(max_age_seconds);
+        if e.ledger().timestamp() <= expiry_time {
+            return Err(());
+        }
+
+        Ok(())
     }
 
     /// Read-only preview of whether a payroll run holds a stale approval (#548).
