@@ -21,7 +21,6 @@
 use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
 
 use crate::CapacityLimitKind;
-use crate::payroll_run::PayrollRunSequenceStatus;
 
 /// Stable, numbered reason a payroll batch would be rejected by
 /// `batch_process_payroll`. Values are append-only: once shipped, a
@@ -97,10 +96,6 @@ pub enum PayrollFailureReason {
     /// unavailable: use `prepare_payroll_run`, collect reviewer approvals,
     /// then `finalize_payroll_run`.
     ApprovalWorkflowRequired = 23,
-    /// The submitted payroll run sequence number is not the expected next
-    /// value for this employer (a previous sequence was skipped, or this
-    /// one was already submitted).
-    SequenceNotMonotonic = 15,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.
@@ -325,20 +320,4 @@ pub(crate) fn check_minimum_amounts(
 /// execution via `batch_process_payroll` is unavailable.
 pub(crate) fn approval_workflow_required(approval_threshold: Option<u32>) -> bool {
     matches!(approval_threshold, Some(threshold) if threshold > 0)
-}
-
-/// Convenience wrapper returning the sequence status for a submitted
-/// sequence given the employer's last accepted sequence.
-pub(crate) fn sequence_status(
-    submitted: u32,
-    last_accepted: Option<u32>,
-) -> PayrollRunSequenceStatus {
-    match last_accepted {
-        Some(last) if submitted == last => PayrollRunSequenceStatus::Duplicate,
-        Some(last) if submitted < last => PayrollRunSequenceStatus::OutOfOrder,
-        Some(last) if submitted == last.saturating_add(1) => PayrollRunSequenceStatus::Next,
-        Some(_) => PayrollRunSequenceStatus::Skipped,
-        None if submitted == 0 => PayrollRunSequenceStatus::Next,
-        None => PayrollRunSequenceStatus::Skipped,
-    }
 }

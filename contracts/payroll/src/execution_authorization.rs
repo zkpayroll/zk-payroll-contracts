@@ -19,7 +19,7 @@
 /// book and caller-supplied addresses. It never reads, emits, or returns
 /// salary amounts, employee identities, or proof material.
 
-use soroban_sdkz:{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env};
 
 use crate::{ContractAddresses, DataKey};
 

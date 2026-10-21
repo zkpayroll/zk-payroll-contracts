@@ -202,8 +202,8 @@ pub use delegation_audit::{
 /// Stalled payroll run recovery guidance (#XXX).
 pub mod stalled_run_recovery;
 pub use stalled_run_recovery::{
-    assess_stalled_run_recovery, StalledRunRecoveryAction, StalledRunRecoveryAssessment,
-    StalledRunRecoveryError, StalledRunRecoveryReason, STALLED_RUN_THRESHOLD_SECONDS,
+    StalledRunRecoveryAction, StalledRunRecoveryAssessment, StalledRunRecoveryError,
+    StalledRunRecoveryReason, STALLED_RUN_THRESHOLD_SECONDS,
 };
 
 /// Temporary approver delegation controls (#636).
@@ -1575,6 +1575,8 @@ pub enum DataKey {
     StalledRunRecoveryMarker(u64),
     /// One-time escalation marker for an expired pending correction request (#716).
     EscalatedCorrectionRequest(u64),
+    /// Minimum treasury balance kept in reserve (#752).
+    TreasuryBalanceBuffer,
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
