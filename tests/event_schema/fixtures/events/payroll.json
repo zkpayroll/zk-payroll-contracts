@@ -422,5 +422,69 @@
       { "name": "observed_at", "type": "u64"},
       { "name": "trigger", "type": "Symbol" }
     ]
+  },
+  "payroll.payroll_upload_started": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "payroll_upload_started" }
+    ],
+    "data": [
+      { "name": "upload_id", "type": "BytesN<32>" },
+      { "name": "batch_root", "type": "BytesN<32>" },
+      { "name": "total_chunks", "type": "u32" }
+    ]
+  },
+  "payroll.payroll_upload_progress": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "payroll_upload_progress" }
+    ],
+    "data": [
+      { "name": "upload_id", "type": "BytesN<32>" },
+      { "name": "batch_root", "type": "BytesN<32>" },
+      { "name": "uploaded_chunks", "type": "u32" },
+      { "name": "total_chunks", "type": "u32" }
+    ]
+  },
+  "payroll.payroll_upload_completed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "payroll_upload_completed" }
+    ],
+    "data": [
+      { "name": "upload_id", "type": "BytesN<32>" },
+      { "name": "batch_root", "type": "BytesN<32>" },
+      { "name": "uploaded_chunks", "type": "u32" },
+      { "name": "total_chunks", "type": "u32" }
+    ]
+  },
+  "payroll.payroll_upload_failed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "payroll_upload_failed" }
+    ],
+    "data": [
+      { "name": "upload_id", "type": "BytesN<32>" },
+      { "name": "batch_root", "type": "BytesN<32>" },
+      { "name": "uploaded_chunks", "type": "u32" },
+      { "name": "total_chunks", "type": "u32" }
+    ]
+  },
+  "payroll.payroll_upload_resumed": {
+    "schema_version": 1,
+    "topics": [
+      { "type": "Symbol", "value": "payroll" },
+      { "type": "Symbol", "value": "payroll_upload_resumed" }
+    ],
+    "data": [
+      { "name": "upload_id", "type": "BytesN<32>" },
+      { "name": "batch_root", "type": "BytesN<32>" },
+      { "name": "uploaded_chunks", "type": "u32" },
+      { "name": "total_chunks", "type": "u32" }
+    ]
   }
 }

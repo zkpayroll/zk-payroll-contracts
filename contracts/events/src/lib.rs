@@ -366,6 +366,75 @@ pub fn emit_batch_checkpoint_cleaned(
     );
 }
 
+/// Emitted when an upload recovery checkpoint is opened.
+pub fn emit_payroll_upload_started(
+    e: &Env,
+    upload_id: BytesN<32>,
+    batch_root: BytesN<32>,
+    total_chunks: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_upload_started")),
+        (upload_id, batch_root, total_chunks),
+    );
+}
+
+/// Emitted when an upload recovery cursor advances.
+pub fn emit_payroll_upload_progress(
+    e: &Env,
+    upload_id: BytesN<32>,
+    batch_root: BytesN<32>,
+    uploaded_chunks: u32,
+    total_chunks: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_upload_progress")),
+        (upload_id, batch_root, uploaded_chunks, total_chunks),
+    );
+}
+
+/// Emitted when all chunks in an upload have been checkpointed.
+pub fn emit_payroll_upload_completed(
+    e: &Env,
+    upload_id: BytesN<32>,
+    batch_root: BytesN<32>,
+    uploaded_chunks: u32,
+    total_chunks: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_upload_completed")),
+        (upload_id, batch_root, uploaded_chunks, total_chunks),
+    );
+}
+
+/// Emitted when an upload is interrupted; its cursor remains recoverable.
+pub fn emit_payroll_upload_failed(
+    e: &Env,
+    upload_id: BytesN<32>,
+    batch_root: BytesN<32>,
+    uploaded_chunks: u32,
+    total_chunks: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_upload_failed")),
+        (upload_id, batch_root, uploaded_chunks, total_chunks),
+    );
+}
+
+/// Emitted when an interrupted upload is reopened at its saved cursor.
+pub fn emit_payroll_upload_resumed(
+    e: &Env,
+    upload_id: BytesN<32>,
+    batch_root: BytesN<32>,
+    uploaded_chunks: u32,
+    total_chunks: u32,
+) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "payroll_upload_resumed")),
+        (upload_id, batch_root, uploaded_chunks, total_chunks),
+    );
+}
+
 /// Emitted when a payroll run draft is created.
 pub fn emit_draft_created(e: &Env, draft_id: u64, admin: Address, period_label: Symbol) {
     e.events().publish(

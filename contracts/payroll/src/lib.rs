@@ -153,6 +153,12 @@ pub use multi_batch_progress::{
     MAX_MULTI_BATCH_BATCHES, MAX_MULTI_BATCH_PAYMENTS,
 };
 
+/// Payroll upload recovery checkpoints (#782).
+pub mod payroll_upload_checkpoint;
+pub use payroll_upload_checkpoint::{
+    PayrollUploadCheckpoint, PayrollUploadKey, PayrollUploadStatus,
+};
+
 /// Payroll approval quorum validation (#697).
 pub mod approval_quorum;
 pub use approval_quorum::{
@@ -11728,6 +11734,219 @@ impl Payroll {
             Some(progress) => multi_batch_progress::is_complete(&progress),
             None => false,
         }
+    }
+
+    /// Open a privacy-safe checkpoint for a contract payroll upload.
+    ///
+    /// Upload content remains off-chain; this record tracks only the opaque
+    /// upload and batch identifiers and the sequential chunk cursor.
+    pub fn begin_payroll_upload_checkpoint(
+        e: Env,
+        admin: Address,
+        upload_id: BytesN<32>,
+        batch_root: BytesN<32>,
+        total_chunks: u32,
+    ) {
+        Self::validate_non_zero_digest(&e, &upload_id, "upload_id");
+        Self::validate_non_zero_digest(&e, &batch_root, "batch_root");
+        if total_chunks == 0 {
+            panic!("Payroll upload must contain at least one chunk");
+        }
+
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = PayrollUploadKey::Checkpoint(upload_id.clone());
+        if e.storage().persistent().has(&key) {
+            panic!("Payroll upload checkpoint already exists");
+        }
+
+        let now = e.ledger().timestamp();
+        let checkpoint = PayrollUploadCheckpoint {
+            upload_id: upload_id.clone(),
+            batch_root: batch_root.clone(),
+            total_chunks,
+            uploaded_chunks: 0,
+            status: PayrollUploadStatus::InProgress,
+            started_at: now,
+            last_updated: now,
+            updated_by: admin,
+        };
+        e.storage().persistent().set(&key, &checkpoint);
+        payroll_events::emit_payroll_upload_started(&e, upload_id, batch_root, total_chunks);
+    }
+
+    /// Advance the upload checkpoint by exactly one sequential chunk.
+    ///
+    /// Repeating the current cursor is an idempotent acknowledgement, which
+    /// lets callers safely retry after an uncertain response.
+    pub fn record_payroll_upload_progress(
+        e: Env,
+        admin: Address,
+        upload_id: BytesN<32>,
+        uploaded_chunks: u32,
+    ) -> PayrollUploadCheckpoint {
+        Self::validate_non_zero_digest(&e, &upload_id, "upload_id");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = PayrollUploadKey::Checkpoint(upload_id.clone());
+        let mut checkpoint: PayrollUploadCheckpoint =
+            e.storage().persistent().get(&key).unwrap_or_else(|| {
+                panic!("Payroll upload checkpoint not found: begin the upload first")
+            });
+        if checkpoint.upload_id != upload_id {
+            panic!("Payroll upload checkpoint identity mismatch");
+        }
+        if checkpoint.status == PayrollUploadStatus::Completed
+            && uploaded_chunks == checkpoint.uploaded_chunks
+        {
+            return checkpoint;
+        }
+        if checkpoint.status != PayrollUploadStatus::InProgress {
+            panic!("Payroll upload checkpoint is not in progress");
+        }
+        if uploaded_chunks < checkpoint.uploaded_chunks {
+            panic!("Payroll upload progress cannot move backwards");
+        }
+        if uploaded_chunks > checkpoint.total_chunks {
+            panic!("Payroll upload progress exceeds planned total chunks");
+        }
+        if uploaded_chunks == checkpoint.uploaded_chunks {
+            return checkpoint;
+        }
+        if checkpoint.uploaded_chunks.checked_add(1) != Some(uploaded_chunks) {
+            panic!("Payroll upload chunks must be checkpointed sequentially");
+        }
+
+        checkpoint.uploaded_chunks = uploaded_chunks;
+        checkpoint.last_updated = e.ledger().timestamp();
+        checkpoint.updated_by = admin;
+        if uploaded_chunks == checkpoint.total_chunks {
+            checkpoint.status = PayrollUploadStatus::Completed;
+            e.storage().persistent().set(&key, &checkpoint);
+            payroll_events::emit_payroll_upload_completed(
+                &e,
+                upload_id,
+                checkpoint.batch_root.clone(),
+                checkpoint.uploaded_chunks,
+                checkpoint.total_chunks,
+            );
+        } else {
+            e.storage().persistent().set(&key, &checkpoint);
+            payroll_events::emit_payroll_upload_progress(
+                &e,
+                upload_id,
+                checkpoint.batch_root.clone(),
+                checkpoint.uploaded_chunks,
+                checkpoint.total_chunks,
+            );
+        }
+        checkpoint
+    }
+
+    /// Mark an incomplete upload as interrupted while preserving its cursor.
+    pub fn mark_payroll_upload_failed(
+        e: Env,
+        admin: Address,
+        upload_id: BytesN<32>,
+    ) -> PayrollUploadCheckpoint {
+        Self::validate_non_zero_digest(&e, &upload_id, "upload_id");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = PayrollUploadKey::Checkpoint(upload_id.clone());
+        let mut checkpoint: PayrollUploadCheckpoint =
+            e.storage().persistent().get(&key).unwrap_or_else(|| {
+                panic!("Payroll upload checkpoint not found: begin the upload first")
+            });
+        if checkpoint.status != PayrollUploadStatus::InProgress {
+            panic!("Payroll upload checkpoint is not in progress");
+        }
+        checkpoint.status = PayrollUploadStatus::Failed;
+        checkpoint.last_updated = e.ledger().timestamp();
+        checkpoint.updated_by = admin;
+        e.storage().persistent().set(&key, &checkpoint);
+        payroll_events::emit_payroll_upload_failed(
+            &e,
+            upload_id,
+            checkpoint.batch_root.clone(),
+            checkpoint.uploaded_chunks,
+            checkpoint.total_chunks,
+        );
+        checkpoint
+    }
+
+    /// Resume an interrupted upload from its persisted next-chunk cursor.
+    pub fn resume_payroll_upload(
+        e: Env,
+        admin: Address,
+        upload_id: BytesN<32>,
+    ) -> PayrollUploadCheckpoint {
+        Self::validate_non_zero_digest(&e, &upload_id, "upload_id");
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+
+        let key = PayrollUploadKey::Checkpoint(upload_id.clone());
+        let mut checkpoint: PayrollUploadCheckpoint =
+            e.storage().persistent().get(&key).unwrap_or_else(|| {
+                panic!("Payroll upload checkpoint not found: begin the upload first")
+            });
+        if checkpoint.status != PayrollUploadStatus::Failed {
+            panic!("Only a failed payroll upload can be resumed");
+        }
+        checkpoint.status = PayrollUploadStatus::InProgress;
+        checkpoint.last_updated = e.ledger().timestamp();
+        checkpoint.updated_by = admin;
+        e.storage().persistent().set(&key, &checkpoint);
+        payroll_events::emit_payroll_upload_resumed(
+            &e,
+            upload_id,
+            checkpoint.batch_root.clone(),
+            checkpoint.uploaded_chunks,
+            checkpoint.total_chunks,
+        );
+        checkpoint
+    }
+
+    /// Read the privacy-safe status and cursor for an upload.
+    pub fn get_payroll_upload_checkpoint(
+        e: Env,
+        upload_id: BytesN<32>,
+    ) -> PayrollUploadCheckpoint {
+        let key = PayrollUploadKey::Checkpoint(upload_id);
+        e.storage()
+            .persistent()
+            .get(&key)
+            .expect("Payroll upload checkpoint not found")
     }
 }
 

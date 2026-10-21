@@ -1181,6 +1181,100 @@ fn case_reservation_created(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_payroll_upload_started(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let upload_id = BytesN::from_array(env, &[0x71; 32]);
+    let batch_root = BytesN::from_array(env, &[0x72; 32]);
+    let total_chunks = 4u32;
+    env.as_contract(cid, || {
+        payroll_events::emit_payroll_upload_started(
+            env,
+            upload_id.clone(),
+            batch_root.clone(),
+            total_chunks,
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(topics, topic(env, "payroll_upload_started"));
+    let decoded: (BytesN<32>, BytesN<32>, u32) = data.try_into_val(env).unwrap();
+    assert_eq!(decoded, (upload_id, batch_root, total_chunks));
+    out.insert(
+        "payroll.payroll_upload_started".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("payroll_upload_started")],
+            data: vec![
+                field("upload_id", "BytesN<32>"),
+                field("batch_root", "BytesN<32>"),
+                field("total_chunks", "u32"),
+            ],
+        },
+    );
+}
+
+fn case_payroll_upload_cursor_event(
+    env: &Env,
+    cid: &Address,
+    out: &mut SchemaMap,
+    action: &str,
+) {
+    let upload_id = BytesN::from_array(env, &[0x73; 32]);
+    let batch_root = BytesN::from_array(env, &[0x74; 32]);
+    let uploaded_chunks = 2u32;
+    let total_chunks = 4u32;
+    env.as_contract(cid, || match action {
+        "payroll_upload_progress" => payroll_events::emit_payroll_upload_progress(
+            env,
+            upload_id.clone(),
+            batch_root.clone(),
+            uploaded_chunks,
+            total_chunks,
+        ),
+        "payroll_upload_completed" => payroll_events::emit_payroll_upload_completed(
+            env,
+            upload_id.clone(),
+            batch_root.clone(),
+            uploaded_chunks,
+            total_chunks,
+        ),
+        "payroll_upload_failed" => payroll_events::emit_payroll_upload_failed(
+            env,
+            upload_id.clone(),
+            batch_root.clone(),
+            uploaded_chunks,
+            total_chunks,
+        ),
+        "payroll_upload_resumed" => payroll_events::emit_payroll_upload_resumed(
+            env,
+            upload_id.clone(),
+            batch_root.clone(),
+            uploaded_chunks,
+            total_chunks,
+        ),
+        _ => panic!("unknown payroll upload event"),
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(topics, topic(env, action));
+    let decoded: (BytesN<32>, BytesN<32>, u32, u32) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (upload_id, batch_root, uploaded_chunks, total_chunks)
+    );
+    let event_name = format!("payroll.{}", action);
+    out.insert(
+        event_name,
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym(action)],
+            data: vec![
+                field("upload_id", "BytesN<32>"),
+                field("batch_root", "BytesN<32>"),
+                field("uploaded_chunks", "u32"),
+                field("total_chunks", "u32"),
+            ],
+        },
+    );
+}
+
 #[test]
 fn payroll_events_match_fixture() {
     let (env, cid) = new_env();
@@ -1225,6 +1319,11 @@ fn payroll_events_match_fixture() {
     case_run_approval_withdrawn(&env, &cid, &mut observed);
     case_run_approval_superseded(&env, &cid, &mut observed);
     case_reservation_created(&env, &cid, &mut observed);
+    case_payroll_upload_started(&env, &cid, &mut observed);
+    case_payroll_upload_cursor_event(&env, &cid, &mut observed, "payroll_upload_progress");
+    case_payroll_upload_cursor_event(&env, &cid, &mut observed, "payroll_upload_completed");
+    case_payroll_upload_cursor_event(&env, &cid, &mut observed, "payroll_upload_failed");
+    case_payroll_upload_cursor_event(&env, &cid, &mut observed, "payroll_upload_resumed");
 
     assert_matches_fixture(
         "payroll",
