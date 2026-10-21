@@ -199,6 +199,13 @@ pub use delegation_audit::{
     MAX_DELEGATION_AUDIT_PAGE,
 };
 
+/// Contract administrator approval audit history (#791).
+pub mod admin_approval_audit;
+pub use admin_approval_audit::{
+    AdminApprovalAuditError, AdminApprovalAuditKey, AdminApprovalKind, AdminApprovalRecord,
+    AdminApprovalRecorded, MAX_ADMIN_APPROVAL_PAGE,
+};
+
 /// Stalled payroll run recovery guidance (#XXX).
 pub mod stalled_run_recovery;
 pub use stalled_run_recovery::{
@@ -4264,6 +4271,9 @@ impl Payroll {
         let token_client = soroban_token::Client::new(&e, &addrs.token);
         token_client.transfer(&addrs.treasury, &request.recipient, &request.amount);
 
+        // Issue #791: the admin's approval joins the audit history.
+        admin_approval_audit::record(&e, &admin, AdminApprovalKind::EmergencyWithdrawal, 0);
+
         payroll_events::emit_emergency_approved(&e, request.amount, request.recipient);
         Self::emit_treasury_balance_snapshot(
             &e,
@@ -4531,6 +4541,37 @@ impl Payroll {
         );
     }
 
+    // ── Issue #791: Contract administrator approval audit history ───────────
+
+    /// Number of admin approvals recorded so far (`0` before the first).
+    pub fn get_admin_approval_count(e: Env) -> u64 {
+        admin_approval_audit::count(&e)
+    }
+
+    /// The admin approval with the 1-based `sequence`, if recorded.
+    pub fn get_admin_approval(e: Env, sequence: u64) -> Option<AdminApprovalRecord> {
+        admin_approval_audit::entry(&e, sequence)
+    }
+
+    /// A page of admin approvals, oldest first.
+    ///
+    /// Returns the records whose sequence is greater than `after_sequence`
+    /// (pass `0` for the first page, then the last sequence you received), at
+    /// most `limit` of them. An `after_sequence` at or past the end returns an
+    /// empty page.
+    ///
+    /// # Errors
+    /// * `AdminApprovalAuditError::PageLimitZero` — `limit` is `0`.
+    /// * `AdminApprovalAuditError::PageLimitTooLarge` — `limit` exceeds
+    ///   `MAX_ADMIN_APPROVAL_PAGE`.
+    pub fn get_admin_approval_history(
+        e: Env,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<AdminApprovalRecord>, AdminApprovalAuditError> {
+        admin_approval_audit::page(&e, after_sequence, limit)
+    }
+
     // ── Issue #714: Payroll responsibility delegation audit ─────────────────
 
     /// Number of times responsibility for `run_id` has been handed over.
@@ -4670,6 +4711,9 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::PayrollRun(run_id), &run);
+
+        // Issue #791: the admin's approval of this run joins the audit history.
+        admin_approval_audit::record(&e, &admin, AdminApprovalKind::PayrollRunFinalized, run_id);
 
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_finalized")),

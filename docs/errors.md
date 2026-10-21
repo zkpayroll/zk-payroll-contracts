@@ -103,6 +103,7 @@ report it rather than displaying it to end users.
 | `payroll.record_multi_batch_progress` | `"Multi-batch progress must move forward: no new batches or payments recorded"` | Identical resubmission with no new work (#643). | Non-retryable until corrected | Advance at least one cursor. |
 | `payroll.record_multi_batch_progress`, `mark_multi_batch_failed` | `"Multi-batch execution is already terminal"` | The execution is `Completed` or `Failed` (#643). | Non-retryable for this id | Start a new execution with a fresh `execution_id`; terminal records are immutable. |
 | `payroll.transfer_pending_run_admin` | `"Delegation limit reached: this run has already been handed over 100 times; finalize or cancel it instead of transferring again"` | The run's delegation audit trail is full (#714). | Non-retryable for this run | Finalize or cancel the run; audit it with `verify_run_delegation_audit`. See [Payroll Responsibility Delegation Audit](./run-delegation-audit.md). |
+| `payroll.get_admin_approval_history` | `AdminApprovalAuditError::PageLimitZero` (7910) / `AdminApprovalAuditError::PageLimitTooLarge` (7911) | `limit` was `0` or above `MAX_ADMIN_APPROVAL_PAGE` (50) (#791). | Non-retryable until corrected | Request `1..=50` records per page and walk the history with `after_sequence`. See [Admin Approval Audit History](./admin-approval-audit-history.md). |
 
 ## Treasury and Token Checks
 
