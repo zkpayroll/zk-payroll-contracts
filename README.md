@@ -199,6 +199,7 @@ The `payroll` contract exposes `get_period_health_summary` to provide operators 
 let summary = payroll.get_period_health_summary(&period);
 // summary.status: PeriodHealthStatus (Healthy, Warning, Blocked)
 // summary.reason: PeriodHealthReason (Normal, PreOpen, GracePeriod, WindowClosed, ContractPaused, PeriodFrozen, ...)
+// summary.readiness_score: u32 (Healthy = 100, Warning = 50, Blocked = 0)
 // summary.can_execute: bool
 // summary.is_frozen: bool
 // summary.is_paused: bool
@@ -211,6 +212,7 @@ let summary = payroll.get_period_health_summary(&period);
 
 - **Operational Health**: Classifies periods into `Healthy` (ready for execution), `Warning` (grace period, frozen configuration), or `Blocked` (paused, closed window, capacity exhausted).
 - **Actionable Diagnostics**: Clear, typed reason codes indicate exact blockers or operational alerts (e.g., `PreOpen`, `ContractPaused`, `BatchCapacityExceeded`).
+- **Readiness Scoring**: `readiness_score` is deterministic and derived from `status`: 100 for `Healthy`, 50 for `Warning`, and 0 for `Blocked`. Use `reason`, `can_execute`, and the other summary fields to understand the underlying signal; the score does not expose employee- or salary-level data.
 - **Privacy Guarantees**: Plaintext salaries, employee commitments, and individual recipient rows are never exposed.
 
 ### Register Employee with Private Salary

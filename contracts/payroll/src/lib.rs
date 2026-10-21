@@ -909,6 +909,9 @@ pub struct PeriodHealthSummary {
     pub period: Symbol,
     pub status: PeriodHealthStatus,
     pub reason: PeriodHealthReason,
+    /// Deterministic readiness score derived from `status`: Healthy = 100,
+    /// Warning = 50, and Blocked = 0.
+    pub readiness_score: u32,
     pub is_current_period: bool,
     pub can_execute: bool,
     pub is_frozen: bool,
@@ -8308,10 +8311,17 @@ impl Payroll {
             (PeriodHealthStatus::Healthy, PeriodHealthReason::Normal)
         };
 
+        let readiness_score = match status {
+            PeriodHealthStatus::Healthy => 100,
+            PeriodHealthStatus::Warning => 50,
+            PeriodHealthStatus::Blocked => 0,
+        };
+
         PeriodHealthSummary {
             period,
             status,
             reason,
+            readiness_score,
             is_current_period,
             can_execute,
             is_frozen,

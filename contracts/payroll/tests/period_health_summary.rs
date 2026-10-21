@@ -138,6 +138,7 @@ fn test_period_health_summary_fresh_period_healthy() {
     assert_eq!(summary.period, period);
     assert_eq!(summary.status, PeriodHealthStatus::Healthy);
     assert_eq!(summary.reason, PeriodHealthReason::Normal);
+    assert_eq!(summary.readiness_score, 100);
     assert!(summary.is_current_period);
     assert!(summary.can_execute);
     assert!(!summary.is_frozen);
@@ -171,6 +172,7 @@ fn test_period_health_summary_settlement_window_lifecycle() {
     let summary = ctx.payroll.get_period_health_summary(&period);
     assert_eq!(summary.status, PeriodHealthStatus::Blocked);
     assert_eq!(summary.reason, PeriodHealthReason::PreOpen);
+    assert_eq!(summary.readiness_score, 0);
     assert!(!summary.can_execute);
     assert_eq!(
         summary.window_status,
@@ -182,6 +184,7 @@ fn test_period_health_summary_settlement_window_lifecycle() {
     let summary = ctx.payroll.get_period_health_summary(&period);
     assert_eq!(summary.status, PeriodHealthStatus::Healthy);
     assert_eq!(summary.reason, PeriodHealthReason::Normal);
+    assert_eq!(summary.readiness_score, 100);
     assert!(summary.can_execute);
     assert_eq!(
         summary.window_status,
@@ -193,6 +196,7 @@ fn test_period_health_summary_settlement_window_lifecycle() {
     let summary = ctx.payroll.get_period_health_summary(&period);
     assert_eq!(summary.status, PeriodHealthStatus::Warning);
     assert_eq!(summary.reason, PeriodHealthReason::GracePeriod);
+    assert_eq!(summary.readiness_score, 50);
     assert!(!summary.can_execute);
     assert_eq!(
         summary.window_status,
@@ -204,6 +208,7 @@ fn test_period_health_summary_settlement_window_lifecycle() {
     let summary = ctx.payroll.get_period_health_summary(&period);
     assert_eq!(summary.status, PeriodHealthStatus::Blocked);
     assert_eq!(summary.reason, PeriodHealthReason::WindowClosed);
+    assert_eq!(summary.readiness_score, 0);
     assert!(!summary.can_execute);
     assert_eq!(
         summary.window_status,
@@ -225,6 +230,7 @@ fn test_period_health_summary_contract_paused_blocks_execution() {
     let summary = ctx.payroll.get_period_health_summary(&period);
     assert_eq!(summary.status, PeriodHealthStatus::Blocked);
     assert_eq!(summary.reason, PeriodHealthReason::ContractPaused);
+    assert_eq!(summary.readiness_score, 0);
     assert!(summary.is_paused);
     assert!(!summary.can_execute);
 
@@ -234,6 +240,7 @@ fn test_period_health_summary_contract_paused_blocks_execution() {
     let summary_unpaused = ctx.payroll.get_period_health_summary(&period);
     assert_eq!(summary_unpaused.status, PeriodHealthStatus::Healthy);
     assert_eq!(summary_unpaused.reason, PeriodHealthReason::Normal);
+    assert_eq!(summary_unpaused.readiness_score, 100);
     assert!(!summary_unpaused.is_paused);
     assert!(summary_unpaused.can_execute);
 }
@@ -251,6 +258,7 @@ fn test_period_health_summary_frozen_period_warning() {
     assert!(summary.is_frozen);
     assert_eq!(summary.status, PeriodHealthStatus::Warning);
     assert_eq!(summary.reason, PeriodHealthReason::PeriodFrozen);
+    assert_eq!(summary.readiness_score, 50);
 }
 
 #[test]
@@ -269,6 +277,7 @@ fn test_period_health_summary_capacity_limits_and_exhaustion() {
     assert!(!summary.capacity_exceeded);
     assert_eq!(summary.status, PeriodHealthStatus::Healthy);
     assert!(summary.can_execute);
+    assert_eq!(summary.readiness_score, 100);
 
     // Execute one payment batch to exhaust the 1-batch capacity limit
     let mut proofs = Vec::new(&env);
@@ -297,6 +306,7 @@ fn test_period_health_summary_capacity_limits_and_exhaustion() {
         summary_after.reason,
         PeriodHealthReason::BatchCapacityExceeded
     );
+    assert_eq!(summary_after.readiness_score, 0);
     assert!(!summary_after.can_execute);
 }
 
