@@ -31,6 +31,8 @@ Expiry is **opt-in** and backward compatible:
 | `get_correction_request_expiry()` | Anyone | Returns `Option<CorrectionRequestExpiryPolicy>` (`None` = disabled). |
 | `is_correction_request_expired(draft_id)` | Anyone | `true` when the draft is `Pending` and idle past the window. |
 | `expire_correction_request(caller, draft_id)` | Anyone | Retires a *lapsed* request; moves the draft to `Expired` and frees its period. |
+| `escalate_correction_request(admin, draft_id)` | Admin | Records a one-time escalation for a late, still-pending request and emits `adjustment_escalated`. |
+| `is_correction_request_escalated(draft_id)` | Anyone | Returns whether an escalation marker exists. |
 
 - While no policy is configured, `amend_run_draft` behaves exactly as it did
   before this feature: no policy is read, no clock is consulted, every amendment
@@ -78,6 +80,27 @@ create_run_draft                 (window elapses idle)      expire_correction_re
 4. **Operator escape hatches** — raise or clear the policy
    (`set_correction_request_expiry`) to make a lapsed request correctable again,
    or let anyone call `expire_correction_request` and create a fresh draft.
+
+## Late Adjustment Escalation (#716)
+
+The contract treats an adjustment as late only when its pending correction
+request has passed the existing configured inactivity window:
+`now > updated_at + max_age_seconds`. Exactly at the deadline it is not late.
+Escalation is disabled when no correction-request expiry policy is configured.
+
+Only the currently registered payroll admin may call
+`escalate_correction_request`. The draft must exist, remain `Pending`, and be
+late under the same policy used by `is_correction_request_expired`. A successful
+call stores a one-time marker and emits `("payroll", "adjustment_escalated")`
+with only the draft ID and admin address. It does not change the draft state,
+period slot, correction budget, or ability to retire the expired request. A
+second escalation is rejected; unauthorized, premature, unknown, or resolved
+requests do not create a marker or event.
+
+The issue and existing contract define no separate escalation recipient,
+financial penalty, or downstream workflow. Accordingly this operation records
+the authorized escalation signal only; it does not invent or perform those
+additional actions.
 
 ## What Is Enforced, and What Is Not
 

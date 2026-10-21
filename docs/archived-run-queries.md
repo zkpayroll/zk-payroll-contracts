@@ -27,8 +27,8 @@ archive_payroll_run(admin: Address, run_id: u64)
 - The run must not already be archived (double-archiving panics).
 
 **Effect**: A boolean flag is stored under `DataKey::ArchivedRun(run_id)`. The underlying
-`PayrollRun` record is not modified. The original `get_payroll_run` path continues to
-work for the same `run_id`.
+`PayrollRun` record is not modified. The general `get_payroll_run` path remains
+available to the registered admin for that `run_id` after archival.
 
 **Event emitted**: `("payroll", "run_archived")` with `run_id: u64`.
 
@@ -36,10 +36,11 @@ work for the same `run_id`.
 
 ### `get_archived_run(run_id: u64) → PayrollRun`
 
-Returns the full `PayrollRun` record for an archived run. Panics with `"Run is not
-archived"` if the run exists but has not been archived. This deliberate panic keeps the
-archived and active access paths clearly separated: code that calls `get_archived_run`
-can rely on the returned record always being archived.
+Returns the full `PayrollRun` record for an archived run. Requires authorization
+from the currently registered payroll admin before checking the run identifier
+or archive state. After authorization, it panics with `"Run is not archived"`
+when no archive marker exists. This avoids disclosing protected history or
+record-existence details to unauthorized callers.
 
 ### `is_run_archived(run_id: u64) → bool`
 
@@ -80,14 +81,16 @@ meaning of `reconciliation_status`.
 
 | Scenario | Correct function |
 |---|---|
-| Fetching a run to update its reconciliation status | `get_payroll_run(run_id)` |
-| Fetching a run for a reporting or audit dashboard | `get_archived_run(run_id)` |
-| Checking whether a run is in the archive | `is_run_archived(run_id)` |
+| Fetching an active run or an archived run as admin | `get_payroll_run(run_id)` |
+| Fetching a run for a reporting or audit dashboard | `get_archived_run(run_id)` (admin only) |
+| Reading archive metadata | `get_archive_marker(run_id)` (admin only) |
+| Checking whether a run is in the archive | `is_payroll_run_archived(run_id)` (public boolean only) |
 | Iterating all historical runs | Off-chain: index `run_archived` events, then call `get_archived_run` per ID. |
 
-The two paths share the same underlying storage record but differ in access semantics:
-`get_archived_run` enforces the archived precondition, preventing code paths that intend
-to operate only on historical data from accidentally touching active runs.
+The general getter preserves existing active-run reads. Once a run is archived,
+both it and the dedicated historical getter require current-admin authorization.
+The archive marker getter is protected as well; the boolean archive-status query
+does not return payroll record contents.
 
 ## Unsupported operations
 

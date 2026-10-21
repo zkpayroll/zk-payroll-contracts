@@ -1573,6 +1573,8 @@ pub enum DataKey {
     ReconciliationMarker(u64),
     /// Latest stalled-run recovery assessment recorded for a payroll run.
     StalledRunRecoveryMarker(u64),
+    /// One-time escalation marker for an expired pending correction request (#716).
+    EscalatedCorrectionRequest(u64),
     // Future upgrade example (issue #196):
     // PayrollRunV2(u64),  // Would be added here when schema evolution is needed
 }
@@ -4039,6 +4041,20 @@ impl Payroll {
 
     pub fn get_payroll_run(e: Env, run_id: u64) -> PayrollRun {
         Self::validate_run_id(run_id);
+        if e.storage()
+            .persistent()
+            .has(&DataKey::ArchivedRun(run_id))
+            || e.storage()
+                .persistent()
+                .has(&DataKey::ArchiveMarker(run_id))
+        {
+            let addrs: ContractAddresses = e
+                .storage()
+                .persistent()
+                .get(&DataKey::Addresses)
+                .expect("Not initialized");
+            addrs.admin.require_auth();
+        }
         e.storage()
             .persistent()
             .get(&DataKey::PayrollRun(run_id))
@@ -6184,6 +6200,57 @@ impl Payroll {
             return false;
         }
         policy.is_expired(e.ledger().timestamp(), draft.updated_at)
+    }
+
+    /// Escalate a pending correction request after its configured inactivity
+    /// window has elapsed (#716). Only the registered admin may escalate.
+    /// The draft remains pending; the marker and event provide an operational
+    /// hand-off without changing correction, finalization, or expiry behavior.
+    pub fn escalate_correction_request(e: Env, admin: Address, draft_id: u64) {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        Self::validate_draft_id(draft_id);
+
+        let escalation_key = DataKey::EscalatedCorrectionRequest(draft_id);
+        if e.storage().persistent().has(&escalation_key) {
+            panic!("Correction request is already escalated");
+        }
+
+        let draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+        if draft.state != RunDraftState::Pending {
+            panic!("Only pending correction requests can be escalated");
+        }
+        if !Self::is_correction_request_expired(e.clone(), draft_id) {
+            panic!("Correction request is not late: the configured window has not elapsed");
+        }
+
+        e.storage().persistent().set(&escalation_key, &true);
+        e.events().publish(
+            (
+                symbol_short!("payroll"),
+                Symbol::new(&e, "adjustment_escalated"),
+            ),
+            (draft_id, admin),
+        );
+    }
+
+    /// Return whether a pending correction request has already been escalated.
+    pub fn is_correction_request_escalated(e: Env, draft_id: u64) -> bool {
+        Self::validate_draft_id(draft_id);
+        e.storage()
+            .persistent()
+            .has(&DataKey::EscalatedCorrectionRequest(draft_id))
     }
 
     /// Retire a lapsed correction request (#622).
@@ -8619,8 +8686,19 @@ impl Payroll {
     /// panics for runs that exist but have not been archived, keeping the
     /// archived and active access paths clearly separated.
     pub fn get_archived_run(e: Env, run_id: u64) -> PayrollRun {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        addrs.admin.require_auth();
         Self::validate_run_id(run_id);
-        if !e.storage().persistent().has(&DataKey::ArchivedRun(run_id)) {
+        if !e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+            && !e
+                .storage()
+                .persistent()
+                .has(&DataKey::ArchiveMarker(run_id))
+        {
             panic!("Run is not archived");
         }
         e.storage()
@@ -10110,6 +10188,13 @@ impl Payroll {
 
     /// Get archive marker for a payroll run (#335).
     pub fn get_archive_marker(e: Env, run_id: u64) -> Option<ArchiveMarker> {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        addrs.admin.require_auth();
+        Self::validate_run_id(run_id);
         e.storage()
             .persistent()
             .get(&DataKey::ArchiveMarker(run_id))
@@ -15098,6 +15183,41 @@ mod tests {
             .expect("Archive marker should exist");
         assert_eq!(marker.run_id, run_id);
         assert_eq!(marker.archived_by, admin);
+        assert_eq!(payroll_client.get_archived_run(&run_id).run_id, run_id);
+        assert_eq!(payroll_client.get_payroll_run(&run_id).run_id, run_id);
+    }
+
+    #[test]
+    fn archived_payroll_records_require_admin_authorization() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let run_id = payroll_client.prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &test_nonce(&env, 152),
+            &None,
+        );
+        payroll_client.finalize_payroll_run(&admin, &run_id);
+        env.mock_auths(&[]);
+        assert_eq!(payroll_client.get_payroll_run(&run_id).run_id, run_id);
+
+        env.mock_all_auths();
+        payroll_client.archive_payroll_run_with_reason(
+            &admin,
+            &run_id,
+            &Symbol::new(&env, "compliance"),
+        );
+
+        // The direct historical path, archive metadata, and general record
+        // getter are all protected after archival.
+        env.mock_auths(&[]);
+        assert!(payroll_client.try_get_archived_run(&run_id).is_err());
+        assert!(payroll_client.try_get_archive_marker(&run_id).is_err());
+        assert!(payroll_client.try_get_payroll_run(&run_id).is_err());
     }
 
     #[test]

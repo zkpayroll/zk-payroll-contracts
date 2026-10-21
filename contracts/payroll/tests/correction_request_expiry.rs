@@ -26,8 +26,8 @@ use payroll::correction_request_expiry::CorrectionRequestExpiryPolicy;
 use payroll::{Payroll, PayrollClient, RunDraftState};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::{Address, BytesN, Env, Symbol, TryIntoVal, Vec};
 
 /// One hour. Shorter than every other payroll window so the gates never interact.
 const WINDOW: u64 = 3_600;
@@ -354,6 +354,80 @@ fn retirement_is_terminal_and_idempotent() {
         payroll.get_run_draft(&draft_id).state,
         RunDraftState::Expired
     );
+}
+
+#[test]
+fn admin_can_escalate_a_late_pending_correction_once() {
+    let env = Env::default();
+    let (payroll, admin) = setup_payroll(&env);
+    let period = Symbol::new(&env, "escalate");
+
+    payroll.set_correction_request_expiry(&admin, &WINDOW);
+    let draft_id = draft(&payroll, &admin, &period);
+    advance(&env, WINDOW + 1);
+
+    assert!(payroll.is_correction_request_expired(&draft_id));
+    payroll.escalate_correction_request(&admin, &draft_id);
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    let event = events.get(0).expect("escalation event");
+    let event_name: Symbol = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+    let (emitted_draft_id, emitted_admin): (u64, Address) = event.2.try_into_val(&env).unwrap();
+    assert_eq!(event_name, Symbol::new(&env, "adjustment_escalated"));
+    assert_eq!(emitted_draft_id, draft_id);
+    assert_eq!(emitted_admin, admin);
+    assert!(payroll.is_correction_request_escalated(&draft_id));
+    assert_eq!(
+        payroll.get_run_draft(&draft_id).state,
+        RunDraftState::Pending
+    );
+    assert!(payroll
+        .try_escalate_correction_request(&admin, &draft_id)
+        .is_err());
+}
+
+#[test]
+fn escalation_rejects_unauthorized_and_not_yet_late_requests() {
+    let env = Env::default();
+    let (payroll, admin) = setup_payroll(&env);
+    let period = Symbol::new(&env, "early");
+    let stranger = Address::generate(&env);
+
+    payroll.set_correction_request_expiry(&admin, &WINDOW);
+    let draft_id = draft(&payroll, &admin, &period);
+
+    // The configured deadline is half-open: exactly at it is still on time.
+    advance(&env, WINDOW);
+    assert!(!payroll.is_correction_request_expired(&draft_id));
+    assert!(payroll
+        .try_escalate_correction_request(&admin, &draft_id)
+        .is_err());
+
+    advance(&env, 1);
+    assert!(payroll
+        .try_escalate_correction_request(&stranger, &draft_id)
+        .is_err());
+    assert!(!payroll.is_correction_request_escalated(&draft_id));
+}
+
+#[test]
+fn escalation_rejects_unknown_or_resolved_drafts() {
+    let env = Env::default();
+    let (payroll, admin) = setup_payroll(&env);
+    let period = Symbol::new(&env, "resolved");
+
+    payroll.set_correction_request_expiry(&admin, &WINDOW);
+    let draft_id = draft(&payroll, &admin, &period);
+    payroll.finalize_run_draft(&admin, &draft_id);
+    advance(&env, WINDOW + 1);
+
+    assert!(payroll
+        .try_escalate_correction_request(&admin, &999u64)
+        .is_err());
+    assert!(payroll
+        .try_escalate_correction_request(&admin, &draft_id)
+        .is_err());
+    assert!(!payroll.is_correction_request_escalated(&draft_id));
 }
 
 #[test]
