@@ -112,6 +112,8 @@ pub enum DataKey {
     /// Reverse-lookup: issuer → canonical asset address (per company).
     /// Used to enforce the issuer-mismatch invariant.
     IssuerIndex(u64, Address),
+    /// Explicit reserve authorizer address keyed by (company_id, authorizer).
+    ReserveAuthorizer(u64, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +268,52 @@ impl TreasuryIsolationContract {
         Ok(bal)
     }
 
-    /// Release a previously reserved amount (e.g. after cancellation).
+    /// Authorize an address to reduce/release treasury reserves for a company (#819).
+    /// Admin-only.
+    pub fn set_reserve_authorizer(env: Env, company_id: u64, authorizer: Address) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        env.storage().persistent().set(
+            &DataKey::ReserveAuthorizer(company_id, authorizer.clone()),
+            &true,
+        );
+        payroll_events::emit_treasury_reserve_authorizer_set(&env, company_id, authorizer);
+    }
+
+    /// Revoke an address's authorization to reduce/release treasury reserves for a company (#819).
+    /// Admin-only.
+    pub fn remove_reserve_authorizer(env: Env, company_id: u64, authorizer: Address) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReserveAuthorizer(company_id, authorizer.clone()));
+        payroll_events::emit_treasury_reserve_authorizer_removed(&env, company_id, authorizer);
+    }
+
+    /// Check whether `authorizer` is authorized to reduce reserves for `company_id` (#819).
+    /// The contract admin is always authorized; additional addresses can be authorized per-company.
+    pub fn is_reserve_authorizer(env: Env, company_id: u64, authorizer: Address) -> bool {
+        if let Some(admin) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::Admin)
+        {
+            if admin == authorizer {
+                return true;
+            }
+        }
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::ReserveAuthorizer(company_id, authorizer))
+            .unwrap_or(false)
+    }
+
+    /// Release a previously reserved amount (e.g. after cancellation) (#819).
+    ///
+    /// Requires explicit authorization (`authorizer.require_auth()`) by either
+    /// the contract admin or a designated company reserve authorizer.
+    /// Returns `TreasuryIsolationError::Unauthorized` if `authorizer` lacks permission.
     ///
     /// Validation is strict: the asset must exist for the company and the release
     /// request cannot exceed the currently reserved amount. Releasing exactly the
@@ -276,9 +323,14 @@ impl TreasuryIsolationContract {
         company_id: u64,
         asset: Address,
         amount: i128,
+        authorizer: Address,
     ) -> Result<AssetBalance, TreasuryIsolationError> {
         Self::require_not_paused(&env);
-        Self::require_admin(&env);
+
+        authorizer.require_auth();
+        if !Self::is_reserve_authorizer(env.clone(), company_id, authorizer.clone()) {
+            return Err(TreasuryIsolationError::Unauthorized);
+        }
 
         Self::validate_positive_amount(amount)?;
 
@@ -488,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_reserve_and_release() {
-        let (env, contract_id, _) = setup();
+        let (env, contract_id, admin) = setup();
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         let asset = Address::generate(&env);
         let issuer = Address::generate(&env);
@@ -500,13 +552,13 @@ mod tests {
         let after_reserve = client.reserve(&company_id, &asset, &3000i128);
         assert_eq!(after_reserve.reserved, 3000);
 
-        let after_release = client.release_reserve(&company_id, &asset, &1000i128);
+        let after_release = client.release_reserve(&company_id, &asset, &1000i128, &admin);
         assert_eq!(after_release.reserved, 2000);
     }
 
     #[test]
     fn test_release_reserve_invalid_amount_rejected() {
-        let (env, contract_id, _) = setup();
+        let (env, contract_id, admin) = setup();
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         let asset = Address::generate(&env);
         let issuer = Address::generate(&env);
@@ -516,10 +568,13 @@ mod tests {
         client.credit(&company_id, &asset, &10_000i128);
         client.reserve(&company_id, &asset, &500i128);
 
-        let result = client.try_release_reserve(&company_id, &asset, &0i128);
-        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::InvalidAmount);
+        let result = client.try_release_reserve(&company_id, &asset, &0i128, &admin);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::InvalidAmount
+        );
 
-        let over_release = client.try_release_reserve(&company_id, &asset, &1_000i128);
+        let over_release = client.try_release_reserve(&company_id, &asset, &1_000i128, &admin);
         assert_eq!(
             over_release.unwrap_err().unwrap(),
             TreasuryIsolationError::InsufficientReserve
@@ -528,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_release_reserve_exact_amount_clears_reservation() {
-        let (env, contract_id, _) = setup();
+        let (env, contract_id, admin) = setup();
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         let asset = Address::generate(&env);
         let issuer = Address::generate(&env);
@@ -538,7 +593,7 @@ mod tests {
         client.credit(&company_id, &asset, &10_000i128);
         client.reserve(&company_id, &asset, &2_500i128);
 
-        let after_release = client.release_reserve(&company_id, &asset, &2_500i128);
+        let after_release = client.release_reserve(&company_id, &asset, &2_500i128, &admin);
         assert_eq!(after_release.reserved, 0);
     }
 
@@ -678,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_release_reserve_rejects_corrupted_over_reserved_state() {
-        let (env, contract_id, _) = setup();
+        let (env, contract_id, admin) = setup();
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         let asset = Address::generate(&env);
         let issuer = Address::generate(&env);
@@ -691,13 +746,77 @@ mod tests {
                 balance: 1000,
                 reserved: 1500,
             };
-            env.storage().persistent().set(&DataKey::Balance(company_id, asset.clone()), &corrupted);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Balance(company_id, asset.clone()), &corrupted);
         });
 
-        let result = client.try_release_reserve(&company_id, &asset, &100i128);
+        let result = client.try_release_reserve(&company_id, &asset, &100i128, &admin);
         assert_eq!(
             result.unwrap_err().unwrap(),
             TreasuryIsolationError::InsufficientReserve
         );
+    }
+
+    #[test]
+    fn test_release_reserve_unauthorized_caller_rejected() {
+        let (env, contract_id, _admin) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let company_id = 11u64;
+        let unauthorized = Address::generate(&env);
+
+        client.register_asset(&company_id, &asset, &issuer, &symbol_short!("USDC"));
+        client.credit(&company_id, &asset, &10_000i128);
+        client.reserve(&company_id, &asset, &2000i128);
+
+        // Unauthorized caller attempts to release reserve -> rejected
+        let result = client.try_release_reserve(&company_id, &asset, &500i128, &unauthorized);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::Unauthorized
+        );
+    }
+
+    #[test]
+    fn test_company_reserve_authorizer_lifecycle_and_execution() {
+        let (env, contract_id, admin) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let company_id = 12u64;
+        let operator = Address::generate(&env);
+
+        client.register_asset(&company_id, &asset, &issuer, &symbol_short!("USDC"));
+        client.credit(&company_id, &asset, &20_000i128);
+        client.reserve(&company_id, &asset, &5000i128);
+
+        // Initially operator is not authorized
+        assert!(!client.is_reserve_authorizer(&company_id, &operator));
+        assert!(client.is_reserve_authorizer(&company_id, &admin));
+
+        // Grant company-level reserve authorizer
+        client.set_reserve_authorizer(&company_id, &operator);
+        assert!(client.is_reserve_authorizer(&company_id, &operator));
+
+        // Operator can now release reserve successfully
+        let bal = client.release_reserve(&company_id, &asset, &1500i128, &operator);
+        assert_eq!(bal.reserved, 3500);
+
+        // Revoke authorization
+        client.remove_reserve_authorizer(&company_id, &operator);
+        assert!(!client.is_reserve_authorizer(&company_id, &operator));
+
+        // Operator attempts again -> rejected with Unauthorized
+        let result = client.try_release_reserve(&company_id, &asset, &500i128, &operator);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::Unauthorized
+        );
+
+        // Admin can still release reserve
+        let after_admin = client.release_reserve(&company_id, &asset, &500i128, &admin);
+        assert_eq!(after_admin.reserved, 3000);
     }
 }

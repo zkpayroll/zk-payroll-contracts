@@ -54,4 +54,21 @@ impl Token {
             .persistent()
             .set(&to_key, &(to_balance + amount));
     }
+
+    pub fn decimals(_e: Env) -> u32 {
+        7
+    }
+
+    pub fn name(e: Env) -> String {
+        String::from_str(&e, "MockToken")
+    }
+
+    pub fn symbol(e: Env) -> String {
+        String::from_str(&e, "MOCK")
+    }
+
+    /// Report whether this token implements the required payout token interface (#824).
+    pub fn is_supported_interface(_e: Env) -> bool {
+        true
+    }
 }

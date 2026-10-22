@@ -1236,6 +1236,47 @@ pub struct FundingSourceReadiness {
     pub available_balance: Option<i128>,
 }
 
+// ---------------------------------------------------------------------------
+// Issue #787: Fallback Funding Source Simulation
+// ---------------------------------------------------------------------------
+
+/// Identifies which funding source is selected by a fallback simulation (#787).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FundingSourceChoice {
+    /// The primary funding source has sufficient unreserved capacity.
+    Primary = 0,
+    /// The fallback funding source was chosen because the primary is blocked or insufficient.
+    Fallback = 1,
+    /// Neither primary nor fallback can cover the required amount.
+    None = 2,
+}
+
+/// Fallback funding source configuration (#787).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FallbackFundingSource {
+    pub treasury: Address,
+    pub token: Address,
+}
+
+/// Result of a read-only fallback funding source simulation (#787).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FallbackSimulationResult {
+    /// True if either primary or fallback source can cover the spend.
+    pub success: bool,
+    /// Which funding source was selected by the simulation.
+    pub selected_source: FundingSourceChoice,
+    /// Whether a fallback funding source was evaluated.
+    pub fallback_evaluated: bool,
+    /// Readiness report for the primary funding source.
+    pub primary: FundingSourceReadiness,
+    /// Readiness report for the fallback funding source (default/NotInitialized if not evaluated).
+    pub fallback: FundingSourceReadiness,
+}
+
 // ?? Issue #404: Cancelled Batch Read Status ????????????????????????????????????
 
 /// Safe metadata for a cancelled payroll batch (#404).
@@ -1443,6 +1484,8 @@ pub struct ConfigLedgerEntry {
 pub enum DataKey {
     Addresses,
     PauseManager,
+    /// Configured fallback funding source for simulation (#787).
+    FallbackFundingSource,
     PayrollRun(u64),
     /// Pending payroll run awaiting finalization (issue #75).
     PendingRun(u64),
@@ -10571,6 +10614,182 @@ impl Payroll {
         }
     }
 
+    /// Helper to evaluate readiness of an arbitrary (treasury, token) funding source (#787).
+    fn evaluate_funding_source(
+        e: &Env,
+        treasury: &Address,
+        token: &Address,
+        required_amount: i128,
+    ) -> FundingSourceReadiness {
+        let blocked = |blocker, available_balance| FundingSourceReadiness {
+            ready: false,
+            blocker,
+            required_amount,
+            available_balance,
+        };
+
+        if required_amount <= 0 {
+            return blocked(FundingSourceBlocker::InvalidRequiredAmount, None);
+        }
+
+        if !Self::is_asset_allowed(e.clone(), token.clone()) {
+            return blocked(FundingSourceBlocker::AssetNotAllowed, None);
+        }
+
+        let token_client = soroban_token::Client::new(e, token);
+        let total_balance = match token_client.try_balance(treasury) {
+            Ok(Ok(balance)) => balance,
+            _ => return blocked(FundingSourceBlocker::TokenUnavailable, None),
+        };
+        let reserved_balance = Self::get_locked_funds(e.clone(), token.clone());
+        let available_balance = treasury_reservation::reservable_balance(
+            total_balance,
+            reserved_balance,
+            Self::get_treasury_balance_buffer(e.clone()),
+        );
+
+        if available_balance < required_amount {
+            return blocked(
+                FundingSourceBlocker::InsufficientFunds,
+                Some(available_balance),
+            );
+        }
+
+        FundingSourceReadiness {
+            ready: true,
+            blocker: FundingSourceBlocker::NotBlocked,
+            required_amount,
+            available_balance: Some(available_balance),
+        }
+    }
+
+    /// Configure a fallback funding source for simulation (#787).
+    /// Admin-only.
+    pub fn set_fallback_funding_source(e: Env, admin: Address, treasury: Address, token: Address) {
+        Self::require_admin(&e, &admin);
+        let source = FallbackFundingSource {
+            treasury: treasury.clone(),
+            token: token.clone(),
+        };
+        e.storage()
+            .persistent()
+            .set(&DataKey::FallbackFundingSource, &source);
+        payroll_events::emit_fallback_funding_source_set(&e, treasury, token);
+    }
+
+    /// Retrieve the configured fallback funding source, if any (#787).
+    pub fn get_fallback_funding_source(e: Env) -> Option<FallbackFundingSource> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::FallbackFundingSource)
+    }
+
+    /// Remove the configured fallback funding source (#787).
+    /// Admin-only.
+    pub fn remove_fallback_funding_source(e: Env, admin: Address) {
+        Self::require_admin(&e, &admin);
+        e.storage()
+            .persistent()
+            .remove(&DataKey::FallbackFundingSource);
+        payroll_events::emit_fallback_funding_source_removed(&e);
+    }
+
+    /// Simulate funding source readiness across primary and configured fallback sources (#787).
+    ///
+    /// Evaluates the primary source first. If primary has sufficient funds, it is chosen.
+    /// If primary is blocked (e.g. InsufficientFunds, TokenUnavailable, AssetNotAllowed),
+    /// the configured fallback source is evaluated and selected if ready.
+    /// Purely read-only simulation: does not mutate balances, locks, or payroll state.
+    pub fn simulate_funding_fallback(e: Env, required_amount: i128) -> FallbackSimulationResult {
+        let unconfigured_fallback = FundingSourceReadiness {
+            ready: false,
+            blocker: FundingSourceBlocker::NotInitialized,
+            required_amount,
+            available_balance: None,
+        };
+
+        let primary = Self::check_funding_source_readiness(e.clone(), required_amount);
+        if primary.ready {
+            return FallbackSimulationResult {
+                success: true,
+                selected_source: FundingSourceChoice::Primary,
+                fallback_evaluated: false,
+                primary,
+                fallback: unconfigured_fallback,
+            };
+        }
+
+        let fallback_cfg = Self::get_fallback_funding_source(e.clone());
+        let (fallback_evaluated, fallback_readiness) = match fallback_cfg {
+            Some(cfg) => (
+                true,
+                Self::evaluate_funding_source(&e, &cfg.treasury, &cfg.token, required_amount),
+            ),
+            None => (false, unconfigured_fallback),
+        };
+
+        let success = fallback_evaluated && fallback_readiness.ready;
+        let selected_source = if success {
+            FundingSourceChoice::Fallback
+        } else {
+            FundingSourceChoice::None
+        };
+
+        FallbackSimulationResult {
+            success,
+            selected_source,
+            fallback_evaluated,
+            primary,
+            fallback: fallback_readiness,
+        }
+    }
+
+    /// Simulate funding source readiness against an explicit candidate fallback source (#787).
+    ///
+    /// Allows off-chain planners to simulate a candidate treasury/token fallback
+    /// without configuring it on-chain beforehand. Read-only.
+    pub fn simulate_explicit_fallback(
+        e: Env,
+        required_amount: i128,
+        fallback_treasury: Address,
+        fallback_token: Address,
+    ) -> FallbackSimulationResult {
+        let unconfigured_fallback = FundingSourceReadiness {
+            ready: false,
+            blocker: FundingSourceBlocker::NotInitialized,
+            required_amount,
+            available_balance: None,
+        };
+
+        let primary = Self::check_funding_source_readiness(e.clone(), required_amount);
+        if primary.ready {
+            return FallbackSimulationResult {
+                success: true,
+                selected_source: FundingSourceChoice::Primary,
+                fallback_evaluated: false,
+                primary,
+                fallback: unconfigured_fallback,
+            };
+        }
+
+        let fallback_readiness =
+            Self::evaluate_funding_source(&e, &fallback_treasury, &fallback_token, required_amount);
+        let success = fallback_readiness.ready;
+        let selected_source = if success {
+            FundingSourceChoice::Fallback
+        } else {
+            FundingSourceChoice::None
+        };
+
+        FallbackSimulationResult {
+            success,
+            selected_source,
+            fallback_evaluated: true,
+            primary,
+            fallback: fallback_readiness,
+        }
+    }
+
     // ?? Issue #403: Payroll Approval Expiry Validation ???????????????????????
 
     /// Check whether an approval for a payroll run has expired (#403).
@@ -11971,10 +12190,7 @@ impl Payroll {
     }
 
     /// Read the privacy-safe status and cursor for an upload.
-    pub fn get_payroll_upload_checkpoint(
-        e: Env,
-        upload_id: BytesN<32>,
-    ) -> PayrollUploadCheckpoint {
+    pub fn get_payroll_upload_checkpoint(e: Env, upload_id: BytesN<32>) -> PayrollUploadCheckpoint {
         let key = PayrollUploadKey::Checkpoint(upload_id);
         e.storage()
             .persistent()
@@ -16542,14 +16758,8 @@ mod tests {
             setup_simple_payroll(&env);
         let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 12_345);
         let nonce = test_nonce(&env, 254);
-        let run_id = payroll_client.prepare_payroll_run(
-            &proofs,
-            &amounts,
-            &employees,
-            &12_345,
-            &nonce,
-            &None,
-        );
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &12_345, &nonce, &None);
 
         payroll_client.cancel_payroll_run_with_reason(
             &admin,

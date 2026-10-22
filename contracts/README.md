@@ -552,7 +552,7 @@ Off-chain clients can call `dry_run_batch_process_payroll` before submitting a r
 
 ## Latest approved payroll revision query (issue #864)
 
-The registry exposes get_latest_approved_payroll_revision(company_id) as a
+The registry exposes get_latest_approved_revision(company_id) as a
 read-only metadata query. It returns None until a revision has been recorded,
 then returns the latest monotonically increasing revision number, approval
 timestamp, and approving company admin. Only the active company admin may
@@ -576,3 +576,56 @@ Payroll cancellation events publish only the run ID and cancelling admin.
 Amounts, employee counts, draft hashes, and free-form cancellation reasons are
 kept out of the public event payload. Operational cancellation details remain
 available through the authorized cancellation-status record.
+
+
+## Fallback funding simulation (`payroll` — issue #787)
+
+Employers and payroll operators can configure a fallback funding source to be
+consulted if the primary funding source has insufficient liquidity or is
+unready:
+
+- `set_fallback_funding_source(source)`: Configures a `FundingSourceChoice`
+  (`ContractTreasury` or `DirectBalance`).
+- `get_fallback_funding_source()`: Returns the configured fallback source or `None`.
+- `remove_fallback_funding_source()`: Clears the configured fallback source.
+- `simulate_funding_fallback(employer_addr, total_amount)`: Pre-flight simulation
+  that checks primary readiness and, if inadequate, evaluates fallback readiness.
+  Returns `FallbackSimulationResult` detailing primary readiness, fallback
+  readiness, whether the fallback was evaluated, and whether the payout can be
+  satisfied.
+- `simulate_explicit_fallback(employer_addr, fallback_source, total_amount)`:
+  Simulates execution against an explicitly provided fallback source without
+  requiring persistent storage updates.
+
+
+## Explicit treasury reserve authorizers (`treasury_isolation` — issue #819)
+
+Reserved funds in treasury isolation require explicit authorization before release:
+
+- `set_reserve_authorizer(reserve_id, authorizer)`: Assigns a dedicated
+  authorizing identity for a specific reserve ID (requires admin authorization).
+- `remove_reserve_authorizer(reserve_id, authorizer)`: Revokes a designated
+  reserve authorizer.
+- `is_reserve_authorizer(reserve_id, authorizer)`: Read-only query checking if an
+  address is authorized for a reserve.
+- `release_reserve(reserve_id, amount, destination)`: Now verifies caller
+  authorization (`require_auth`) and enforces that the caller is either the
+  contract admin or an explicitly designated authorizer for that `reserve_id`.
+  Unauthorized callers are rejected with `TreasuryIsolationError::Unauthorized`.
+
+
+## Settlement token interface validation (`settlement_window` — issue #824)
+
+Settlement payout execution validates token interfaces before payouts are committed:
+
+- `validate_payout_token(token_addr)`: Verifies that the payout token implements
+  standard SEP-41 interface methods (`decimals`, `name`, `symbol`), or has an
+  active administrative interface override. Unsupported tokens are rejected with
+  `SettlementError::UnsupportedTokenInterface`.
+- `set_token_interface_support(token_addr, is_supported)`: Administrative control
+  to register or override interface support for non-standard or wrapped token
+  contracts.
+- `check_settlement_payout(token_addr, company_id, run_id)`: Unified preflight
+  check validating both current window/schedule execution timing and token interface
+  support in a single call.
+

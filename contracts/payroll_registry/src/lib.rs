@@ -495,7 +495,7 @@ pub trait PayrollRegistryTrait {
     );
 
     /// Return the latest approved payroll revision metadata, if any (#864).
-    fn get_latest_approved_payroll_revision(
+    fn get_latest_approved_revision(
         env: Env,
         company_id: u64,
     ) -> Option<LatestApprovedPayrollRevision>;
@@ -1925,7 +1925,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
     /// Only the active company admin can update this pointer. The public
     /// record intentionally contains revision metadata only, never payroll
     /// rows, employee identifiers, salary amounts, or commitments.
-    pub fn record_approved_payroll_revision(
+    fn record_approved_payroll_revision(
         env: Env,
         company_id: u64,
         admin: Address,
@@ -1969,7 +1969,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
     }
 
     /// Read the latest approved payroll revision without exposing payroll rows.
-    pub fn get_latest_approved_payroll_revision(
+    fn get_latest_approved_revision(
         env: Env,
         company_id: u64,
     ) -> Option<LatestApprovedPayrollRevision> {

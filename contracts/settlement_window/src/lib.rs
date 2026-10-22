@@ -47,6 +47,8 @@ pub enum SettlementError {
     /// The proposed payout window overlaps a schedule that is already reserved
     /// for this company (see `create_period` / `check_schedule_available`).
     PayoutScheduleCollision = 10,
+    /// The token interface is not supported for payout settlement (#824).
+    UnsupportedTokenInterface = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,8 @@ pub enum DataKey {
     Admin,
     /// Optional pause manager address.
     PauseManager,
+    /// Token interface support override keyed by token Address (#824).
+    TokenInterfaceOverride(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +454,58 @@ impl SettlementWindowContract {
         } else {
             Err(SettlementError::PayoutScheduleCollision)
         }
+    }
+
+    /// Explicitly configure whether a token interface is supported for payout settlement (#824).
+    /// Admin-only.
+    pub fn set_token_interface_support(env: Env, token: Address, supported: bool) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenInterfaceOverride(token), &supported);
+    }
+
+    /// Check whether a token contract supports the required payout token interface (#824).
+    ///
+    /// Checks explicit admin override first if present. Otherwise, probes the contract
+    /// at `token` by calling its `balance` entrypoint. Returns `Ok(())` if the token
+    /// implements the required interface; returns `Err(SettlementError::UnsupportedTokenInterface)`
+    /// if the call reverts, fails, or the token is marked unsupported.
+    pub fn validate_payout_token(env: Env, token: Address) -> Result<(), SettlementError> {
+        let override_key = DataKey::TokenInterfaceOverride(token.clone());
+        if let Some(supported) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&override_key)
+        {
+            if !supported {
+                return Err(SettlementError::UnsupportedTokenInterface);
+            }
+            return Ok(());
+        }
+
+        let token_client = token::TokenClient::new(&env, &token);
+        match token_client.try_balance(&token) {
+            Ok(Ok(_)) => Ok(()),
+            _ => Err(SettlementError::UnsupportedTokenInterface),
+        }
+    }
+
+    /// Check whether payout settlement is allowed for the given period and token (#824).
+    ///
+    /// Validates both the settlement execution timing window and token interface conformance.
+    /// Returns `Err(SettlementError::UnsupportedTokenInterface)` if the token interface is invalid,
+    /// or timing errors (`ExecutionWindowNotOpen`, `ExecutionWindowExpired`, etc.) otherwise.
+    pub fn check_settlement_payout(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+        token: Address,
+    ) -> Result<(), SettlementError> {
+        Self::check_execution_allowed(env.clone(), company_id, period_id)?;
+        Self::validate_payout_token(env, token)?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1057,5 +1113,92 @@ mod tests {
         );
         assert_eq!(next.period_id, 2);
         assert_eq!(next.phase, PeriodPhase::Pending);
+    }
+
+    #[test]
+    fn test_validate_payout_token_valid_interface_succeeds() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let token_id = env.register(token::Token, ());
+
+        let res = client.try_validate_payout_token(&token_id);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_payout_token_unsupported_interface_rejected() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let invalid_token = Address::generate(&env);
+
+        let res = client.try_validate_payout_token(&invalid_token);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            SettlementError::UnsupportedTokenInterface
+        );
+    }
+
+    #[test]
+    fn test_check_settlement_payout_with_token_interface_and_timing() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let token_id = env.register(token::Token, ());
+        let bad_token = Address::generate(&env);
+        let base = env.ledger().timestamp();
+        let company_id = 88u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        // Before execution window: fails with ExecutionWindowNotOpen
+        let too_early = client.try_check_settlement_payout(&company_id, &1, &token_id);
+        assert_eq!(
+            too_early.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
+
+        // Advance to execution window
+        env.ledger().with_mut(|l| l.timestamp = base + 20);
+
+        // With unsupported token: fails with UnsupportedTokenInterface
+        let bad_token_res = client.try_check_settlement_payout(&company_id, &1, &bad_token);
+        assert_eq!(
+            bad_token_res.unwrap_err().unwrap(),
+            SettlementError::UnsupportedTokenInterface
+        );
+
+        // With valid token: succeeds
+        let valid_res = client.check_settlement_payout(&company_id, &1, &token_id);
+        assert_eq!(valid_res, ());
+    }
+
+    #[test]
+    fn test_admin_override_token_interface_support() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let token_id = env.register(token::Token, ());
+
+        // Valid token works initially
+        assert_eq!(client.validate_payout_token(&token_id), ());
+
+        // Admin marks this token as explicitly unsupported
+        client.set_token_interface_support(&token_id, &false);
+
+        // Now validation is rejected
+        let res = client.try_validate_payout_token(&token_id);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            SettlementError::UnsupportedTokenInterface
+        );
+
+        // Admin restores support
+        client.set_token_interface_support(&token_id, &true);
+        assert_eq!(client.validate_payout_token(&token_id), ());
     }
 }

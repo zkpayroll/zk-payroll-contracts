@@ -343,7 +343,10 @@ pub fn emit_batch_checkpoint_rolled_back(
     total_count: u32,
 ) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "batch_checkpoint_rolled_back")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "batch_checkpoint_rolled_back"),
+        ),
         (
             employer,
             batch_root,
@@ -1090,7 +1093,10 @@ pub fn emit_audit_hold_released(
 /// Emitted when audit-hold authority is granted to an address (#546).
 pub fn emit_audit_hold_authority_added(e: &Env, authority: Address) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "audit_hold_authority_added")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "audit_hold_authority_added"),
+        ),
         authority,
     );
 }
@@ -1098,7 +1104,10 @@ pub fn emit_audit_hold_authority_added(e: &Env, authority: Address) {
 /// Emitted when audit-hold authority is revoked from an address (#546).
 pub fn emit_audit_hold_authority_removed(e: &Env, authority: Address) {
     e.events().publish(
-        (payroll_topic(), Symbol::new(e, "audit_hold_authority_removed")),
+        (
+            payroll_topic(),
+            Symbol::new(e, "audit_hold_authority_removed"),
+        ),
         authority,
     );
 }
@@ -1571,7 +1580,13 @@ pub fn emit_review_resolution_audit(
 ) {
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "review_resolution_audit")),
-        (review_id, run_id, resolved_by, resolution_reason, resolved_at),
+        (
+            review_id,
+            run_id,
+            resolved_by,
+            resolution_reason,
+            resolved_at,
+        ),
     );
 }
 
@@ -1825,5 +1840,37 @@ pub fn emit_treasury_debited(e: &Env, company_id: u64, asset: Address, amount: i
     e.events().publish(
         (payroll_topic(), Symbol::new(e, "treas_debited")),
         (company_id, asset, amount),
+    );
+}
+
+/// Emitted when an explicit reserve authorizer is granted permission for a company (#819).
+pub fn emit_treasury_reserve_authorizer_set(e: &Env, company_id: u64, authorizer: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_auth_set")),
+        (company_id, authorizer),
+    );
+}
+
+/// Emitted when an explicit reserve authorizer's permission is revoked for a company (#819).
+pub fn emit_treasury_reserve_authorizer_removed(e: &Env, company_id: u64, authorizer: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "treas_auth_rem")),
+        (company_id, authorizer),
+    );
+}
+
+/// Emitted when a fallback funding source is configured (#787).
+pub fn emit_fallback_funding_source_set(e: &Env, treasury: Address, token: Address) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "fallback_funding_set")),
+        (treasury, token),
+    );
+}
+
+/// Emitted when a fallback funding source is removed (#787).
+pub fn emit_fallback_funding_source_removed(e: &Env) {
+    e.events().publish(
+        (payroll_topic(), Symbol::new(e, "fallback_funding_rem")),
+        (),
     );
 }

@@ -11,6 +11,7 @@ payroll = { path = "../payroll" }
 proof_verifier = { path = "../proof_verifier" }
 salary_commitment = { path = "../salary_commitment" }
 token = { path = "../token" }
+treasury_isolation = { path = "../treasury_isolation" }
 
 [[test]]
 name = "liability_invariants"
@@ -27,3 +28,8 @@ path = "draft_updated_timestamp.rs"
 [[test]]
 name = "draft_lock_owner"
 path = "draft_lock_owner.rs"
+
+[[test]]
+name = "treasury_reserve_authorization"
+path = "treasury_reserve_authorization.rs"
+

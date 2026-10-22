@@ -2985,6 +2985,7 @@ dependencies = [
  "pause_manager",
  "payroll_events",
  "soroban-sdk",
+ "token",
 ]
 
 [[package]]

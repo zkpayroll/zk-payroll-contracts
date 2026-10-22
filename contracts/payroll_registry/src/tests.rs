@@ -1487,16 +1487,16 @@ fn latest_approved_payroll_revision_is_readable_and_monotonic() {
     let treasury = Address::generate(&env);
     let company_id = client.register_company(&admin, &treasury);
 
-    assert!(client.get_latest_approved_payroll_revision(&company_id).is_none());
+    assert!(client.get_latest_approved_revision(&company_id).is_none());
 
     client.record_approved_payroll_revision(&company_id, &admin, &1);
-    let first = client.get_latest_approved_payroll_revision(&company_id).unwrap();
+    let first = client.get_latest_approved_revision(&company_id).unwrap();
     assert_eq!(first.company_id, company_id);
     assert_eq!(first.revision, 1);
     assert_eq!(first.approved_by, admin);
 
     client.record_approved_payroll_revision(&company_id, &admin, &2);
-    let latest = client.get_latest_approved_payroll_revision(&company_id).unwrap();
+    let latest = client.get_latest_approved_revision(&company_id).unwrap();
     assert_eq!(latest.revision, 2);
     assert!(latest.approved_at >= first.approved_at);
 }
@@ -1512,7 +1512,7 @@ fn latest_approved_payroll_revision_rejects_zero_revision() {
     assert!(client
         .try_record_approved_payroll_revision(&company_id, &admin, &0)
         .is_err());
-    assert!(client.get_latest_approved_payroll_revision(&company_id).is_none());
+    assert!(client.get_latest_approved_revision(&company_id).is_none());
 }
 
 #[test]
@@ -1528,7 +1528,7 @@ fn latest_approved_payroll_revision_rejects_stale_revision() {
         .try_record_approved_payroll_revision(&company_id, &admin, &7)
         .is_err());
     assert_eq!(
-        client.get_latest_approved_payroll_revision(&company_id).unwrap().revision,
+        client.get_latest_approved_revision(&company_id).unwrap().revision,
         7
     );
 }
