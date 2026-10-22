@@ -5236,6 +5236,14 @@ impl Payroll {
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
 
+            // Duplicate payout instruction detection: record this instruction
+            // or reject it if it was already processed for this run.
+            if let Err(_) = record_or_reject_duplicate(&e, run_id, i as u64) {
+                panic!(
+                    "Duplicate payout instruction: instruction {i} already paid in run {run_id}"
+                );
+            }
+
             // Issue #482: Validate employee has not been paid already in this run
             Self::validate_employee_not_already_paid(&e, run_id, &commitment);
 
@@ -5461,6 +5469,14 @@ impl Payroll {
             let commitment_struct = commitment_client.get_commitment(&employee);
             let commitment = commitment_struct.commitment;
 
+            // Duplicate payout instruction detection: record this instruction
+            // or reject it if it was already processed for this run.
+            if let Err(_) = record_or_reject_duplicate(&e, run_id, i as u64) {
+                panic!(
+                    "Duplicate payout instruction: instruction {i} already paid in run {run_id}"
+                );
+            }
+
             Self::validate_employee_not_already_paid(&e, run_id, &commitment);
 
             let mut nullifier_arr = [0u8; 32];
@@ -5527,6 +5543,40 @@ impl Payroll {
         payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
 
         run_id
+    }
+
+    /// Record a payout instruction as seen, or reject it if it was already
+    /// seen for the given `(period_id, instruction_id)` pair.
+    ///
+    /// Returns `Ok(())` on first sighting and records the pair; returns
+    /// `Err(PaymentError::EmployeeAlreadyPaid)` on a duplicate without
+    /// modifying storage. Only the composite key is persisted — no salary
+    /// amount, employee identity, or proof material is retained.
+    ///
+    /// Requires the payroll admin's authorization.
+    pub fn record_payment_instruction(
+        e: Env,
+        period_id: u64,
+        instruction_id: u64,
+    ) -> Result<(), PaymentError> {
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        addrs.admin.require_auth();
+        record_or_reject_duplicate(&e, period_id, instruction_id)
+    }
+
+    /// Returns `true` if `(period_id, instruction_id)` has already been
+    /// recorded, without modifying storage. Intended for read-only preflight
+    /// checks by dashboards and SDKs.
+    pub fn is_payment_instruction_duplicate(
+        e: Env,
+        period_id: u64,
+        instruction_id: u64,
+    ) -> bool {
+        is_duplicate(&e, period_id, instruction_id)
     }
 
     // ── Issue #509 / #521: failure reason codes + dry-run preflight ──────────
