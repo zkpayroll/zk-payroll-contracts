@@ -31,6 +31,7 @@ mod error_taxonomy_tests {
         assert_eq!(ProofError::InvalidPublicInputs as u32, 104);
         assert_eq!(ProofError::VerifyingKeyMismatch as u32, 105);
         assert_eq!(ProofError::InvalidNullifier as u32, 106);
+        assert_eq!(ProofError::UnsupportedProofFormat as u32, 107);
 
         // Audit (200-299)
         assert_eq!(AuditError::ViewKeyNotFound as u32, 200);
