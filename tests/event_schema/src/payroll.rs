@@ -389,9 +389,9 @@ fn case_run_prepared(env: &Env, cid: &Address, out: &mut SchemaMap) {
 
 fn case_run_cancelled(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let run_id: u64 = 12;
-    let total_amount: i128 = 8_000;
+    let cancelled_by = Address::generate(env);
     env.as_contract(cid, || {
-        payroll_events::emit_run_cancelled(env, run_id, total_amount);
+        payroll_events::emit_run_cancelled(env, run_id, cancelled_by.clone());
     });
     let (_, topics, data) = last_event(env);
     assert_eq!(
@@ -399,10 +399,10 @@ fn case_run_cancelled(env: &Env, cid: &Address, out: &mut SchemaMap) {
         topic(env, "run_cancelled"),
         "payroll.run_cancelled topics changed"
     );
-    let decoded: (u64, i128) = data.try_into_val(env).unwrap();
+    let decoded: (u64, Address) = data.try_into_val(env).unwrap();
     assert_eq!(
         decoded,
-        (run_id, total_amount),
+        (run_id, cancelled_by),
         "payroll.run_cancelled payload changed"
     );
     out.insert(
@@ -410,7 +410,7 @@ fn case_run_cancelled(env: &Env, cid: &Address, out: &mut SchemaMap) {
         EventSchema {
             schema_version: 1,
             topics: vec![sym("payroll"), sym("run_cancelled")],
-            data: vec![field("run_id", "u64"), field("total_amount", "i128")],
+            data: vec![field("run_id", "u64"), field("cancelled_by", "Address")],
         },
     );
 }

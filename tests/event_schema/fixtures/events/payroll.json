@@ -121,7 +121,7 @@
     ],
     "data": [
       { "name": "run_id", "type": "u64" },
-      { "name": "total_amount", "type": "i128" }
+      { "name": "cancelled_by", "type": "Address" }
     ]
   },
   "payroll.payment_executed": {
