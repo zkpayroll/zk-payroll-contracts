@@ -1124,6 +1124,47 @@ impl AuditModule {
         Ok(matched)
     }
 
+    // ── Issue #900: archived payroll audit verification ──────────────────────
+
+    /// Verify an auditor's access and validate payroll metadata for an archived
+    /// payroll run without exposing sensitive employee salaries (issue #900).
+    ///
+    /// The check verifies that the auditor holds an active unexpired grant with
+    /// sufficient scope, that the archived metadata hash matches the expected
+    /// audit digest, and records an immutable audit log entry.
+    pub fn verify_archived_run_audit(
+        env: Env,
+        auditor: Address,
+        _run_id: u64,
+        archived_metadata_hash: BytesN<32>,
+        expected_hash: BytesN<32>,
+        scope: AuditScope,
+    ) -> Result<bool, AuditError> {
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if archived_metadata_hash == zero || expected_hash == zero {
+            panic!("Metadata hash cannot be all-zero digest");
+        }
+        Self::authorize_auditor(&env, auditor.clone())?;
+        Self::verify_scope_for_commitment(scope)?;
+
+        let matched = archived_metadata_hash == expected_hash;
+        Self::record_audit_log(&env, &auditor, scope, matched);
+
+        if matched {
+            env.events().publish(
+                (Symbol::new(&env, "ArchivedRunAuditPassed"), auditor),
+                (archived_metadata_hash, scope),
+            );
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "ArchivedRunAuditMismatch"), auditor),
+                (archived_metadata_hash, expected_hash),
+            );
+        }
+
+        Ok(matched)
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------

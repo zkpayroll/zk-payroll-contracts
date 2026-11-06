@@ -1512,7 +1512,7 @@ fn delegated_grant_cannot_expand_past_issuance_expiry() {
         AuditError::GrantExpansionNotAllowed
     );
     assert_eq!(
-        client.get_expiration(&delegate).unwrap(),
+        client.get_expiration(&delegate),
         seq + 500,
         "a rejected extension must preserve the issued expiry"
     );
