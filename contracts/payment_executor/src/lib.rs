@@ -1164,6 +1164,27 @@ impl PaymentExecutor {
             .get(&DataKey::PeriodSequence(company_id))
             .unwrap_or(0u32)
     }
+
+    /// Check whether a caller is authorized as the current active registry owner
+    /// (company admin) for a given company before initiating payouts (issue #837).
+    /// Returns true if the company exists, is not revoked, and caller matches company.admin.
+    /// Returns false if revoked, caller does not match, or company does not exist,
+    /// without exposing private payroll data.
+    pub fn check_payout_authorization(env: Env, company_id: u64, caller: Address) -> bool {
+        let addresses: ContractAddresses = match env.storage().persistent().get(&DataKey::Addresses) {
+            Some(addrs) => addrs,
+            None => return false,
+        };
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        if company_id >= registry.get_company_sequence() {
+            return false;
+        }
+        let company: CompanyInfo = registry.get_company(&company_id);
+        if company.revoked {
+            return false;
+        }
+        company.admin == caller
+    }
 }
 
 #[cfg(test)]
