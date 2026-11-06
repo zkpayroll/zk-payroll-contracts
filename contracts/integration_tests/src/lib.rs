@@ -361,7 +361,7 @@ mod e2e {
 
     /// Paying an employee who has no commitment on-chain must panic.
     #[test]
-    #[should_panic(expected = "Commitment not found")]
+    #[should_panic(expected = "Payroll batch references an inactive or removed employee")]
     fn test_unregistered_employee_cannot_be_paid() {
         let ctx = setup();
         let env = &ctx.env;
@@ -817,5 +817,173 @@ mod e2e {
         );
         assert!(ctx.commitment_client.is_nullifier_used(&alice_nullifier));
         assert!(ctx.commitment_client.is_commitment_locked(&ctx.alice));
+    }
+
+    /// Issue #903: Test contract state after a failed multi-recipient payout in the contract layer.
+    /// Verifies that when a batch contains multiple recipients [Alice, Bob, Charlie] and one fails
+    /// midway (e.g. Charlie unregistered):
+    /// 1. Entire batch reverts with no partial disbursements to earlier recipients.
+    /// 2. Treasury balance remains completely unspent.
+    /// 3. Earlier recipients' nullifiers remain unused.
+    /// 4. Submitting a sanitized valid batch [Alice, Bob] succeeds without state corruption.
+    #[test]
+    fn test_failed_multi_recipient_payout_contract_state_rollback() {
+        let ctx = setup();
+        let env = &ctx.env;
+
+        // Onboard Alice
+        let alice_commitment = alice_salary_commitment(&ctx.commitment_client);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &alice_commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &ctx.alice, &alice_commitment);
+
+        // Onboard Bob
+        let bob = Address::generate(env);
+        let mut bob_blinding = [0u8; 32];
+        bob_blinding[31] = 124u8;
+        let bob_commitment = ctx.commitment_client.compute_commitment(&4000u64, &BytesN::from_array(env, &bob_blinding));
+        ctx.commitment_client
+            .store_commitment(&bob, &bob_commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &bob, &bob_commitment);
+
+        // Create an un-onboarded employee Charlie
+        let charlie = Address::generate(env);
+
+        let initial_treasury: i128 = 20_000;
+        ctx.token_client.mint(&ctx.treasury, &initial_treasury);
+
+        // Construct 3-recipient batch: Alice (valid), Bob (valid), Charlie (unregistered)
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        proofs.push_back(mock_proof(env));
+        proofs.push_back(mock_proof(env));
+
+        let mut amounts = Vec::new(env);
+        amounts.push_back(5_000i128);
+        amounts.push_back(4_000i128);
+        amounts.push_back(3_000i128);
+
+        let mut employees = Vec::new(env);
+        employees.push_back(ctx.alice.clone());
+        employees.push_back(bob.clone());
+        employees.push_back(charlie.clone());
+
+        let nonce = test_nonce(env, 93);
+
+        // Multi-recipient payout fails because Charlie has no commitment
+        let res = ctx.payroll_client.try_batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &12_000i128,
+            &nonce,
+            &None,
+            &ctx.source,
+        );
+        assert!(res.is_err(), "Multi-recipient batch must fail when Charlie is invalid");
+
+        // 1. Treasury balance remains pristine
+        assert_eq!(
+            ctx.token_client.balance(&ctx.treasury),
+            initial_treasury,
+            "Treasury funds must not be spent on failed multi-recipient payout"
+        );
+
+        // 2. Neither Alice nor Bob received tokens
+        assert_eq!(ctx.token_client.balance(&ctx.alice), 0);
+        assert_eq!(ctx.token_client.balance(&bob), 0);
+        assert_eq!(ctx.token_client.balance(&charlie), 0);
+
+        // 3. Nullifiers for Alice and Bob are NOT recorded as used
+        let alice_nullifier = payment_nullifier(env, &alice_commitment, &nonce);
+        let bob_nullifier = payment_nullifier(env, &bob_commitment, &nonce);
+        assert!(!ctx.commitment_client.is_nullifier_used(&alice_nullifier));
+        assert!(!ctx.commitment_client.is_nullifier_used(&bob_nullifier));
+
+        // 4. Commitment locks remain false
+        assert!(!ctx.commitment_client.is_commitment_locked(&ctx.alice));
+        assert!(!ctx.commitment_client.is_commitment_locked(&bob));
+
+        // 5. Subsequent valid run for [Alice, Bob] succeeds cleanly
+        let mut valid_proofs = Vec::new(env);
+        valid_proofs.push_back(mock_proof(env));
+        valid_proofs.push_back(mock_proof(env));
+
+        let mut valid_amounts = Vec::new(env);
+        valid_amounts.push_back(5_000i128);
+        valid_amounts.push_back(4_000i128);
+
+        let mut valid_employees = Vec::new(env);
+        valid_employees.push_back(ctx.alice.clone());
+        valid_employees.push_back(bob.clone());
+
+        let run_id = ctx.payroll_client.batch_process_payroll(
+            &valid_proofs,
+            &valid_amounts,
+            &valid_employees,
+            &9_000i128,
+            &nonce,
+            &None,
+            &ctx.source,
+        );
+        assert!(run_id > 0, "Valid batch must succeed after failed multi-recipient rollback");
+
+        // Verify post-recovery balances and nullifiers
+        assert_eq!(ctx.token_client.balance(&ctx.alice), 5_000i128);
+        assert_eq!(ctx.token_client.balance(&bob), 4_000i128);
+        assert_eq!(
+            ctx.token_client.balance(&ctx.treasury),
+            initial_treasury - 9_000i128
+        );
+        assert!(ctx.commitment_client.is_nullifier_used(&alice_nullifier));
+        assert!(ctx.commitment_client.is_nullifier_used(&bob_nullifier));
+    }
+
+    /// Issue #903 Boundary Case: Multi-recipient payout failure on the very first recipient index (index 0).
+    /// Asserts that failure on index 0 aborts before touching any recipient balance or nullifier store.
+    #[test]
+    fn test_failed_multi_recipient_payout_first_recipient_boundary() {
+        let ctx = setup();
+        let env = &ctx.env;
+
+        let alice_commitment = alice_salary_commitment(&ctx.commitment_client);
+        ctx.commitment_client
+            .store_commitment(&ctx.alice, &alice_commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, &ctx.alice, &alice_commitment);
+
+        let unonboarded = Address::generate(env);
+        ctx.token_client.mint(&ctx.treasury, &15_000i128);
+
+        // Batch order: [unonboarded (index 0), Alice (index 1)]
+        let mut proofs = Vec::new(env);
+        proofs.push_back(mock_proof(env));
+        proofs.push_back(mock_proof(env));
+
+        let mut amounts = Vec::new(env);
+        amounts.push_back(3_000i128);
+        amounts.push_back(5_000i128);
+
+        let mut employees = Vec::new(env);
+        employees.push_back(unonboarded.clone());
+        employees.push_back(ctx.alice.clone());
+
+        let nonce = test_nonce(env, 94);
+
+        let res = ctx.payroll_client.try_batch_process_payroll(
+            &proofs,
+            &amounts,
+            &employees,
+            &8_000i128,
+            &nonce,
+            &None,
+            &ctx.source,
+        );
+        assert!(res.is_err());
+        assert_eq!(ctx.token_client.balance(&ctx.treasury), 15_000i128);
+        assert_eq!(ctx.token_client.balance(&ctx.alice), 0);
+        assert_eq!(ctx.token_client.balance(&unonboarded), 0);
     }
 }
