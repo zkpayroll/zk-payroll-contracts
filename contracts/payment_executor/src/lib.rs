@@ -100,6 +100,11 @@ pub enum PaymentError {
     BatchTooLarge = 18,
     /// The payroll period is already open (cannot reopen an open period) (issue #484).
     PeriodAlreadyOpen = 19,
+    /// The final payout total exceeds the reserved funds allocated for the company (issue #902).
+    /// Protects against underfunded settlement runs without disclosing individual employee salaries.
+    PayoutExceedsReservedFunds = 20,
+    /// Invalid reserved funds configuration (e.g. negative amount) (issue #902).
+    InvalidReservedAmount = 21,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -197,6 +202,8 @@ pub enum DataKey {
     /// Stores the maximum number of employees allowed in a single
     /// execute_batch_payroll call for this company.
     MaxBatchSize(u64),
+    /// Per-company reserved funds allocation for upcoming payouts (issue #902).
+    ReservedFunds(u64),
 }
 
 #[contract]
@@ -982,6 +989,24 @@ impl PaymentExecutor {
             return Err(PaymentError::BatchTooLarge);
         }
 
+        // Issue #902: Validate final payout total against reserved funds if configured.
+        if let Some(reserved) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::ReservedFunds(company_id))
+        {
+            let mut total_payout: i128 = 0;
+            for i in 0..count {
+                let amt = amounts.get(i).unwrap();
+                total_payout = total_payout
+                    .checked_add(amt)
+                    .ok_or(PaymentError::PayoutExceedsReservedFunds)?;
+            }
+            if total_payout > reserved {
+                return Err(PaymentError::PayoutExceedsReservedFunds);
+            }
+        }
+
         let mut records = soroban_sdk::Vec::new(&env);
 
         for i in 0..count {
@@ -1163,6 +1188,47 @@ impl PaymentExecutor {
             .persistent()
             .get(&DataKey::PeriodSequence(company_id))
             .unwrap_or(0u32)
+    }
+
+    // ── Issue #902: reserved funds validation ─────────────────────────────────
+
+    /// Set the reserved funds allocation for a company's upcoming payout (issue #902).
+    /// Amount must be non-negative.
+    pub fn set_reserved_funds(env: Env, company_id: u64, amount: i128) -> Result<(), PaymentError> {
+        if amount < 0 {
+            return Err(PaymentError::InvalidReservedAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReservedFunds(company_id), &amount);
+        Ok(())
+    }
+
+    /// Return the current reserved funds allocation for a company (issue #902).
+    pub fn get_reserved_funds(env: Env, company_id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ReservedFunds(company_id))
+            .unwrap_or(0i128)
+    }
+
+    /// Validate whether a proposed final payout total is covered by the company's reserved funds (issue #902).
+    /// Returns Ok(true) if total_payout <= reserved_funds and total_payout >= 0.
+    /// Returns Err(PaymentError::PayoutExceedsReservedFunds) if total_payout > reserved_funds.
+    /// Returns Err(PaymentError::InvalidReservedAmount) if total_payout < 0.
+    pub fn validate_payout_reserve(
+        env: Env,
+        company_id: u64,
+        total_payout: i128,
+    ) -> Result<bool, PaymentError> {
+        if total_payout < 0 {
+            return Err(PaymentError::InvalidReservedAmount);
+        }
+        let reserved = Self::get_reserved_funds(env, company_id);
+        if total_payout > reserved {
+            return Err(PaymentError::PayoutExceedsReservedFunds);
+        }
+        Ok(true)
     }
 }
 
