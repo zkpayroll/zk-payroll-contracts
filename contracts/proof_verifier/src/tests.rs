@@ -780,3 +780,84 @@ fn test_verify_with_reference_enforces_input_count_boundary() {
     assert!(client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 2)));
     assert!(!client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 3)));
 }
+
+// =========================================================================
+// Issue #821: Validate circuit input length before proof verification
+// =========================================================================
+
+#[test]
+fn test_validate_circuit_inputs_succeeds_for_exact_expected_length() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+
+    assert_eq!(client.expected_public_input_len(), 2);
+    let valid_inputs = public_inputs_of_len(&env, 2);
+    assert_eq!(client.validate_circuit_inputs(&valid_inputs), 2);
+
+    let proof = mock_snarkjs_proof(&env);
+    assert!(client.verify_payment_proof_checked(&proof, &valid_inputs));
+}
+
+#[test]
+fn test_validate_circuit_inputs_rejects_mismatched_lengths() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+    let proof = mock_snarkjs_proof(&env);
+
+    for bad_len in [0usize, 1, 3, 4] {
+        let bad_inputs = public_inputs_of_len(&env, bad_len);
+        let err = client
+            .try_validate_circuit_inputs(&bad_inputs)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ProofError::InvalidPublicInputLength);
+
+        let verify_err = client
+            .try_verify_payment_proof_checked(&proof, &bad_inputs)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(verify_err, ProofError::InvalidPublicInputLength);
+    }
+}
+
+#[test]
+fn test_validate_circuit_inputs_boundary_zero_public_inputs_when_ic_len_is_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProofVerifier);
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+    // Boundary VK with only IC[0] (constant term) -> expects 0 public inputs.
+    let vk = mock_verification_key_with_ic_len(&env, 1);
+    client.initialize_verifier(&vk);
+
+    assert_eq!(client.expected_public_input_len(), 0);
+    let empty_inputs = public_inputs_of_len(&env, 0);
+    assert_eq!(client.validate_circuit_inputs(&empty_inputs), 0);
+
+    let one_input = public_inputs_of_len(&env, 1);
+    assert_eq!(
+        client
+            .try_validate_circuit_inputs(&one_input)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::InvalidPublicInputLength
+    );
+}
+
+#[test]
+#[should_panic(expected = "Verification key IC vector must not be empty")]
+fn test_initialize_verifier_rejects_empty_ic_vector() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ProofVerifier);
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+    let empty_vk = mock_verification_key_with_ic_len(&env, 0);
+    client.initialize_verifier(&empty_vk);
+}
+

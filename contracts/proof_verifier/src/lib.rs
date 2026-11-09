@@ -55,6 +55,10 @@ pub enum ProofError {
     InvalidExpiry = 7,
     ExpiryBeyondCap = 8,
     ProofMismatch = 9,
+    /// Public input vector length does not match `vk.ic.len() - 1` (issue #821).
+    InvalidPublicInputLength = 10,
+    /// Verification key `ic` vector is empty and cannot represent the constant term `IC[0]` (issue #821).
+    EmptyVerificationKey = 11,
 }
 
 #[contracttype]
@@ -93,6 +97,9 @@ impl ProofVerifier {
         if env.storage().persistent().has(&DataKey::VerificationKey) {
             panic!("Verifier already initialized");
         }
+        if vk.ic.is_empty() {
+            panic!("Verification key IC vector must not be empty");
+        }
         env.storage()
             .persistent()
             .set(&DataKey::VerificationKey, &vk);
@@ -103,6 +110,74 @@ impl ProofVerifier {
             .persistent()
             .get(&DataKey::VerificationKey)
             .expect("Verifier not initialized")
+    }
+
+    /// Return the exact number of public circuit inputs expected by the active
+    /// Groth16 verification key (`vk.ic.len() - 1`, since `IC[0]` is the
+    /// constant term). Returns an actionable error without exposing any
+    /// private employee or salary data (issue #821).
+    pub fn expected_public_input_len(env: Env) -> Result<u32, ProofError> {
+        let vk: VerificationKey = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerificationKey)
+            .ok_or(ProofError::NotInitialized)?;
+        vk.ic
+            .len()
+            .checked_sub(1)
+            .ok_or(ProofError::EmptyVerificationKey)
+    }
+
+    /// Validate that `public_inputs` has the exact length required by the
+    /// active circuit verification key before attempting proof verification
+    /// (issue #821).
+    ///
+    /// Returns the validated public input count on success or
+    /// [`ProofError::InvalidPublicInputLength`] when the caller supplies too
+    /// few or too many public inputs. Failure states never leak private
+    /// employee or salary values.
+    pub fn validate_circuit_inputs(
+        env: Env,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<u32, ProofError> {
+        let expected_len = Self::expected_public_input_len(env)?;
+        if public_inputs.len() != expected_len {
+            return Err(ProofError::InvalidPublicInputLength);
+        }
+        Ok(expected_len)
+    }
+
+    /// Checked Groth16 proof verification that validates the circuit input
+    /// length first and surfaces [`ProofError`] instead of a boolean false on
+    /// configuration or input-arity errors (issue #821).
+    pub fn verify_checked(
+        env: Env,
+        proof: Groth16Proof,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<bool, ProofError> {
+        let proof_bytes = Self::pack_groth16_proof(&env, &proof);
+        Self::verify_payment_proof_checked(env, proof_bytes, public_inputs)
+    }
+
+    /// Checked packed-proof verification that validates circuit input length
+    /// before invoking Groth16 pairing verification (issue #821).
+    pub fn verify_payment_proof_checked(
+        env: Env,
+        proof: BytesN<256>,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<bool, ProofError> {
+        Self::validate_circuit_inputs(env.clone(), public_inputs.clone())?;
+        let vk: VerificationKey = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerificationKey)
+            .ok_or(ProofError::NotInitialized)?;
+        Ok(Self::simulated_verify_groth16(
+            &env,
+            &vk,
+            proof,
+            public_inputs,
+        ))
     }
 
     pub fn verify(env: Env, proof: Groth16Proof, public_inputs: Vec<BytesN<32>>) -> bool {
@@ -121,7 +196,7 @@ impl ProofVerifier {
             .get(&DataKey::VerificationKey)
             .expect("Verifier not initialized");
 
-        if public_inputs.len() + 1 != vk.ic.len() {
+        if Self::validate_circuit_inputs(env.clone(), public_inputs.clone()).is_err() {
             return false;
         }
 
