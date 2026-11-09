@@ -61,6 +61,8 @@ pub enum RetentionError {
     Unauthorized = 5,
     /// The record type is not recognised.
     UnknownRecordType = 6,
+    /// The record has been archived or pruned and can no longer be mutated (issue #825).
+    RecordImmutable = 7,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,8 @@ pub enum DataKey {
     /// Custom retention window override keyed by (company_id, RecordType).
     /// Absent = use the global constant.
     RetentionOverride(u64, u32),
+    /// Immutable archival marker keyed by (company_id, record_id, record_type) (issue #825).
+    ArchivedRecord(u64, u64, u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +197,10 @@ impl RetentionManagerContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
+        if Self::record_is_immutable(&env, company_id, record_id, &record_type) {
+            panic!("Archived or pruned payroll record cannot be mutated");
+        }
+
         let now = env.ledger().timestamp();
         let window = Self::retention_window_for(&env, company_id, &record_type);
         let entry = RetentionRecord {
@@ -246,6 +254,11 @@ impl RetentionManagerContract {
             .get(&key)
             .ok_or(RetentionError::RecordNotFound)?;
 
+        if entry.pruned || Self::is_record_archived(env.clone(), company_id, record_id, record_type)
+        {
+            return Err(RetentionError::RecordImmutable);
+        }
+
         entry.audit_block = blocked;
         env.storage().persistent().set(&key, &entry);
 
@@ -280,6 +293,11 @@ impl RetentionManagerContract {
             .persistent()
             .get(&key)
             .ok_or(RetentionError::RecordNotFound)?;
+
+        if entry.pruned || Self::is_record_archived(env.clone(), company_id, record_id, record_type)
+        {
+            return Err(RetentionError::RecordImmutable);
+        }
 
         entry.challenge_block = blocked;
         env.storage().persistent().set(&key, &entry);
@@ -400,6 +418,57 @@ impl RetentionManagerContract {
             .get(&Self::record_key(company_id, record_id, &record_type))
     }
 
+    /// Seal a retention record into an immutable archived state (issue #825).
+    ///
+    /// Once archived, any attempt to overwrite the record via `register_record`
+    /// or mutate its `audit_block` / `challenge_block` flags returns
+    /// [`RetentionError::RecordImmutable`].
+    pub fn archive_record(
+        env: Env,
+        company_id: u64,
+        record_id: u64,
+        record_type: RecordType,
+    ) -> Result<RetentionRecord, RetentionError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        let key = Self::record_key(company_id, record_id, &record_type);
+        let entry: RetentionRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(RetentionError::RecordNotFound)?;
+
+        if entry.pruned || Self::is_record_archived(env.clone(), company_id, record_id, record_type)
+        {
+            return Err(RetentionError::RecordImmutable);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::ArchivedRecord(company_id, record_id, record_type as u32),
+            &true,
+        );
+
+        Ok(entry)
+    }
+
+    /// Return `true` when the specified retention record has been archived (issue #825).
+    pub fn is_record_archived(
+        env: Env,
+        company_id: u64,
+        record_id: u64,
+        record_type: RecordType,
+    ) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::ArchivedRecord(
+                company_id,
+                record_id,
+                record_type as u32,
+            ))
+            .unwrap_or(false)
+    }
+
     /// Return whether the record is eligible for pruning right now.
     pub fn is_eligible_for_pruning(
         env: Env,
@@ -456,6 +525,25 @@ impl RetentionManagerContract {
 
     fn record_key(company_id: u64, record_id: u64, record_type: &RecordType) -> DataKey {
         DataKey::Record(company_id, record_id, *record_type as u32)
+    }
+
+    fn record_is_immutable(
+        env: &Env,
+        company_id: u64,
+        record_id: u64,
+        record_type: &RecordType,
+    ) -> bool {
+        if Self::is_record_archived(env.clone(), company_id, record_id, *record_type) {
+            return true;
+        }
+        if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, RetentionRecord>(&Self::record_key(company_id, record_id, record_type))
+        {
+            return entry.pruned;
+        }
+        false
     }
 
     fn retention_window_for(env: &Env, company_id: u64, record_type: &RecordType) -> u64 {
@@ -683,5 +771,85 @@ mod tests {
             &record_id,
             &RecordType::FinalizedBatch
         ));
+    }
+
+    // ── Issue #825: Archived payroll records cannot be mutated ───────────────
+
+    #[test]
+    fn test_archive_record_marks_archived_and_preserves_state() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 10u64;
+        let record_id = 101u64;
+
+        let initial = client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        assert!(!client.is_record_archived(&company_id, &record_id, &RecordType::FinalizedBatch));
+
+        let archived = client.archive_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        assert_eq!(archived.record_id, initial.record_id);
+        assert_eq!(archived.eligible_after, initial.eligible_after);
+        assert!(client.is_record_archived(&company_id, &record_id, &RecordType::FinalizedBatch));
+    }
+
+    #[test]
+    fn test_archived_and_pruned_records_reject_mutations() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 11u64;
+        let record_id = 202u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.archive_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        // Mutating audit_block or challenge_block on an archived record is rejected
+        assert_eq!(
+            client
+                .try_set_audit_block(&company_id, &record_id, &RecordType::FinalizedBatch, &true)
+                .unwrap_err()
+                .unwrap(),
+            RetentionError::RecordImmutable
+        );
+        assert_eq!(
+            client
+                .try_set_challenge_block(
+                    &company_id,
+                    &record_id,
+                    &RecordType::FinalizedBatch,
+                    &true,
+                )
+                .unwrap_err()
+                .unwrap(),
+            RetentionError::RecordImmutable
+        );
+        // Re-archiving an already archived record is also rejected
+        assert_eq!(
+            client
+                .try_archive_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+                .unwrap_err()
+                .unwrap(),
+            RetentionError::RecordImmutable
+        );
+
+        // Stored flags remain untouched
+        let stored = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(!stored.audit_block);
+        assert!(!stored.challenge_block);
+    }
+
+    #[test]
+    #[should_panic(expected = "Archived or pruned payroll record cannot be mutated")]
+    fn test_reregistering_archived_record_panics() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 12u64;
+        let record_id = 303u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.archive_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        // Attempting to overwrite the archived record via register_record must panic
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
     }
 }
