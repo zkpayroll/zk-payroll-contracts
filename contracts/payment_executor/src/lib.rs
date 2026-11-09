@@ -100,6 +100,9 @@ pub enum PaymentError {
     BatchTooLarge = 18,
     /// The payroll period is already open (cannot reopen an open period) (issue #484).
     PeriodAlreadyOpen = 19,
+    /// Aggregate payout total or cumulative company payout total overflowed `i128::MAX` (issue #814).
+    /// Error paths never expose employee addresses or individual salary amounts.
+    PayoutTotalOverflow = 20,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -884,6 +887,14 @@ impl PaymentExecutor {
         let (net_amount, income_tax, social_tax, withholding_cfg) =
             Self::validate_and_compute_withholding(&env, company_id, amount)?;
 
+        // Issue #814: Validate cumulative company payout total and period counter
+        // against arithmetic overflow BEFORE executing token transfers or mutating state.
+        let total_key = DataKey::TotalPaid(company_id);
+        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        let updated_total = current_total
+            .checked_add(amount)
+            .expect("Payout total overflow");
+
         // Execute token transfers: net salary to employee, withheld amounts to
         // their configured recipients.
         let token_client = token::Client::new(&env, &addresses.token);
@@ -916,23 +927,22 @@ impl PaymentExecutor {
         env.storage().persistent().set(&payment_key, &record);
         env.storage().persistent().set(&nullifier_key, &true);
 
-        // Increment period payment count
+        // Increment period payment count with checked arithmetic
         let period_key = DataKey::Period(company_id, period);
         if let Some(mut period_struct) = env
             .storage()
             .persistent()
             .get::<DataKey, PayrollPeriod>(&period_key)
         {
-            period_struct.payment_count += 1;
+            period_struct.payment_count = period_struct
+                .payment_count
+                .checked_add(1)
+                .ok_or(PaymentError::PayoutTotalOverflow)?;
             env.storage().persistent().set(&period_key, &period_struct);
         }
 
-        // Update total paid
-        let total_key = DataKey::TotalPaid(company_id);
-        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_key, &(current_total + amount));
+        // Update total paid with the pre-validated overflow-checked sum
+        env.storage().persistent().set(&total_key, &updated_total);
 
         // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
         payroll_events::emit_executor_payment_processed(&env, company_id, employee, amount, period);
@@ -981,6 +991,12 @@ impl PaymentExecutor {
         if count > effective_limit {
             return Err(PaymentError::BatchTooLarge);
         }
+
+        // Issue #814: Pre-validate the aggregate batch payout total and cumulative
+        // company total before executing any payment in the batch so an overflow
+        // fails atomically without leaking private employee or salary data.
+        let batch_total = Self::compute_batch_payout_total(env.clone(), amounts.clone())?;
+        Self::can_accumulate_payout_total(env.clone(), company_id, batch_total)?;
 
         let mut records = soroban_sdk::Vec::new(&env);
 
@@ -1134,6 +1150,47 @@ impl PaymentExecutor {
     pub fn get_total_paid(env: Env, company_id: u64) -> i128 {
         let key = DataKey::TotalPaid(company_id);
         env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    /// Compute the aggregate payout total for a batch of amounts using explicit
+    /// checked addition (issue #814).
+    ///
+    /// Rejects negative entries with [`PaymentError::AssetDecimalsMismatch`] and
+    /// any sum that would exceed `i128::MAX` with [`PaymentError::PayoutTotalOverflow`].
+    /// Error states never expose individual salary values or employee identities.
+    pub fn compute_batch_payout_total(
+        _env: Env,
+        amounts: soroban_sdk::Vec<i128>,
+    ) -> Result<i128, PaymentError> {
+        let mut total: i128 = 0;
+        for amount in amounts.iter() {
+            if amount < 0 {
+                return Err(PaymentError::AssetDecimalsMismatch);
+            }
+            total = total
+                .checked_add(amount)
+                .ok_or(PaymentError::PayoutTotalOverflow)?;
+        }
+        Ok(total)
+    }
+
+    /// Verify that adding `additional_amount` to a company's cumulative `TotalPaid`
+    /// will not overflow `i128::MAX` (issue #814).
+    ///
+    /// Returns the projected cumulative total on success or
+    /// [`PaymentError::PayoutTotalOverflow`] on overflow.
+    pub fn can_accumulate_payout_total(
+        env: Env,
+        company_id: u64,
+        additional_amount: i128,
+    ) -> Result<i128, PaymentError> {
+        if additional_amount < 0 {
+            return Err(PaymentError::AssetDecimalsMismatch);
+        }
+        let current_total = Self::get_total_paid(env, company_id);
+        current_total
+            .checked_add(additional_amount)
+            .ok_or(PaymentError::PayoutTotalOverflow)
     }
 
     /// Get the maximum allowed age for a proof in seconds (issue #77).
@@ -2608,5 +2665,102 @@ mod tests {
             result.unwrap_err().unwrap(),
             PaymentError::GrossAmountExceedsCap
         );
+    }
+
+    // ── Issue #814: Explicit overflow checks on aggregate payout totals ──────
+
+    #[test]
+    fn test_compute_batch_payout_total_success_and_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        // Normal case
+        let amounts = soroban_sdk::Vec::from_array(&env, [1_000i128, 2_500i128, 6_500i128]);
+        assert_eq!(client.compute_batch_payout_total(&amounts), 10_000i128);
+
+        // Boundary case: exact i128::MAX across multiple entries
+        let boundary = soroban_sdk::Vec::from_array(&env, [i128::MAX - 100, 100]);
+        assert_eq!(client.compute_batch_payout_total(&boundary), i128::MAX);
+    }
+
+    #[test]
+    fn test_compute_batch_payout_total_rejects_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let overflowing = soroban_sdk::Vec::from_array(&env, [i128::MAX, 1i128]);
+        let res = client.try_compute_batch_payout_total(&overflowing);
+        assert_eq!(res.unwrap_err().unwrap(), PaymentError::PayoutTotalOverflow);
+    }
+
+    #[test]
+    fn test_can_accumulate_and_execute_payment_rejects_cumulative_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, PaymentExecutor);
+        let client = PaymentExecutorClient::new(&env, &contract_id);
+
+        let addresses = setup_addresses(&env);
+        client.initialize(&addresses);
+
+        let registry_client = PayrollRegistryClient::new(&env, &addresses.registry);
+        let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
+        let token_client = TokenClient::new(&env, &addresses.token);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[9u8; 32]);
+
+        let company_id = registry_client.register_company(&admin, &treasury);
+        commitment_client.store_commitment(&employee, &commitment);
+        registry_client.add_employee(&company_id, &employee, &commitment);
+        token_client.mint(&treasury, &10_000);
+
+        let _ = client.create_period(&company_id);
+        setup_withholding_zero_rate(&client, &env, company_id);
+
+        // Seed cumulative TotalPaid near i128::MAX (leaving room for exactly 500)
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalPaid(company_id), &(i128::MAX - 500));
+        });
+
+        // Boundary check: 500 fits exactly at i128::MAX
+        assert_eq!(
+            client.can_accumulate_payout_total(&company_id, &500i128),
+            i128::MAX
+        );
+        // 501 overflows in both can_accumulate_payout_total and execute_batch_payroll
+        assert_eq!(
+            client
+                .try_can_accumulate_payout_total(&company_id, &501i128)
+                .unwrap_err()
+                .unwrap(),
+            PaymentError::PayoutTotalOverflow
+        );
+
+        let batch_res = client.try_execute_batch_payroll(
+            &company_id,
+            &soroban_sdk::Vec::from_array(&env, [employee.clone()]),
+            &soroban_sdk::Vec::from_array(&env, [1_000i128]),
+            &soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[1u8; 64])]),
+            &soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[2u8; 128])]),
+            &soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[3u8; 64])]),
+            &soroban_sdk::Vec::from_array(&env, [BytesN::from_array(&env, &[4u8; 32])]),
+            &1,
+        );
+        assert_eq!(
+            batch_res.unwrap_err().unwrap(),
+            PaymentError::PayoutTotalOverflow
+        );
+        // Treasury balance and employee paid state remain untouched
+        assert_eq!(token_client.balance(&treasury), 10_000);
+        assert!(!client.is_paid(&employee, &1));
     }
 }
