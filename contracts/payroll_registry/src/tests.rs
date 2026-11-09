@@ -1536,3 +1536,85 @@ fn latest_approved_payroll_revision_rejects_stale_revision() {
         7
     );
 }
+
+// ===========================================================================
+// Issue #816: Transaction replay protection across payroll periods
+// ===========================================================================
+
+#[test]
+fn period_tx_replay_protection_allows_distinct_nonces_across_periods() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let nonce_p1 = BytesN::from_array(&env, &[0x11u8; 32]);
+    let nonce_p2 = BytesN::from_array(&env, &[0x22u8; 32]);
+
+    assert!(!client.is_period_tx_executed(&company_id, &nonce_p1));
+    assert_eq!(client.get_latest_executed_period(&company_id), None);
+
+    let rec1 = client.record_period_tx_execution(&company_id, &admin, &1, &nonce_p1);
+    assert_eq!(rec1.company_id, company_id);
+    assert_eq!(rec1.period, 1);
+    assert_eq!(rec1.tx_nonce, nonce_p1);
+    assert!(client.is_period_tx_executed(&company_id, &nonce_p1));
+    assert_eq!(client.get_latest_executed_period(&company_id), Some(1));
+
+    let rec2 = client.record_period_tx_execution(&company_id, &admin, &2, &nonce_p2);
+    assert_eq!(rec2.period, 2);
+    assert_eq!(rec2.tx_nonce, nonce_p2);
+    assert!(client.is_period_tx_executed(&company_id, &nonce_p2));
+    assert_eq!(client.get_latest_executed_period(&company_id), Some(2));
+}
+
+#[test]
+#[should_panic(expected = "Payroll transaction replay detected")]
+fn period_tx_replay_protection_rejects_period_1_nonce_replayed_in_period_2() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let nonce_p1 = BytesN::from_array(&env, &[0xA5u8; 32]);
+    client.record_period_tx_execution(&company_id, &admin, &1, &nonce_p1);
+
+    // Replaying period 1's transaction nonce during period 2 must panic
+    client.record_period_tx_execution(&company_id, &admin, &2, &nonce_p1);
+}
+
+#[test]
+fn period_tx_replay_protection_rejects_regressive_period_and_zero_inputs() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let zero_nonce = BytesN::from_array(&env, &[0u8; 32]);
+    let nonce_a = BytesN::from_array(&env, &[0x01u8; 32]);
+    let nonce_b = BytesN::from_array(&env, &[0x02u8; 32]);
+    let nonce_c = BytesN::from_array(&env, &[0x03u8; 32]);
+
+    // Boundary: period 0 and all-zero nonce are rejected
+    assert!(client
+        .try_record_period_tx_execution(&company_id, &admin, &0, &nonce_a)
+        .is_err());
+    assert!(client
+        .try_record_period_tx_execution(&company_id, &admin, &1, &zero_nonce)
+        .is_err());
+
+    // Multiple distinct transactions within period 2 are allowed
+    client.record_period_tx_execution(&company_id, &admin, &2, &nonce_a);
+    client.record_period_tx_execution(&company_id, &admin, &2, &nonce_b);
+    assert_eq!(client.get_latest_executed_period(&company_id), Some(2));
+
+    // Ordering: executing a new nonce for an earlier period (1 < 2) is rejected
+    assert!(client
+        .try_record_period_tx_execution(&company_id, &admin, &1, &nonce_c)
+        .is_err());
+    assert!(!client.is_period_tx_executed(&company_id, &nonce_c));
+}
+

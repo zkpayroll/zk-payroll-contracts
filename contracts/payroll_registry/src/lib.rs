@@ -201,6 +201,19 @@ pub struct LatestApprovedPayrollRevision {
     pub approved_by: Address,
 }
 
+/// Privacy-preserving transaction replay record for payroll periods (#816).
+///
+/// Tracks the payroll period and transaction nonce without storing employee
+/// identities, salary amounts, or proof internals.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodTxReplayRecord {
+    pub company_id: u64,
+    pub period: u32,
+    pub tx_nonce: BytesN<32>,
+    pub executed_at: u64,
+}
+
 /// Storage key space for the payroll registry.
 ///
 /// - `Company(u64)`               ? `CompanyInfo`              (Persistent)
@@ -246,6 +259,10 @@ pub enum DataKey {
     PayoutMethodConfirmation(u64, Address),
     /// Latest approved payroll revision metadata for a company (#864).
     LatestApprovedPayrollRevision(u64),
+    /// Per-company transaction replay record keyed by `(company_id, tx_nonce)` (#816).
+    PeriodTxNonce(u64, BytesN<32>),
+    /// Highest executed payroll period for a company (#816).
+    LatestExecutedPeriod(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +516,28 @@ pub trait PayrollRegistryTrait {
         env: Env,
         company_id: u64,
     ) -> Option<LatestApprovedPayrollRevision>;
+
+    /// Record a payroll transaction execution bound to a payroll period and unique nonce (#816).
+    fn record_period_tx_execution(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        period: u32,
+        tx_nonce: BytesN<32>,
+    ) -> PeriodTxReplayRecord;
+
+    /// Check whether a payroll transaction nonce has already been executed for a company (#816).
+    fn is_period_tx_executed(env: Env, company_id: u64, tx_nonce: BytesN<32>) -> bool;
+
+    /// Read the period transaction replay record without exposing payroll internals (#816).
+    fn get_period_tx_record(
+        env: Env,
+        company_id: u64,
+        tx_nonce: BytesN<32>,
+    ) -> Option<PeriodTxReplayRecord>;
+
+    /// Read the highest executed payroll period for a company (#816).
+    fn get_latest_executed_period(env: Env, company_id: u64) -> Option<u32>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +2020,101 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .get(&DataKey::LatestApprovedPayrollRevision(company_id))
+    }
+
+    // ── Issue #816: Transaction replay protection across payroll periods ─────
+
+    /// Record a payroll transaction execution bound to a payroll period and unique nonce (#816).
+    ///
+    /// Enforces:
+    /// - Non-zero `period` and non-zero `tx_nonce`,
+    /// - Monotonically non-decreasing payroll `period` (`period >= latest_period`),
+    /// - Global per-company `tx_nonce` uniqueness so a transaction nonce consumed
+    ///   in period 1 cannot be replayed in period 1 or in any subsequent period.
+    fn record_period_tx_execution(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        period: u32,
+        tx_nonce: BytesN<32>,
+    ) -> PeriodTxReplayRecord {
+        Self::require_not_paused(&env);
+        if period == 0 {
+            panic!("Payroll period must be greater than zero");
+        }
+        if tx_nonce == BytesN::from_array(&env, &[0u8; 32]) {
+            panic!("Transaction nonce cannot be all zeros");
+        }
+
+        let company: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if company.revoked {
+            panic!("Company admin is revoked");
+        }
+        if company.admin != admin {
+            panic!("Only company admin can record payroll period transaction execution");
+        }
+        admin.require_auth();
+
+        let latest_period_key = DataKey::LatestExecutedPeriod(company_id);
+        if let Some(latest_period) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&latest_period_key)
+        {
+            if period < latest_period {
+                panic!("Cannot execute payroll transaction for an earlier period");
+            }
+        }
+
+        let nonce_key = DataKey::PeriodTxNonce(company_id, tx_nonce.clone());
+        if env
+            .storage()
+            .persistent()
+            .get::<_, PeriodTxReplayRecord>(&nonce_key)
+            .is_some()
+        {
+            panic!("Payroll transaction replay detected");
+        }
+
+        let record = PeriodTxReplayRecord {
+            company_id,
+            period,
+            tx_nonce,
+            executed_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&nonce_key, &record);
+        env.storage().persistent().set(&latest_period_key, &period);
+        record
+    }
+
+    /// Check whether a payroll transaction nonce has already been executed for a company (#816).
+    fn is_period_tx_executed(env: Env, company_id: u64, tx_nonce: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .get::<_, PeriodTxReplayRecord>(&DataKey::PeriodTxNonce(company_id, tx_nonce))
+            .is_some()
+    }
+
+    /// Read the period transaction replay record without exposing payroll internals (#816).
+    fn get_period_tx_record(
+        env: Env,
+        company_id: u64,
+        tx_nonce: BytesN<32>,
+    ) -> Option<PeriodTxReplayRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PeriodTxNonce(company_id, tx_nonce))
+    }
+
+    /// Read the highest executed payroll period for a company (#816).
+    fn get_latest_executed_period(env: Env, company_id: u64) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LatestExecutedPeriod(company_id))
     }
 }
 
