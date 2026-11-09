@@ -22,7 +22,9 @@
 //! purely structural accounting layer.
 
 use pause_manager::{PauseCategory, PauseManagerClient};
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, vec, Address, Env, IntoVal, Symbol,
+};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -52,6 +54,25 @@ pub enum TreasuryIsolationError {
     IssuerMismatch = 8,
     /// The amount supplied is not positive.
     InvalidAmount = 9,
+    /// Cross-contract settlement period is not in the `Cancelled` phase (issue #828).
+    PeriodNotCancelled = 10,
+    /// Treasury reserve for this cancelled period and asset was already released (issue #828).
+    ReserveAlreadyReleased = 11,
+}
+
+/// Lifecycle phase of a settlement window period, mirrored from `settlement_window`
+/// for cross-contract cancellation verification (issue #828).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PeriodPhase {
+    Pending = 0,
+    Open = 1,
+    Executing = 2,
+    Grace = 3,
+    Closed = 4,
+    Expired = 5,
+    Cancelled = 6,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +135,9 @@ pub enum DataKey {
     IssuerIndex(u64, Address),
     /// Explicit reserve authorizer address keyed by (company_id, authorizer).
     ReserveAuthorizer(u64, Address),
+    /// Idempotency marker recording that a cancelled period's reserve was released
+    /// keyed by (company_id, period_id, asset) (issue #828).
+    CancelledPeriodReleased(u64, u32, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +368,46 @@ impl TreasuryIsolationContract {
         Self::save_balance(&env, company_id, &bal);
 
         payroll_events::emit_treasury_reserve_released(&env, company_id, asset, amount);
+
+        Ok(bal)
+    }
+
+    /// Release reserved funds for a period after verifying via cross-contract call
+    /// to `settlement_window` that `(company_id, period_id)` is in the `Cancelled`
+    /// phase (issue #828).
+    ///
+    /// Guarantees:
+    /// - Rejects active, closed, expired, or non-existent periods with
+    ///   [`TreasuryIsolationError::PeriodNotCancelled`].
+    /// - Rejects duplicate release attempts for the same `(company_id, period_id, asset)`
+    ///   with [`TreasuryIsolationError::ReserveAlreadyReleased`].
+    /// - Preserves cross-asset isolation so releasing a cancelled USDC batch never
+    ///   affects XLM reserves or leaks private employee/salary data.
+    pub fn release_for_cancelled_period(
+        env: Env,
+        settlement_window: Address,
+        company_id: u64,
+        period_id: u32,
+        asset: Address,
+        amount: i128,
+        authorizer: Address,
+    ) -> Result<AssetBalance, TreasuryIsolationError> {
+        let release_key = DataKey::CancelledPeriodReleased(company_id, period_id, asset.clone());
+        if env.storage().persistent().has(&release_key) {
+            return Err(TreasuryIsolationError::ReserveAlreadyReleased);
+        }
+
+        let phase: Option<PeriodPhase> = env.invoke_contract(
+            &settlement_window,
+            &Symbol::new(&env, "get_phase"),
+            vec![&env, company_id.into_val(&env), period_id.into_val(&env)],
+        );
+        if phase != Some(PeriodPhase::Cancelled) {
+            return Err(TreasuryIsolationError::PeriodNotCancelled);
+        }
+
+        let bal = Self::release_reserve(env.clone(), company_id, asset, amount, authorizer)?;
+        env.storage().persistent().set(&release_key, &true);
 
         Ok(bal)
     }
@@ -818,5 +882,113 @@ mod tests {
         // Admin can still release reserve
         let after_admin = client.release_reserve(&company_id, &asset, &500i128, &admin);
         assert_eq!(after_admin.reserved, 3000);
+    }
+
+    // ── Issue #828: Cross-contract tests for cancellation and treasury release ──
+
+    #[contract]
+    pub struct MockSettlementWindow;
+
+    #[contracttype]
+    pub enum MockWindowKey {
+        Phase(u64, u32),
+    }
+
+    #[contractimpl]
+    impl MockSettlementWindow {
+        pub fn set_phase(env: Env, company_id: u64, period_id: u32, phase: PeriodPhase) {
+            env.storage()
+                .persistent()
+                .set(&MockWindowKey::Phase(company_id, period_id), &phase);
+        }
+
+        pub fn get_phase(env: Env, company_id: u64, period_id: u32) -> Option<PeriodPhase> {
+            env.storage()
+                .persistent()
+                .get(&MockWindowKey::Phase(company_id, period_id))
+        }
+    }
+
+    #[test]
+    fn test_cross_contract_cancellation_releases_treasury_reserve_and_preserves_other_assets() {
+        let (env, treasury_id, admin) = setup();
+        let treasury = TreasuryIsolationContractClient::new(&env, &treasury_id);
+        let sw_id = env.register_contract(None, MockSettlementWindow);
+        let sw = MockSettlementWindowClient::new(&env, &sw_id);
+
+        let company_id = 88u64;
+        let usdc = Address::generate(&env);
+        let xlm = Address::generate(&env);
+        let usdc_issuer = Address::generate(&env);
+        let xlm_issuer = Address::generate(&env);
+
+        treasury.register_asset(&company_id, &usdc, &usdc_issuer, &symbol_short!("USDC"));
+        treasury.register_asset(&company_id, &xlm, &xlm_issuer, &symbol_short!("XLM"));
+        treasury.credit(&company_id, &usdc, &10_000i128);
+        treasury.credit(&company_id, &xlm, &5_000i128);
+        treasury.reserve(&company_id, &usdc, &4_000i128);
+        treasury.reserve(&company_id, &xlm, &2_000i128);
+
+        // Period 1 is cancelled in settlement_window
+        sw.set_phase(&company_id, &1u32, &PeriodPhase::Cancelled);
+
+        // Releasing exact reserved USDC amount for cancelled period 1 succeeds
+        let usdc_bal = treasury.release_for_cancelled_period(
+            &sw_id,
+            &company_id,
+            &1u32,
+            &usdc,
+            &4_000i128,
+            &admin,
+        );
+        assert_eq!(usdc_bal.balance, 10_000);
+        assert_eq!(usdc_bal.reserved, 0);
+
+        // XLM reserve remains isolated and untouched until explicitly released
+        let xlm_bal = treasury.get_balance(&company_id, &xlm).unwrap();
+        assert_eq!(xlm_bal.reserved, 2_000);
+    }
+
+    #[test]
+    fn test_cross_contract_release_rejected_when_period_not_cancelled_or_replayed() {
+        let (env, treasury_id, admin) = setup();
+        let treasury = TreasuryIsolationContractClient::new(&env, &treasury_id);
+        let sw_id = env.register_contract(None, MockSettlementWindow);
+        let sw = MockSettlementWindowClient::new(&env, &sw_id);
+
+        let company_id = 89u64;
+        let usdc = Address::generate(&env);
+        let issuer = Address::generate(&env);
+
+        treasury.register_asset(&company_id, &usdc, &issuer, &symbol_short!("USDC"));
+        treasury.credit(&company_id, &usdc, &10_000i128);
+        treasury.reserve(&company_id, &usdc, &6_000i128);
+
+        // Active (Executing) period must be rejected with PeriodNotCancelled
+        sw.set_phase(&company_id, &1u32, &PeriodPhase::Executing);
+        let active_err = treasury
+            .try_release_for_cancelled_period(&sw_id, &company_id, &1u32, &usdc, &3_000i128, &admin)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(active_err, TreasuryIsolationError::PeriodNotCancelled);
+
+        // Transition to Cancelled -> first release succeeds
+        sw.set_phase(&company_id, &1u32, &PeriodPhase::Cancelled);
+        let after_first = treasury.release_for_cancelled_period(
+            &sw_id,
+            &company_id,
+            &1u32,
+            &usdc,
+            &3_000i128,
+            &admin,
+        );
+        assert_eq!(after_first.reserved, 3_000);
+
+        // Boundary / replay case: second release for the same cancelled period & asset is rejected
+        let replay_err = treasury
+            .try_release_for_cancelled_period(&sw_id, &company_id, &1u32, &usdc, &3_000i128, &admin)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(replay_err, TreasuryIsolationError::ReserveAlreadyReleased);
     }
 }
