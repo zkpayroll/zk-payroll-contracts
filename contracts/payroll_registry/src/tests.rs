@@ -1536,3 +1536,86 @@ fn latest_approved_payroll_revision_rejects_stale_revision() {
         7
     );
 }
+
+// ===========================================================================
+// Issue #790: Create contract concurrent payroll edit warnings
+// ===========================================================================
+
+#[test]
+fn concurrent_payroll_edit_sequential_same_session_has_no_warning() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    let w1 = client.record_payroll_run_edit(&company_id, &1, &admin, &101, &0);
+    assert!(!w1.concurrent_edit_detected);
+    assert_eq!(w1.current_revision, 1);
+    assert_eq!(w1.active_session_id, 101);
+
+    let check1 = client.check_concurrent_payroll_edit(&company_id, &1, &101, &1);
+    assert!(!check1.concurrent_edit_detected);
+    assert_eq!(check1.current_revision, 1);
+
+    let w2 = client.record_payroll_run_edit(&company_id, &1, &admin, &101, &1);
+    assert!(!w2.concurrent_edit_detected);
+    assert_eq!(w2.current_revision, 2);
+}
+
+#[test]
+fn concurrent_payroll_edit_warns_when_multiple_sessions_or_stale_revisions_edit_same_run() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    // Session 101 performs initial edit (0 -> 1)
+    let w1 = client.record_payroll_run_edit(&company_id, &1, &admin, &101, &0);
+    assert!(!w1.concurrent_edit_detected);
+    assert_eq!(w1.current_revision, 1);
+
+    // Session 202 edits the same payroll run simultaneously (even with matching or stale revision)
+    let w2 = client.record_payroll_run_edit(&company_id, &1, &admin, &202, &0);
+    assert!(w2.concurrent_edit_detected);
+    assert_eq!(w2.expected_revision, 0);
+    assert_eq!(w2.current_revision, 2);
+    assert_eq!(w2.active_session_id, 202);
+
+    // Session 101 checks its snapshot (revision 1, session 101) and receives a concurrent edit warning
+    let check_stale = client.check_concurrent_payroll_edit(&company_id, &1, &101, &1);
+    assert!(check_stale.concurrent_edit_detected);
+    assert_eq!(check_stale.current_revision, 2);
+    assert_eq!(check_stale.active_session_id, 202);
+}
+
+#[test]
+fn concurrent_payroll_edit_rejects_unauthorized_or_zero_identifiers_and_isolates_runs() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    let company_id = client.register_company(&admin, &treasury);
+
+    // Non-admin editor rejected
+    assert!(client
+        .try_record_payroll_run_edit(&company_id, &1, &outsider, &101, &0)
+        .is_err());
+
+    // Zero run_id or zero session_id rejected
+    assert!(client
+        .try_record_payroll_run_edit(&company_id, &0, &admin, &101, &0)
+        .is_err());
+    assert!(client
+        .try_record_payroll_run_edit(&company_id, &1, &admin, &0, &0)
+        .is_err());
+
+    // Edits on run 1 do not affect run 2
+    client.record_payroll_run_edit(&company_id, &1, &admin, &101, &0);
+    assert!(client.get_payroll_run_edit_state(&company_id, &2).is_none());
+    let run2_check = client.check_concurrent_payroll_edit(&company_id, &2, &202, &0);
+    assert!(!run2_check.concurrent_edit_detected);
+}
+

@@ -201,6 +201,35 @@ pub struct LatestApprovedPayrollRevision {
     pub approved_by: Address,
 }
 
+/// Active edit session metadata for a payroll run (#790).
+///
+/// Tracks revision, editor, session ID, and timestamp without exposing
+/// employee identities, salary amounts, or proof internals.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayrollRunEditState {
+    pub company_id: u64,
+    pub run_id: u64,
+    pub edit_revision: u64,
+    pub last_editor: Address,
+    pub last_session_id: u64,
+    pub updated_at: u64,
+}
+
+/// Warning report returned when registering or checking a payroll run edit (#790).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConcurrentPayrollEditWarning {
+    pub company_id: u64,
+    pub run_id: u64,
+    pub concurrent_edit_detected: bool,
+    pub expected_revision: u64,
+    pub current_revision: u64,
+    pub active_session_id: u64,
+    pub last_editor: Address,
+    pub updated_at: u64,
+}
+
 /// Storage key space for the payroll registry.
 ///
 /// - `Company(u64)`               ? `CompanyInfo`              (Persistent)
@@ -246,6 +275,8 @@ pub enum DataKey {
     PayoutMethodConfirmation(u64, Address),
     /// Latest approved payroll revision metadata for a company (#864).
     LatestApprovedPayrollRevision(u64),
+    /// Per-run edit state keyed by `(company_id, run_id)` (#790).
+    PayrollRunEditState(u64, u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +530,32 @@ pub trait PayrollRegistryTrait {
         env: Env,
         company_id: u64,
     ) -> Option<LatestApprovedPayrollRevision>;
+
+    /// Record an edit to a payroll run and warn if another session or revision intervened (#790).
+    fn record_payroll_run_edit(
+        env: Env,
+        company_id: u64,
+        run_id: u64,
+        editor: Address,
+        session_id: u64,
+        expected_revision: u64,
+    ) -> ConcurrentPayrollEditWarning;
+
+    /// Check whether a payroll run has been concurrently edited since `expected_revision` (#790).
+    fn check_concurrent_payroll_edit(
+        env: Env,
+        company_id: u64,
+        run_id: u64,
+        session_id: u64,
+        expected_revision: u64,
+    ) -> ConcurrentPayrollEditWarning;
+
+    /// Read the current edit state for a payroll run (#790).
+    fn get_payroll_run_edit_state(
+        env: Env,
+        company_id: u64,
+        run_id: u64,
+    ) -> Option<PayrollRunEditState>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +2038,144 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .get(&DataKey::LatestApprovedPayrollRevision(company_id))
+    }
+
+    // ── Issue #790: Concurrent payroll edit warnings ─────────────────────────
+
+    /// Record an edit to a payroll run and warn if another session or revision intervened (#790).
+    fn record_payroll_run_edit(
+        env: Env,
+        company_id: u64,
+        run_id: u64,
+        editor: Address,
+        session_id: u64,
+        expected_revision: u64,
+    ) -> ConcurrentPayrollEditWarning {
+        Self::require_not_paused(&env);
+        if run_id == 0 {
+            panic!("Payroll run ID must be greater than zero");
+        }
+        if session_id == 0 {
+            panic!("Edit session ID must be greater than zero");
+        }
+
+        let company: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if company.revoked {
+            panic!("Company admin is revoked");
+        }
+        if company.admin != editor {
+            panic!("Only company admin can record payroll run edits");
+        }
+        editor.require_auth();
+
+        let key = DataKey::PayrollRunEditState(company_id, run_id);
+        let existing: Option<PayrollRunEditState> = env.storage().persistent().get(&key);
+
+        let (prev_revision, concurrent_edit_detected) = match &existing {
+            Some(state) => {
+                let version_mismatch = expected_revision != state.edit_revision;
+                let session_collision = state.last_session_id != session_id;
+                (state.edit_revision, version_mismatch || session_collision)
+            }
+            None => (0u64, expected_revision != 0),
+        };
+
+        let new_revision = prev_revision
+            .checked_add(1)
+            .expect("Payroll run edit revision overflow");
+        let now = env.ledger().timestamp();
+
+        let state = PayrollRunEditState {
+            company_id,
+            run_id,
+            edit_revision: new_revision,
+            last_editor: editor.clone(),
+            last_session_id: session_id,
+            updated_at: now,
+        };
+        env.storage().persistent().set(&key, &state);
+
+        if concurrent_edit_detected {
+            env.events().publish(
+                (soroban_sdk::symbol_short!("edit_warn"), company_id, run_id),
+                (expected_revision, prev_revision, session_id),
+            );
+        }
+
+        ConcurrentPayrollEditWarning {
+            company_id,
+            run_id,
+            concurrent_edit_detected,
+            expected_revision,
+            current_revision: new_revision,
+            active_session_id: session_id,
+            last_editor: editor,
+            updated_at: now,
+        }
+    }
+
+    /// Check whether a payroll run has been concurrently edited since `expected_revision` (#790).
+    fn check_concurrent_payroll_edit(
+        env: Env,
+        company_id: u64,
+        run_id: u64,
+        session_id: u64,
+        expected_revision: u64,
+    ) -> ConcurrentPayrollEditWarning {
+        if run_id == 0 {
+            panic!("Payroll run ID must be greater than zero");
+        }
+        if session_id == 0 {
+            panic!("Edit session ID must be greater than zero");
+        }
+        let company: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        let key = DataKey::PayrollRunEditState(company_id, run_id);
+        match env.storage().persistent().get::<_, PayrollRunEditState>(&key) {
+            Some(state) => {
+                let concurrent_edit_detected =
+                    expected_revision != state.edit_revision || state.last_session_id != session_id;
+                ConcurrentPayrollEditWarning {
+                    company_id,
+                    run_id,
+                    concurrent_edit_detected,
+                    expected_revision,
+                    current_revision: state.edit_revision,
+                    active_session_id: state.last_session_id,
+                    last_editor: state.last_editor,
+                    updated_at: state.updated_at,
+                }
+            }
+            None => ConcurrentPayrollEditWarning {
+                company_id,
+                run_id,
+                concurrent_edit_detected: expected_revision != 0,
+                expected_revision,
+                current_revision: 0,
+                active_session_id: 0,
+                last_editor: company.admin,
+                updated_at: 0,
+            },
+        }
+    }
+
+    /// Read the current edit state for a payroll run (#790).
+    fn get_payroll_run_edit_state(
+        env: Env,
+        company_id: u64,
+        run_id: u64,
+    ) -> Option<PayrollRunEditState> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayrollRunEditState(company_id, run_id))
     }
 }
 
