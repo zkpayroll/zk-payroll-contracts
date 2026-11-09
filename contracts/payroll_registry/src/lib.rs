@@ -201,6 +201,25 @@ pub struct LatestApprovedPayrollRevision {
     pub approved_by: Address,
 }
 
+/// Approval delegation record bound to the granting parent company-admin role (#827).
+///
+/// A delegation is invalidated automatically if the parent role expires, rotates
+/// to a new holder, or is revoked, ensuring a delegate can never outlive its
+/// parent role. Stores only operational role metadata and never exposes employee
+/// or salary data.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalDelegation {
+    pub company_id: u64,
+    pub delegator_admin: Address,
+    pub delegate: Address,
+    pub parent_config_version: u64,
+    pub granted_at: u64,
+    pub expires_at: u64,
+    pub parent_expires_at: u64,
+    pub revoked: bool,
+}
+
 /// Storage key space for the payroll registry.
 ///
 /// - `Company(u64)`               ? `CompanyInfo`              (Persistent)
@@ -246,6 +265,8 @@ pub enum DataKey {
     PayoutMethodConfirmation(u64, Address),
     /// Latest approved payroll revision metadata for a company (#864).
     LatestApprovedPayrollRevision(u64),
+    /// Approval delegation keyed by (company_id, delegate) (#827).
+    ApprovalDelegation(u64, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +520,33 @@ pub trait PayrollRegistryTrait {
         env: Env,
         company_id: u64,
     ) -> Option<LatestApprovedPayrollRevision>;
+
+    // ── Issue #827: Prevent approval delegation from outliving its parent role ──
+
+    /// Grant an approval delegation bounded by the parent admin role's lifetime
+    /// and configuration version (#827).
+    fn grant_approval_delegation(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        delegate: Address,
+        delegation_expires_at: u64,
+        parent_role_expires_at: u64,
+    ) -> ApprovalDelegation;
+
+    /// Explicitly revoke an approval delegation (#827).
+    fn revoke_approval_delegation(env: Env, company_id: u64, admin: Address, delegate: Address);
+
+    /// Return whether `delegate` holds a currently active delegation whose parent
+    /// role is still active, unrevoked, unrotated, and unexpired (#827).
+    fn is_approval_delegate_valid(env: Env, company_id: u64, delegate: Address) -> bool;
+
+    /// Read the stored approval delegation record, if any (#827).
+    fn get_approval_delegation(
+        env: Env,
+        company_id: u64,
+        delegate: Address,
+    ) -> Option<ApprovalDelegation>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +2029,139 @@ impl PayrollRegistryTrait for PayrollRegistry {
         env.storage()
             .persistent()
             .get(&DataKey::LatestApprovedPayrollRevision(company_id))
+    }
+
+    // ── Issue #827: Prevent approval delegation from outliving its parent role ──
+
+    fn grant_approval_delegation(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        delegate: Address,
+        delegation_expires_at: u64,
+        parent_role_expires_at: u64,
+    ) -> ApprovalDelegation {
+        Self::require_not_paused(&env);
+        let company: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if company.revoked {
+            panic!("Company admin is revoked");
+        }
+        if company.admin != admin {
+            panic!("Unauthorized: caller is not the company admin");
+        }
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+        if delegation_expires_at <= now {
+            panic!("Approval delegation expiry must be in the future");
+        }
+        if parent_role_expires_at > 0 && delegation_expires_at > parent_role_expires_at {
+            panic!("Approval delegation cannot outlive its parent role");
+        }
+
+        let current_version: AdminConfigVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminConfigVersion(company_id))
+            .expect("Admin config version not found");
+
+        let record = ApprovalDelegation {
+            company_id,
+            delegator_admin: admin,
+            delegate: delegate.clone(),
+            parent_config_version: current_version.version,
+            granted_at: now,
+            expires_at: delegation_expires_at,
+            parent_expires_at: parent_role_expires_at,
+            revoked: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovalDelegation(company_id, delegate), &record);
+        record
+    }
+
+    fn revoke_approval_delegation(env: Env, company_id: u64, admin: Address, delegate: Address) {
+        Self::require_not_paused(&env);
+        let company: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if company.revoked {
+            panic!("Company admin is revoked");
+        }
+        if company.admin != admin {
+            panic!("Unauthorized: caller is not the company admin");
+        }
+        admin.require_auth();
+
+        let key = DataKey::ApprovalDelegation(company_id, delegate);
+        let mut record: ApprovalDelegation = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Approval delegation not found");
+        record.revoked = true;
+        env.storage().persistent().set(&key, &record);
+    }
+
+    fn is_approval_delegate_valid(env: Env, company_id: u64, delegate: Address) -> bool {
+        let Some(company) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, CompanyInfo>(&DataKey::Company(company_id))
+        else {
+            return false;
+        };
+        if company.revoked {
+            return false;
+        }
+
+        let Some(record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ApprovalDelegation>(&DataKey::ApprovalDelegation(company_id, delegate))
+        else {
+            return false;
+        };
+        if record.revoked || record.delegator_admin != company.admin {
+            return false;
+        }
+
+        let Some(current_version) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, AdminConfigVersion>(&DataKey::AdminConfigVersion(company_id))
+        else {
+            return false;
+        };
+        if record.parent_config_version != current_version.version {
+            return false;
+        }
+
+        let now = env.ledger().timestamp();
+        if now > record.expires_at {
+            return false;
+        }
+        if record.parent_expires_at > 0 && now > record.parent_expires_at {
+            return false;
+        }
+        true
+    }
+
+    fn get_approval_delegation(
+        env: Env,
+        company_id: u64,
+        delegate: Address,
+    ) -> Option<ApprovalDelegation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ApprovalDelegation(company_id, delegate))
     }
 }
 

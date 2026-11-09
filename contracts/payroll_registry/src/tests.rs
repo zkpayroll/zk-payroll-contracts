@@ -1536,3 +1536,80 @@ fn latest_approved_payroll_revision_rejects_stale_revision() {
         7
     );
 }
+
+// ── Issue #827: Prevent approval delegation from outliving its parent role ────
+
+#[test]
+fn approval_delegation_valid_within_parent_role_and_invalidated_on_admin_rotation_or_revocation() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let next_admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let delegate = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let now = env.ledger().timestamp();
+
+    let record =
+        client.grant_approval_delegation(&company_id, &admin, &delegate, &(now + 100), &(now + 200));
+    assert_eq!(record.delegate, delegate);
+    assert!(client.is_approval_delegate_valid(&company_id, &delegate));
+
+    // Rotating the parent admin role immediately invalidates the old admin's delegation
+    client.propose_admin_rotation(&company_id, &admin, &next_admin);
+    client.accept_admin_rotation(&company_id, &next_admin);
+    assert!(!client.is_approval_delegate_valid(&company_id, &delegate));
+
+    // Re-grant under next_admin, then revoke next_admin -> delegation invalidated immediately
+    client.grant_approval_delegation(
+        &company_id,
+        &next_admin,
+        &delegate,
+        &(now + 150),
+        &(now + 300),
+    );
+    assert!(client.is_approval_delegate_valid(&company_id, &delegate));
+    client.revoke_company_admin(&company_id, &next_admin);
+    assert!(!client.is_approval_delegate_valid(&company_id, &delegate));
+}
+
+#[test]
+#[should_panic(expected = "Approval delegation cannot outlive its parent role")]
+fn approval_delegation_rejects_expiry_exceeding_parent_role_expiry() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let delegate = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let now = env.ledger().timestamp();
+
+    // Delegation expiry (now + 201) exceeds parent role expiry (now + 200) -> must panic
+    client.grant_approval_delegation(&company_id, &admin, &delegate, &(now + 201), &(now + 200));
+}
+
+#[test]
+fn approval_delegation_boundary_exact_parent_expiry_and_timestamp_cutoff() {
+    use soroban_sdk::testutils::Ledger;
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let delegate = Address::generate(&env);
+
+    let company_id = client.register_company(&admin, &treasury);
+    let base = env.ledger().timestamp();
+
+    // Boundary: delegation_expires_at == parent_role_expires_at is allowed
+    client.grant_approval_delegation(&company_id, &admin, &delegate, &(base + 50), &(base + 50));
+
+    env.ledger().with_mut(|l| l.timestamp = base + 50);
+    assert!(client.is_approval_delegate_valid(&company_id, &delegate));
+
+    // 1 second past boundary -> expired
+    env.ledger().with_mut(|l| l.timestamp = base + 51);
+    assert!(!client.is_approval_delegate_valid(&company_id, &delegate));
+}
+
