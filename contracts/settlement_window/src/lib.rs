@@ -449,11 +449,78 @@ impl SettlementWindowContract {
         open_at: u64,
         close_at: u64,
     ) -> Result<(), SettlementError> {
+        if open_at > close_at {
+            return Err(SettlementError::InvalidWindowConfig);
+        }
         if Self::find_schedule_collision(&env, company_id, open_at, close_at).is_none() {
             Ok(())
         } else {
             Err(SettlementError::PayoutScheduleCollision)
         }
+    }
+
+    /// Return the `period_id` of the first non-cancelled settlement window for
+    /// `company_id` that overlaps `[open_at, close_at)`, or `Ok(None)` when the
+    /// range is free (issue #817).
+    ///
+    /// Returns [`SettlementError::InvalidWindowConfig`] if `open_at > close_at`.
+    /// Never exposes employee or salary information.
+    pub fn find_overlapping_period(
+        env: Env,
+        company_id: u64,
+        open_at: u64,
+        close_at: u64,
+    ) -> Result<Option<u32>, SettlementError> {
+        if open_at > close_at {
+            return Err(SettlementError::InvalidWindowConfig);
+        }
+        Ok(Self::find_schedule_collision(&env, company_id, open_at, close_at))
+    }
+
+    /// Update the window timestamps of a `Pending` period for `company_id` while
+    /// rejecting any overlap with another non-cancelled period of the same company
+    /// (issue #817).
+    pub fn update_period_window(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+        open_at: u64,
+        execute_at: u64,
+        grace_until: u64,
+        close_at: u64,
+    ) -> Result<SettlementPeriod, SettlementError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        if open_at > execute_at || execute_at > grace_until || grace_until > close_at {
+            return Err(SettlementError::InvalidWindowConfig);
+        }
+
+        let mut period = Self::load_period(&env, company_id, period_id)?;
+        Self::require_not_finalized(&period)?;
+        if period.phase != PeriodPhase::Pending {
+            return Err(SettlementError::InvalidWindowConfig);
+        }
+
+        if Self::find_schedule_collision_excluding(
+            &env,
+            company_id,
+            open_at,
+            close_at,
+            Some(period_id),
+        )
+        .is_some()
+        {
+            return Err(SettlementError::PayoutScheduleCollision);
+        }
+
+        period.open_at = open_at;
+        period.execute_at = execute_at;
+        period.grace_until = grace_until;
+        period.close_at = close_at;
+        Self::save_period(&env, &period);
+
+        Ok(period)
     }
 
     /// Explicitly configure whether a token interface is supported for payout settlement (#824).
@@ -585,6 +652,16 @@ impl SettlementWindowContract {
         open_at: u64,
         close_at: u64,
     ) -> Option<u32> {
+        Self::find_schedule_collision_excluding(env, company_id, open_at, close_at, None)
+    }
+
+    fn find_schedule_collision_excluding(
+        env: &Env,
+        company_id: u64,
+        open_at: u64,
+        close_at: u64,
+        exclude_period_id: Option<u32>,
+    ) -> Option<u32> {
         let next: u32 = env
             .storage()
             .persistent()
@@ -593,15 +670,22 @@ impl SettlementWindowContract {
 
         let mut period_id: u32 = 1;
         while period_id < next {
-            if let Some(existing) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, SettlementPeriod>(&DataKey::Period(company_id, period_id))
-            {
-                if existing.phase != PeriodPhase::Cancelled
-                    && Self::windows_overlap(open_at, close_at, existing.open_at, existing.close_at)
+            if Some(period_id) != exclude_period_id {
+                if let Some(existing) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, SettlementPeriod>(&DataKey::Period(company_id, period_id))
                 {
-                    return Some(period_id);
+                    if existing.phase != PeriodPhase::Cancelled
+                        && Self::windows_overlap(
+                            open_at,
+                            close_at,
+                            existing.open_at,
+                            existing.close_at,
+                        )
+                    {
+                        return Some(period_id);
+                    }
                 }
             }
             period_id += 1;
@@ -1200,5 +1284,91 @@ mod tests {
         // Admin restores support
         client.set_token_interface_support(&token_id, &true);
         assert_eq!(client.validate_payout_token(&token_id), ());
+    }
+
+    // ── Issue #817: Reject overlapping settlement windows for one company ────
+
+    #[test]
+    fn test_find_overlapping_period_and_update_window_rejects_overlap() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 91u64;
+
+        // Period 1: [base + 100, base + 200) -> closed
+        client.create_period(
+            &company_id,
+            &(base + 100),
+            &(base + 110),
+            &(base + 150),
+            &(base + 200),
+        );
+        client.close_period(&company_id, &1);
+
+        // Period 2: [base + 300, base + 400) -> pending
+        client.create_period(
+            &company_id,
+            &(base + 300),
+            &(base + 310),
+            &(base + 350),
+            &(base + 400),
+        );
+
+        // Querying overlap against Period 1 returns Some(1)
+        assert_eq!(
+            client.find_overlapping_period(&company_id, &(base + 150), &(base + 250)),
+            Some(1)
+        );
+        // Querying gap [base + 200, base + 300) returns None (exact boundary touching)
+        assert_eq!(
+            client.find_overlapping_period(&company_id, &(base + 200), &(base + 300)),
+            None
+        );
+
+        // Rejected case: updating Period 2 so it overlaps Period 1 ([base + 180, base + 350))
+        let err = client
+            .try_update_period_window(
+                &company_id,
+                &2,
+                &(base + 180),
+                &(base + 210),
+                &(base + 300),
+                &(base + 350),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, SettlementError::PayoutScheduleCollision);
+
+        // Boundary / successful case: updating Period 2 to touch Period 1 at base + 200 succeeds
+        let updated = client.update_period_window(
+            &company_id,
+            &2,
+            &(base + 200),
+            &(base + 220),
+            &(base + 300),
+            &(base + 350),
+        );
+        assert_eq!(updated.open_at, base + 200);
+        assert_eq!(updated.close_at, base + 350);
+    }
+
+    #[test]
+    fn test_check_schedule_available_rejects_inverted_window_bounds() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 92u64;
+
+        let err = client
+            .try_check_schedule_available(&company_id, &(base + 200), &(base + 100))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, SettlementError::InvalidWindowConfig);
+
+        let err_find = client
+            .try_find_overlapping_period(&company_id, &(base + 200), &(base + 100))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err_find, SettlementError::InvalidWindowConfig);
     }
 }
