@@ -1943,3 +1943,326 @@ pub fn emit_fallback_funding_source_removed(e: &Env) {
         (),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #826: Verify event ordering when a payroll batch is resumed
+// ---------------------------------------------------------------------------
+
+/// Validation errors returned when checking or emitting a payroll batch
+/// resumption event sequence (issue #826).
+///
+/// Privacy-safe: carries only structural ordering categories and never
+/// references employee addresses, commitments, or salary values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchResumeEventOrderError {
+    /// Event sequence is empty or parallel cursor slice length mismatches.
+    EmptyEventSequence,
+    /// `batch_checkpoint_resumed` appeared without a preceding start/update/recovery event.
+    MissingStartOrRecoveryPrefix,
+    /// A resume or update event appeared after a terminal cleanup/rollback/execution event.
+    OutOfOrderTransition,
+    /// Checkpoint cursor regressed across a resume or update transition.
+    NonMonotonicCheckpointCursor,
+    /// Resumed checkpoint index is outside the valid `[0, total_checkpoints)` range.
+    InvalidResumedIndex,
+}
+
+/// Emit the canonical two-event resumption sequence (`InterruptedRunRecovered`
+/// followed strictly by `batch_checkpoint_resumed`) after validating cursor bounds
+/// (issue #826).
+pub fn emit_batch_resumption_sequence(
+    e: &Env,
+    employer: Address,
+    batch_root: BytesN<32>,
+    asset: Address,
+    execution_nonce: BytesN<32>,
+    resumed_checkpoint_index: u32,
+    total_checkpoints: u32,
+) -> Result<(), BatchResumeEventOrderError> {
+    if total_checkpoints == 0 || resumed_checkpoint_index >= total_checkpoints {
+        return Err(BatchResumeEventOrderError::InvalidResumedIndex);
+    }
+
+    emit_interrupted_run_recovered(
+        e,
+        employer.clone(),
+        batch_root.clone(),
+        asset.clone(),
+        execution_nonce.clone(),
+        resumed_checkpoint_index,
+        total_checkpoints,
+    );
+    emit_batch_checkpoint_resumed(
+        e,
+        employer,
+        batch_root,
+        asset,
+        execution_nonce,
+        resumed_checkpoint_index,
+    );
+
+    Ok(())
+}
+
+/// Verify that a recorded sequence of batch lifecycle event names and their
+/// associated checkpoint cursor positions obeys the strict resumption ordering
+/// contract (issue #826):
+///
+/// 1. The sequence is non-empty and `event_names.len() == checkpoint_indices.len()`.
+/// 2. `batch_checkpoint_resumed` must be preceded by `batch_checkpoint_started`,
+///    `batch_checkpoint_updated`, or `InterruptedRunRecovered`.
+/// 3. No checkpoint or resumption events may follow a terminal event
+///    (`batch_checkpoint_cleaned`, `batch_checkpoint_rolled_back`, `run_executed`).
+/// 4. Checkpoint cursor indices must be monotonically non-decreasing.
+pub fn verify_batch_resumption_event_order(
+    event_names: &[&str],
+    checkpoint_indices: &[u32],
+) -> Result<(), BatchResumeEventOrderError> {
+    if event_names.is_empty() || event_names.len() != checkpoint_indices.len() {
+        return Err(BatchResumeEventOrderError::EmptyEventSequence);
+    }
+
+    let mut seen_start_or_recovery = false;
+    let mut seen_terminal = false;
+    let mut last_cursor: u32 = 0;
+
+    for (idx, (&name, &cursor)) in event_names
+        .iter()
+        .zip(checkpoint_indices.iter())
+        .enumerate()
+    {
+        if seen_terminal {
+            return Err(BatchResumeEventOrderError::OutOfOrderTransition);
+        }
+
+        if idx > 0 && cursor < last_cursor {
+            return Err(BatchResumeEventOrderError::NonMonotonicCheckpointCursor);
+        }
+        last_cursor = cursor;
+
+        match name {
+            "batch_checkpoint_started" | "InterruptedRunRecovered" => {
+                seen_start_or_recovery = true;
+            }
+            "batch_checkpoint_updated" => {
+                if !seen_start_or_recovery {
+                    return Err(BatchResumeEventOrderError::MissingStartOrRecoveryPrefix);
+                }
+            }
+            "batch_checkpoint_resumed" => {
+                if !seen_start_or_recovery {
+                    return Err(BatchResumeEventOrderError::MissingStartOrRecoveryPrefix);
+                }
+            }
+            "batch_checkpoint_cleaned" | "batch_checkpoint_rolled_back" | "run_executed" => {
+                if !seen_start_or_recovery {
+                    return Err(BatchResumeEventOrderError::MissingStartOrRecoveryPrefix);
+                }
+                seen_terminal = true;
+            }
+            _ => return Err(BatchResumeEventOrderError::OutOfOrderTransition),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod batch_resumption_order_tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{contract, contractimpl, xdr, Env, TryFromVal, Val};
+
+    #[contract]
+    pub struct DummyEventEmitter;
+
+    #[contractimpl]
+    impl DummyEventEmitter {}
+
+    fn primary_event_symbol_name(env: &Env, index: usize) -> Symbol {
+        let recorded = env.events().all();
+        let event = recorded.events().get(index).expect("missing event");
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        // Topics are either (payroll, <event_name>, ...) or (<EventName>, ...)
+        let topic_idx = if body.topics.len() >= 2 {
+            let first: Symbol = Val::try_from_val(env, &body.topics[0])
+                .ok()
+                .and_then(|v| Symbol::try_from_val(env, &v).ok())
+                .unwrap_or_else(|| Symbol::new(env, ""));
+            if first == payroll_topic() {
+                1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let val = Val::try_from_val(env, &body.topics[topic_idx]).unwrap();
+        Symbol::try_from_val(env, &val).unwrap()
+    }
+
+    #[test]
+    fn test_batch_resumption_event_ordering_success() {
+        let env = Env::default();
+        let contract_id = env.register(DummyEventEmitter, ());
+        let employer = Address::generate(&env);
+        let asset = Address::generate(&env);
+        let batch_root = BytesN::from_array(&env, &[1u8; 32]);
+        let nonce = BytesN::from_array(&env, &[2u8; 32]);
+
+        env.as_contract(&contract_id, || {
+            emit_batch_checkpoint_started(
+                &env,
+                employer.clone(),
+                batch_root.clone(),
+                asset.clone(),
+                nonce.clone(),
+                0,
+            );
+            emit_batch_checkpoint_updated(
+                &env,
+                employer.clone(),
+                batch_root.clone(),
+                asset.clone(),
+                nonce.clone(),
+                2,
+                1,
+            );
+            emit_batch_resumption_sequence(
+                &env,
+                employer.clone(),
+                batch_root.clone(),
+                asset.clone(),
+                nonce.clone(),
+                2,
+                5,
+            )
+            .unwrap();
+            emit_batch_checkpoint_updated(
+                &env,
+                employer.clone(),
+                batch_root.clone(),
+                asset.clone(),
+                nonce.clone(),
+                5,
+                2,
+            );
+            emit_batch_checkpoint_cleaned(&env, employer, batch_root, asset, nonce);
+        });
+
+        assert_eq!(
+            primary_event_symbol_name(&env, 0),
+            Symbol::new(&env, "batch_checkpoint_started")
+        );
+        assert_eq!(
+            primary_event_symbol_name(&env, 1),
+            Symbol::new(&env, "batch_checkpoint_updated")
+        );
+        assert_eq!(
+            primary_event_symbol_name(&env, 2),
+            Symbol::new(&env, "InterruptedRunRecovered")
+        );
+        assert_eq!(
+            primary_event_symbol_name(&env, 3),
+            Symbol::new(&env, "batch_checkpoint_resumed")
+        );
+        assert_eq!(
+            primary_event_symbol_name(&env, 4),
+            Symbol::new(&env, "batch_checkpoint_updated")
+        );
+        assert_eq!(
+            primary_event_symbol_name(&env, 5),
+            Symbol::new(&env, "batch_checkpoint_cleaned")
+        );
+
+        let names = [
+            "batch_checkpoint_started",
+            "batch_checkpoint_updated",
+            "InterruptedRunRecovered",
+            "batch_checkpoint_resumed",
+            "batch_checkpoint_updated",
+            "batch_checkpoint_cleaned",
+        ];
+        let cursors = [0u32, 2, 2, 2, 5, 5];
+        assert_eq!(verify_batch_resumption_event_order(&names, &cursors), Ok(()));
+    }
+
+    #[test]
+    fn test_batch_resumption_event_ordering_rejects_out_of_order_and_cursor_regression() {
+        // Resumed without start/recovery prefix
+        assert_eq!(
+            verify_batch_resumption_event_order(&["batch_checkpoint_resumed"], &[1]),
+            Err(BatchResumeEventOrderError::MissingStartOrRecoveryPrefix)
+        );
+
+        // Resumed after terminal cleanup
+        assert_eq!(
+            verify_batch_resumption_event_order(
+                &[
+                    "batch_checkpoint_started",
+                    "batch_checkpoint_cleaned",
+                    "batch_checkpoint_resumed"
+                ],
+                &[0, 3, 3]
+            ),
+            Err(BatchResumeEventOrderError::OutOfOrderTransition)
+        );
+
+        // Cursor regression across resume
+        assert_eq!(
+            verify_batch_resumption_event_order(
+                &[
+                    "batch_checkpoint_started",
+                    "batch_checkpoint_updated",
+                    "batch_checkpoint_resumed"
+                ],
+                &[0, 4, 2]
+            ),
+            Err(BatchResumeEventOrderError::NonMonotonicCheckpointCursor)
+        );
+    }
+
+    #[test]
+    fn test_batch_resumption_boundary_first_and_last_checkpoint() {
+        let env = Env::default();
+        let contract_id = env.register(DummyEventEmitter, ());
+        let employer = Address::generate(&env);
+        let asset = Address::generate(&env);
+        let batch_root = BytesN::from_array(&env, &[9u8; 32]);
+        let nonce = BytesN::from_array(&env, &[8u8; 32]);
+
+        env.as_contract(&contract_id, || {
+            // Boundary: first checkpoint (0 of 4) and last valid checkpoint (3 of 4) succeed
+            assert_eq!(
+                emit_batch_resumption_sequence(
+                    &env,
+                    employer.clone(),
+                    batch_root.clone(),
+                    asset.clone(),
+                    nonce.clone(),
+                    0,
+                    4,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                emit_batch_resumption_sequence(
+                    &env,
+                    employer.clone(),
+                    batch_root.clone(),
+                    asset.clone(),
+                    nonce.clone(),
+                    3,
+                    4,
+                ),
+                Ok(())
+            );
+            // Boundary past end: resumed_checkpoint_index == total_checkpoints is rejected
+            assert_eq!(
+                emit_batch_resumption_sequence(&env, employer, batch_root, asset, nonce, 4, 4),
+                Err(BatchResumeEventOrderError::InvalidResumedIndex)
+            );
+        });
+    }
+}
+
