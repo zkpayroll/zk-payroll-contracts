@@ -147,6 +147,42 @@ pub enum PaymentError {
     /// A settlement window overlaps the calendar range of another payroll
     /// period (issue: payroll calendar overlap detection).
     SettlementWindowOverlap = 313,
+    /// Per-company withholding configuration has not been initialized before execution (issue #538).
+    WithholdingConfigMissing = 314,
+    /// Combined withholding basis points exceed 100% (10_000 bps) (issue #538).
+    InvalidWithholdingRate = 315,
+    /// Computed net payout after withholding falls below the company minimum floor (issue #538).
+    NetAmountBelowMinimum = 316,
+    /// Gross payout amount exceeds the company per-payment cap (issue #538).
+    GrossAmountExceedsCap = 317,
+    /// Settlement receipt ID has already been consumed by an earlier batch (issue #551).
+    SettlementReceiptAlreadyUsed = 318,
+    /// Batch employee count exceeds the configured company or contract batch size limit (issue #510).
+    BatchTooLarge = 319,
+    /// Attempted to reopen a payroll period that is already open (issue #484).
+    PeriodAlreadyOpen = 320,
+    /// Aggregate batch payout total or cumulative company total overflowed `i128::MAX` (issue #814).
+    PayoutTotalOverflow = 321,
+}
+
+/// Structured documentation descriptor for a payroll execution failure code (issue #823).
+///
+/// Contains only static, privacy-safe operational metadata so SDKs, CLI tools,
+/// and operator dashboards can surface actionable diagnostics without ever
+/// exposing employee addresses, commitments, or salary values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FailureCodeSpec {
+    /// Numeric error code (`300..=321`).
+    pub code: u32,
+    /// Canonical enum variant identifier.
+    pub name: &'static str,
+    /// Concise human-readable explanation of the failure condition.
+    pub summary: &'static str,
+    /// Actionable operator/integrator remediation guidance.
+    pub remediation: &'static str,
+    /// Whether the failed call can succeed on a later retry after external state/time advances
+    /// without regenerating employee commitments.
+    pub retryable: bool,
 }
 
 /// Treasury and Asset Errors (400-499)
@@ -276,8 +312,180 @@ impl StateError {
 }
 
 impl PaymentError {
-    pub fn code(self) -> u32 {
+    pub const MIN_CODE: u32 = Self::PeriodNotFound as u32;
+    pub const MAX_CODE: u32 = Self::PayoutTotalOverflow as u32;
+
+    pub const ALL: [Self; 22] = [
+        Self::PeriodNotFound,
+        Self::PeriodClosed,
+        Self::PeriodAlreadyExists,
+        Self::EmployeeAlreadyPaid,
+        Self::InvalidPaymentAmount,
+        Self::EmployeeNotFound,
+        Self::CompanyNotFound,
+        Self::CommitmentLocked,
+        Self::EmptyBatch,
+        Self::ArrayLengthMismatch,
+        Self::SettlementWindowNotYetOpen,
+        Self::SettlementWindowClosed,
+        Self::InvalidSettlementWindowConfig,
+        Self::SettlementWindowOverlap,
+        Self::WithholdingConfigMissing,
+        Self::InvalidWithholdingRate,
+        Self::NetAmountBelowMinimum,
+        Self::GrossAmountExceedsCap,
+        Self::SettlementReceiptAlreadyUsed,
+        Self::BatchTooLarge,
+        Self::PeriodAlreadyOpen,
+        Self::PayoutTotalOverflow,
+    ];
+
+    pub const fn code(self) -> u32 {
         self as u32
+    }
+
+    /// Resolve a numeric error code (`300..=321`) into a typed [`PaymentError`] (issue #823).
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            300 => Some(Self::PeriodNotFound),
+            301 => Some(Self::PeriodClosed),
+            302 => Some(Self::PeriodAlreadyExists),
+            303 => Some(Self::EmployeeAlreadyPaid),
+            304 => Some(Self::InvalidPaymentAmount),
+            305 => Some(Self::EmployeeNotFound),
+            306 => Some(Self::CompanyNotFound),
+            307 => Some(Self::CommitmentLocked),
+            308 => Some(Self::EmptyBatch),
+            309 => Some(Self::ArrayLengthMismatch),
+            310 => Some(Self::SettlementWindowNotYetOpen),
+            311 => Some(Self::SettlementWindowClosed),
+            312 => Some(Self::InvalidSettlementWindowConfig),
+            313 => Some(Self::SettlementWindowOverlap),
+            314 => Some(Self::WithholdingConfigMissing),
+            315 => Some(Self::InvalidWithholdingRate),
+            316 => Some(Self::NetAmountBelowMinimum),
+            317 => Some(Self::GrossAmountExceedsCap),
+            318 => Some(Self::SettlementReceiptAlreadyUsed),
+            319 => Some(Self::BatchTooLarge),
+            320 => Some(Self::PeriodAlreadyOpen),
+            321 => Some(Self::PayoutTotalOverflow),
+            _ => None,
+        }
+    }
+
+    /// Canonical identifier of the failure code (issue #823).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PeriodNotFound => "PeriodNotFound",
+            Self::PeriodClosed => "PeriodClosed",
+            Self::PeriodAlreadyExists => "PeriodAlreadyExists",
+            Self::EmployeeAlreadyPaid => "EmployeeAlreadyPaid",
+            Self::InvalidPaymentAmount => "InvalidPaymentAmount",
+            Self::EmployeeNotFound => "EmployeeNotFound",
+            Self::CompanyNotFound => "CompanyNotFound",
+            Self::CommitmentLocked => "CommitmentLocked",
+            Self::EmptyBatch => "EmptyBatch",
+            Self::ArrayLengthMismatch => "ArrayLengthMismatch",
+            Self::SettlementWindowNotYetOpen => "SettlementWindowNotYetOpen",
+            Self::SettlementWindowClosed => "SettlementWindowClosed",
+            Self::InvalidSettlementWindowConfig => "InvalidSettlementWindowConfig",
+            Self::SettlementWindowOverlap => "SettlementWindowOverlap",
+            Self::WithholdingConfigMissing => "WithholdingConfigMissing",
+            Self::InvalidWithholdingRate => "InvalidWithholdingRate",
+            Self::NetAmountBelowMinimum => "NetAmountBelowMinimum",
+            Self::GrossAmountExceedsCap => "GrossAmountExceedsCap",
+            Self::SettlementReceiptAlreadyUsed => "SettlementReceiptAlreadyUsed",
+            Self::BatchTooLarge => "BatchTooLarge",
+            Self::PeriodAlreadyOpen => "PeriodAlreadyOpen",
+            Self::PayoutTotalOverflow => "PayoutTotalOverflow",
+        }
+    }
+
+    /// Privacy-safe summary of the failure condition (issue #823).
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::PeriodNotFound => "Target payroll period does not exist for the company.",
+            Self::PeriodClosed => "Target payroll period is closed and accepts no new disbursements.",
+            Self::PeriodAlreadyExists => "An open payroll period already exists for the company.",
+            Self::EmployeeAlreadyPaid => "Target recipient has already been settled in the specified period.",
+            Self::InvalidPaymentAmount => "Payout amount is non-positive or fails asset decimal normalization.",
+            Self::EmployeeNotFound => "Recipient record is not registered or is incomplete for the company.",
+            Self::CompanyNotFound => "Company identifier is not registered in the payroll registry.",
+            Self::CommitmentLocked => "Salary commitment is locked by an active audit or compliance hold.",
+            Self::EmptyBatch => "Batch payroll submission contains zero payment entries.",
+            Self::ArrayLengthMismatch => "Batch input vectors (recipients, amounts, proofs, nullifiers) have mismatched lengths.",
+            Self::SettlementWindowNotYetOpen => "Current ledger timestamp precedes the period execution window.",
+            Self::SettlementWindowClosed => "Current ledger timestamp is past the period execution/grace window.",
+            Self::InvalidSettlementWindowConfig => "Settlement window timestamps are not monotonically ordered.",
+            Self::SettlementWindowOverlap => "Proposed settlement window overlaps an existing non-cancelled company period.",
+            Self::WithholdingConfigMissing => "Company withholding configuration has not been set prior to payment execution.",
+            Self::InvalidWithholdingRate => "Combined tax and social withholding rates exceed 10,000 basis points (100%).",
+            Self::NetAmountBelowMinimum => "Net payout after withholding deductions is below the configured floor.",
+            Self::GrossAmountExceedsCap => "Gross payout exceeds the configured per-payment maximum cap.",
+            Self::SettlementReceiptAlreadyUsed => "Settlement receipt identifier was already consumed by a completed batch.",
+            Self::BatchTooLarge => "Batch size exceeds the company or contract maximum batch size limit.",
+            Self::PeriodAlreadyOpen => "Cannot reopen a payroll period that is already open.",
+            Self::PayoutTotalOverflow => "Aggregate batch payout or cumulative company total exceeded i128::MAX.",
+        }
+    }
+
+    /// Actionable remediation steps for operators and integrators (issue #823).
+    pub const fn remediation(self) -> &'static str {
+        match self {
+            Self::PeriodNotFound => "Create the payroll period via create_period or verify the period ID.",
+            Self::PeriodClosed => "Reopen the period with reopen_period or create the next sequential period.",
+            Self::PeriodAlreadyExists => "Close the active period before opening a new one, or submit against the active period.",
+            Self::EmployeeAlreadyPaid => "Skip the already-settled entry when retrying a partially completed batch.",
+            Self::InvalidPaymentAmount => "Ensure the amount is non-negative and normalized to the configured asset decimals.",
+            Self::EmployeeNotFound => "Onboard the recipient and store their commitment before executing payroll.",
+            Self::CompanyNotFound => "Register the company in payroll_registry and use the returned company_id.",
+            Self::CommitmentLocked => "Release the audit/compliance hold or wait for lock resolution before retrying.",
+            Self::EmptyBatch => "Include at least one valid payment instruction in the batch call.",
+            Self::ArrayLengthMismatch => "Ensure employees, amounts, proofs_a/b/c, and nullifiers all have identical length.",
+            Self::SettlementWindowNotYetOpen => "Wait until the ledger timestamp reaches execute_at, then retry.",
+            Self::SettlementWindowClosed => "Open a new settlement window for the next cycle or extend before expiry.",
+            Self::InvalidSettlementWindowConfig => "Supply timestamps satisfying open_at <= execute_at <= grace_until <= close_at.",
+            Self::SettlementWindowOverlap => "Schedule the new period at or after the previous period's close_at boundary.",
+            Self::WithholdingConfigMissing => "Configure company withholding parameters via set_withholding_config first.",
+            Self::InvalidWithholdingRate => "Set income_tax_bps + social_tax_bps <= 10_000.",
+            Self::NetAmountBelowMinimum => "Adjust min_net_per_payment or verify the payment amount meets the net floor.",
+            Self::GrossAmountExceedsCap => "Split the disbursement across periods or raise max_gross_per_payment.",
+            Self::SettlementReceiptAlreadyUsed => "Treat the prior batch as settled or generate a fresh receipt_id for a new batch.",
+            Self::BatchTooLarge => "Chunk the batch into smaller slices at or below get_max_batch_size.",
+            Self::PeriodAlreadyOpen => "Proceed with payment execution directly; no reopen call is needed.",
+            Self::PayoutTotalOverflow => "Split the batch or rotate company accounting before exceeding i128::MAX.",
+        }
+    }
+
+    /// True if the failure is transient with respect to time/locks and can succeed on retry
+    /// once the blocking condition clears (issue #823).
+    pub const fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::PeriodClosed
+                | Self::CommitmentLocked
+                | Self::SettlementWindowNotYetOpen
+                | Self::WithholdingConfigMissing
+        )
+    }
+
+    /// Return the full structured documentation descriptor for this failure code (issue #823).
+    pub const fn spec(self) -> FailureCodeSpec {
+        FailureCodeSpec {
+            code: self.code(),
+            name: self.name(),
+            summary: self.description(),
+            remediation: self.remediation(),
+            retryable: self.is_retryable(),
+        }
+    }
+}
+
+/// Look up the structured documentation descriptor for a numeric `PaymentError` code (issue #823).
+pub const fn describe_payment_failure_code(code: u32) -> Option<FailureCodeSpec> {
+    match PaymentError::from_code(code) {
+        Some(err) => Some(err.spec()),
+        None => None,
     }
 }
 
@@ -302,5 +510,53 @@ impl AuthError {
 impl ReplayError {
     pub fn code(self) -> u32 {
         self as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_every_payment_failure_code_is_documented_and_roundtrips() {
+        assert_eq!(PaymentError::MIN_CODE, 300);
+        assert_eq!(PaymentError::MAX_CODE, 321);
+
+        for (offset, variant) in PaymentError::ALL.iter().copied().enumerate() {
+            let expected_code = 300 + offset as u32;
+            assert_eq!(variant.code(), expected_code);
+            assert_eq!(PaymentError::from_code(expected_code), Some(variant));
+
+            let spec = describe_payment_failure_code(expected_code)
+                .expect("every PaymentError code in 300..=321 must have a documented spec");
+            assert_eq!(spec.code, expected_code);
+            assert!(!spec.name.is_empty());
+            assert!(!spec.summary.is_empty());
+            assert!(!spec.remediation.is_empty());
+            // Privacy check: static error descriptions must never embed raw addresses or amounts.
+            assert!(!spec.summary.contains("GAAA"));
+        }
+    }
+
+    #[test]
+    fn test_unknown_and_out_of_range_payment_failure_codes_rejected() {
+        for invalid_code in [0u32, 1, 99, 299, 322, 400, u32::MAX] {
+            assert_eq!(PaymentError::from_code(invalid_code), None);
+            assert_eq!(describe_payment_failure_code(invalid_code), None);
+        }
+    }
+
+    #[test]
+    fn test_payment_failure_code_boundary_and_retryability_classification() {
+        let first = describe_payment_failure_code(PaymentError::MIN_CODE).unwrap();
+        assert_eq!(first.name, "PeriodNotFound");
+        assert!(!first.retryable);
+
+        let last = describe_payment_failure_code(PaymentError::MAX_CODE).unwrap();
+        assert_eq!(last.name, "PayoutTotalOverflow");
+        assert!(!last.retryable);
+
+        let window_wait = PaymentError::SettlementWindowNotYetOpen.spec();
+        assert!(window_wait.retryable);
     }
 }
