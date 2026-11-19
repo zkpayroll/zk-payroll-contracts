@@ -5,7 +5,7 @@ use alloc::format;
 
 use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
-use proof_verifier::{Groth16Proof, ProofVerifierClient};
+use proof_verifier::{Groth16Proof, ProofError, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
 use shared_errors::{StorageError, TreasuryError};
 use soroban_sdk::{
@@ -100,6 +100,13 @@ pub enum PaymentError {
     BatchTooLarge = 18,
     /// The payroll period is already open (cannot reopen an open period) (issue #484).
     PeriodAlreadyOpen = 19,
+    /// The public inputs built for the proof do not match the length the
+    /// verifier's stored verification key expects (issue #821). This points
+    /// to a circuit/schema version mismatch between executor and verifier,
+    /// not a bad proof. Raised before verification, transfers, or any state
+    /// write; the error carries no commitment or amount. (Code 21 leaves 20
+    /// free for `Overflow`, issue #814.)
+    InvalidPublicInputLength = 21,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -836,6 +843,18 @@ impl PaymentExecutor {
 
         // Validate Groth16 proof via proof_verifier contract.
         let verifier = ProofVerifierClient::new(&env, &addresses.verifier);
+
+        // Issue #821: check the circuit input length first, so a schema or
+        // verification-key mismatch shows up as a typed error instead of
+        // the generic "Invalid payment proof" panic below. Any other outcome
+        // (including an older verifier without this entrypoint) falls
+        // through to `verify`, which behaves exactly as before.
+        if let Err(Ok(ProofError::InvalidPublicInputLength)) =
+            verifier.try_validate_public_inputs(&public_inputs)
+        {
+            return Err(PaymentError::InvalidPublicInputLength);
+        }
+
         let proof = Groth16Proof {
             a: proof_a.clone(),
             b: proof_b.clone(),
