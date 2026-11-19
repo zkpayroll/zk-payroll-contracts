@@ -64,6 +64,11 @@ let expected_public_inputs: u32 = vk.ic.len() - 1;
 Use this count to validate proof generation parameters before submitting a
 transaction, avoiding wasted gas on a predictable rejection.
 
+Alternatively, call `validate_public_inputs(public_inputs)` as a read-only
+preflight (issue #821). It returns the accepted input count, or
+`ProofError::InvalidPublicInputLength (10)` on a mismatch and
+`ProofError::NotInitialized (1)` when no key is stored.
+
 ---
 
 ## Compatibility Rules
@@ -93,6 +98,21 @@ stored VK:
 
 Clients SHOULD surface this as a distinct error code (`ProofSchemaRejected`)
 rather than a generic payment failure to aid debugging.
+
+Since issue #821 the contracts surface the distinct error themselves:
+
+- `proof_verifier.validate_public_inputs` returns
+  `ProofError::InvalidPublicInputLength (10)`. The `verify` and
+  `verify_payment_proof` bool entrypoints are unchanged and still return
+  `false`.
+- `payment_executor` calls `validate_public_inputs` before `verify` and
+  returns `PaymentError::InvalidPublicInputLength (21)` instead of the
+  generic `"Invalid payment proof"` panic. This happens before any transfer
+  or state write, so the nullifier is not consumed. If the verifier predates
+  this entrypoint, the executor falls back to `verify` and behaves as it
+  did before.
+
+Map both codes to `ProofSchemaRejected`.
 
 ---
 
