@@ -1727,6 +1727,7 @@ dependencies = [
  "soroban-sdk",
  "stellar-strkey 1.0.0",
  "token",
+ "treasury_isolation",
 ]
 
 [[package]]
