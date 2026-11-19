@@ -182,10 +182,9 @@ fn execute_one_payment_run(ctx: &Ctx, seed: u8) -> u64 {
 /// commitment contract instance always collides on "Nullifier already used"
 /// regardless of seed. That is a real limitation of the payment-execution
 /// path, unrelated to issue #617's note-hash feature, so it is worked
-/// around here rather than fixed. `prepare_payroll_run`/`finalize_payroll_run`
-/// creates a real `PayrollRun` through the pending-run workflow without
-/// touching the commitment/nullifier system at all, which is all this test
-/// needs: a second genuine run to bind (or fail to bind) a note hash to.
+/// around here rather than fixed. The pending-run workflow checks that the
+/// employee commitment is active but does not consume another nullifier.
+/// This creates a second genuine run to bind (or fail to bind) a note hash to.
 fn prepare_and_finalize_run(ctx: &Ctx, seed: u8) -> u64 {
     let payment_amount: i128 = 1_000;
     let mut proofs = Vec::new(&ctx.env);
@@ -193,7 +192,7 @@ fn prepare_and_finalize_run(ctx: &Ctx, seed: u8) -> u64 {
     let mut amounts = Vec::new(&ctx.env);
     amounts.push_back(payment_amount);
     let mut employees = Vec::new(&ctx.env);
-    employees.push_back(Address::generate(&ctx.env));
+    employees.push_back(ctx.alice.clone());
 
     let run_id = ctx.payroll().prepare_payroll_run(
         &proofs,

@@ -9,6 +9,8 @@
 #![cfg(test)]
 
 mod common;
+#[path = "support/active_employee.rs"]
+mod employee_fixture;
 
 use payroll::{AdminApprovalAuditError, AdminApprovalKind, PayrollClient, MAX_ADMIN_APPROVAL_PAGE};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -18,7 +20,7 @@ use soroban_sdk::{xdr, Address, BytesN, Env, TryFromVal, Val, Vec};
 fn prepare_run(env: &Env, client: &PayrollClient, marker: u8) -> u64 {
     let proofs = Vec::from_array(env, [BytesN::from_array(env, &[1; 256])]);
     let amounts = Vec::from_array(env, [100_i128]);
-    let employees = Vec::from_array(env, [Address::generate(env)]);
+    let employees = Vec::from_array(env, [employee_fixture::active_employee(env, client)]);
     client.prepare_payroll_run(
         &proofs,
         &amounts,

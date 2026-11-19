@@ -348,76 +348,86 @@ mod tests {
     #[test]
     fn commit_stores_ordering_and_emits_event() {
         let env = Env::default();
-        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            env.ledger().with_mut(|li| li.timestamp = 1_000);
 
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 1);
-        let recipients = vec![&env, alice.clone(), bob.clone()];
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 1);
+            let recipients = vec![&env, alice.clone(), bob.clone()];
 
-        assert!(commit_recipient_ordering(&env, &nonce, &recipients).is_ok());
+            assert!(commit_recipient_ordering(&env, &nonce, &recipients).is_ok());
 
-        // Commitment should now exist in storage.
-        let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
-        let stored: CommittedRecipientOrdering = env.storage().persistent().get(&key).unwrap();
-        assert_eq!(stored.count, 2);
-        assert_eq!(stored.committed_at, 1_000);
-        assert_eq!(stored.recipients.get(0).unwrap(), alice);
-        assert_eq!(stored.recipients.get(1).unwrap(), bob);
+            // Commitment should now exist in storage.
+            let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
+            let stored: CommittedRecipientOrdering = env.storage().persistent().get(&key).unwrap();
+            assert_eq!(stored.count, 2);
+            assert_eq!(stored.committed_at, 1_000);
+            assert_eq!(stored.recipients.get(0).unwrap(), alice);
+            assert_eq!(stored.recipients.get(1).unwrap(), bob);
+        });
     }
 
     #[test]
     fn commit_rejects_empty_recipients() {
         let env = Env::default();
-        let nonce = test_nonce(&env, 2);
-        let empty: Vec<Address> = vec![&env];
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let nonce = test_nonce(&env, 2);
+            let empty: Vec<Address> = vec![&env];
 
-        assert_eq!(
-            commit_recipient_ordering(&env, &nonce, &empty),
-            Err(PayoutOrderingError::EmptyRecipients),
-        );
+            assert_eq!(
+                commit_recipient_ordering(&env, &nonce, &empty),
+                Err(PayoutOrderingError::EmptyRecipients),
+            );
+        });
     }
 
     #[test]
     fn commit_rejects_duplicate_nonce() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let nonce = test_nonce(&env, 3);
-        let recipients = vec![&env, alice.clone()];
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let nonce = test_nonce(&env, 3);
+            let recipients = vec![&env, alice.clone()];
 
-        commit_recipient_ordering(&env, &nonce, &recipients).unwrap();
+            commit_recipient_ordering(&env, &nonce, &recipients).unwrap();
 
-        assert_eq!(
-            commit_recipient_ordering(&env, &nonce, &recipients),
-            Err(PayoutOrderingError::CommitmentAlreadyExists),
-        );
+            assert_eq!(
+                commit_recipient_ordering(&env, &nonce, &recipients),
+                Err(PayoutOrderingError::CommitmentAlreadyExists),
+            );
+        });
     }
 
     #[test]
     fn commit_rejects_too_many_recipients() {
         let env = Env::default();
-        let nonce = test_nonce(&env, 16);
-        let mut recipients: Vec<Address> = vec![&env];
-        for _ in 0..=MAX_ORDERING_SIZE {
-            recipients.push_back(Address::generate(&env));
-        }
-        assert_eq!(recipients.len(), MAX_ORDERING_SIZE + 1);
-        assert_eq!(
-            commit_recipient_ordering(&env, &nonce, &recipients),
-            Err(PayoutOrderingError::TooManyRecipients),
-        );
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let nonce = test_nonce(&env, 16);
+            let mut recipients: Vec<Address> = vec![&env];
+            for _ in 0..=MAX_ORDERING_SIZE {
+                recipients.push_back(Address::generate(&env));
+            }
+            assert_eq!(recipients.len(), MAX_ORDERING_SIZE + 1);
+            assert_eq!(
+                commit_recipient_ordering(&env, &nonce, &recipients),
+                Err(PayoutOrderingError::TooManyRecipients),
+            );
+        });
     }
 
     #[test]
     fn commit_accepts_exact_max_ordering_size() {
         let env = Env::default();
-        let nonce = test_nonce(&env, 17);
-        let mut recipients: Vec<Address> = vec![&env];
-        for _ in 0..MAX_ORDERING_SIZE {
-            recipients.push_back(Address::generate(&env));
-        }
-        assert_eq!(recipients.len(), MAX_ORDERING_SIZE);
-        assert!(commit_recipient_ordering(&env, &nonce, &recipients).is_ok());
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let nonce = test_nonce(&env, 17);
+            let mut recipients: Vec<Address> = vec![&env];
+            for _ in 0..MAX_ORDERING_SIZE {
+                recipients.push_back(Address::generate(&env));
+            }
+            assert_eq!(recipients.len(), MAX_ORDERING_SIZE);
+            assert!(commit_recipient_ordering(&env, &nonce, &recipients).is_ok());
+        });
     }
 
     // ── check_payout_ordering (preflight) ─────────────────────────────────────
@@ -425,60 +435,73 @@ mod tests {
     #[test]
     fn check_returns_no_commitment_when_none_exists() {
         let env = Env::default();
-        let nonce = test_nonce(&env, 4);
-        let alice = Address::generate(&env);
-        let payout = vec![&env, alice];
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let nonce = test_nonce(&env, 4);
+            let alice = Address::generate(&env);
+            let payout = vec![&env, alice];
 
-        let check = check_payout_ordering(&env, &nonce, &payout);
-        assert!(!check.commitment_found);
-        assert!(!check.length_matches);
-        assert!(!check.order_matches);
-        assert!(!check.all_passed());
+            let check = check_payout_ordering(&env, &nonce, &payout);
+            assert!(!check.commitment_found);
+            assert!(!check.length_matches);
+            assert!(!check.order_matches);
+            assert!(!check.all_passed());
+        });
     }
 
     #[test]
     fn check_detects_length_mismatch() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 5);
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]).unwrap();
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 5);
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()])
+                .unwrap();
 
-        // Only one recipient in payout vs two committed.
-        let check = check_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
-        assert!(check.commitment_found);
-        assert!(!check.length_matches);
-        assert!(!check.all_passed());
+            // Only one recipient in payout vs two committed.
+            let check = check_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
+            assert!(check.commitment_found);
+            assert!(!check.length_matches);
+            assert!(!check.all_passed());
+        });
     }
 
     #[test]
     fn check_detects_wrong_order() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 6);
-        // Committed: [alice, bob]
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]).unwrap();
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 6);
+            // Committed: [alice, bob]
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()])
+                .unwrap();
 
-        // Payout: [bob, alice] — reversed
-        let check = check_payout_ordering(&env, &nonce, &vec![&env, bob.clone(), alice.clone()]);
-        assert!(check.commitment_found);
-        assert!(check.length_matches);
-        assert!(!check.order_matches);
-        assert!(!check.all_passed());
+            // Payout: [bob, alice] — reversed
+            let check =
+                check_payout_ordering(&env, &nonce, &vec![&env, bob.clone(), alice.clone()]);
+            assert!(check.commitment_found);
+            assert!(check.length_matches);
+            assert!(!check.order_matches);
+            assert!(!check.all_passed());
+        });
     }
 
     #[test]
     fn check_passes_on_correct_order() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 7);
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]).unwrap();
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 7);
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()])
+                .unwrap();
 
-        let check = check_payout_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]);
-        assert!(check.all_passed());
-        assert_eq!(check.first_failure(), None);
+            let check =
+                check_payout_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]);
+            assert!(check.all_passed());
+            assert_eq!(check.first_failure(), None);
+        });
     }
 
     // ── assert_payout_ordering ────────────────────────────────────────────────
@@ -487,75 +510,90 @@ mod tests {
     #[test]
     fn assert_succeeds_and_consumes_commitment() {
         let env = Env::default();
-        env.ledger().with_mut(|li| li.timestamp = 2_000);
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            env.ledger().with_mut(|li| li.timestamp = 2_000);
 
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 8);
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]).unwrap();
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 8);
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()])
+                .unwrap();
 
-        let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]);
-        assert!(result.is_ok());
+            let result =
+                assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]);
+            assert!(result.is_ok());
 
-        // Commitment should be gone.
-        let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
-        assert!(!env.storage().persistent().has(&key));
+            // Commitment should be gone.
+            let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
+            assert!(!env.storage().persistent().has(&key));
+        });
     }
 
     /// Rejected case: wrong order.
     #[test]
     fn assert_rejects_wrong_order() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 9);
-        // Committed: [alice, bob]
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]).unwrap();
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 9);
+            // Committed: [alice, bob]
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()])
+                .unwrap();
 
-        // Payout: [bob, alice] — wrong order
-        let result = assert_payout_ordering(&env, &nonce, &vec![&env, bob.clone(), alice.clone()]);
-        assert_eq!(result, Err(PayoutOrderingError::OrderMismatch));
+            // Payout: [bob, alice] — wrong order
+            let result =
+                assert_payout_ordering(&env, &nonce, &vec![&env, bob.clone(), alice.clone()]);
+            assert_eq!(result, Err(PayoutOrderingError::OrderMismatch));
 
-        // Commitment NOT consumed on failure.
-        let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
-        assert!(env.storage().persistent().has(&key));
+            // Commitment NOT consumed on failure.
+            let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
+            assert!(env.storage().persistent().has(&key));
+        });
     }
 
     /// Rejected case: wrong length.
     #[test]
     fn assert_rejects_length_mismatch() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 10);
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()]).unwrap();
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 10);
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone(), bob.clone()])
+                .unwrap();
 
-        let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
-        assert_eq!(result, Err(PayoutOrderingError::LengthMismatch));
+            let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
+            assert_eq!(result, Err(PayoutOrderingError::LengthMismatch));
+        });
     }
 
     /// Opt-in: no commitment → passes silently.
     #[test]
     fn assert_passes_when_no_commitment_exists() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let nonce = test_nonce(&env, 11);
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let nonce = test_nonce(&env, 11);
 
-        // No commit_recipient_ordering call.
-        let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
-        assert!(result.is_ok());
+            // No commit_recipient_ordering call.
+            let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
+            assert!(result.is_ok());
+        });
     }
 
     /// Boundary case: single employee.
     #[test]
     fn single_employee_success() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let nonce = test_nonce(&env, 12);
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let nonce = test_nonce(&env, 12);
 
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone()]).unwrap();
-        let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
-        assert!(result.is_ok());
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone()]).unwrap();
+            let result = assert_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
+            assert!(result.is_ok());
+        });
     }
 
     /// Boundary case: single employee wrong order (only one slot, but a
@@ -563,41 +601,47 @@ mod tests {
     #[test]
     fn single_employee_wrong_address_rejected() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let nonce = test_nonce(&env, 13);
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let bob = Address::generate(&env);
+            let nonce = test_nonce(&env, 13);
 
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone()]).unwrap();
-        let result = assert_payout_ordering(&env, &nonce, &vec![&env, bob.clone()]);
-        assert_eq!(result, Err(PayoutOrderingError::OrderMismatch));
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone()]).unwrap();
+            let result = assert_payout_ordering(&env, &nonce, &vec![&env, bob.clone()]);
+            assert_eq!(result, Err(PayoutOrderingError::OrderMismatch));
+        });
     }
 
     /// check_payout_ordering does NOT consume the commitment even on success.
     #[test]
     fn check_does_not_consume_commitment() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let nonce = test_nonce(&env, 14);
-        commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone()]).unwrap();
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let nonce = test_nonce(&env, 14);
+            commit_recipient_ordering(&env, &nonce, &vec![&env, alice.clone()]).unwrap();
 
-        let check = check_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
-        assert!(check.all_passed());
+            let check = check_payout_ordering(&env, &nonce, &vec![&env, alice.clone()]);
+            assert!(check.all_passed());
 
-        // Commitment must still be there.
-        let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
-        assert!(env.storage().persistent().has(&key));
+            // Commitment must still be there.
+            let key = PayoutOrderingKey::CommittedOrdering(nonce.clone());
+            assert!(env.storage().persistent().has(&key));
+        });
     }
 
     /// first_failure returns the first blocking error.
     #[test]
     fn check_first_failure_no_commitment() {
         let env = Env::default();
-        let alice = Address::generate(&env);
-        let nonce = test_nonce(&env, 15);
-        let check = check_payout_ordering(&env, &nonce, &vec![&env, alice]);
-        assert_eq!(
-            check.first_failure(),
-            Some(PayoutOrderingError::NoCommitmentFound)
-        );
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            let alice = Address::generate(&env);
+            let nonce = test_nonce(&env, 15);
+            let check = check_payout_ordering(&env, &nonce, &vec![&env, alice]);
+            assert_eq!(
+                check.first_failure(),
+                Some(PayoutOrderingError::NoCommitmentFound)
+            );
+        });
     }
 }

@@ -19,6 +19,8 @@ use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{Address, BytesN, Env, IntoVal, Symbol, Vec};
 use token::{Token, TokenClient};
+#[path = "../../contracts/payroll/tests/support/active_employee.rs"]
+mod employee_fixture;
 
 // ============================================================================
 // Helper Functions
@@ -239,7 +241,10 @@ fn test_unauthorized_cancel_payroll_run_fails() {
     let run_id = payroll_client.prepare_payroll_run(
         &Vec::from_array(&env, [mock_proof(&env)]),
         &Vec::from_array(&env, [1000i128]),
-        &Vec::from_array(&env, [Address::generate(&env)]),
+        &Vec::from_array(
+            &env,
+            [employee_fixture::active_employee(&env, &payroll_client)],
+        ),
         &1000i128,
         &test_nonce(&env, 1),
         &None::<BytesN<32>>,
@@ -906,7 +911,10 @@ fn test_unauthorized_approve_payroll_run_fails() {
     let run_id = payroll_client.prepare_payroll_run(
         &Vec::from_array(&env, [mock_proof(&env)]),
         &Vec::from_array(&env, [1000i128]),
-        &Vec::from_array(&env, [Address::generate(&env)]),
+        &Vec::from_array(
+            &env,
+            [employee_fixture::active_employee(&env, &payroll_client)],
+        ),
         &1000i128,
         &test_nonce(&env, 10),
         &None::<BytesN<32>>,
@@ -958,7 +966,10 @@ fn test_unauthorized_reject_payroll_run_fails() {
     let run_id = payroll_client.prepare_payroll_run(
         &Vec::from_array(&env, [mock_proof(&env)]),
         &Vec::from_array(&env, [1000i128]),
-        &Vec::from_array(&env, [Address::generate(&env)]),
+        &Vec::from_array(
+            &env,
+            [employee_fixture::active_employee(&env, &payroll_client)],
+        ),
         &1000i128,
         &test_nonce(&env, 11),
         &None::<BytesN<32>>,
@@ -1011,7 +1022,10 @@ fn test_unauthorized_request_changes_payroll_run_fails() {
     let run_id = payroll_client.prepare_payroll_run(
         &Vec::from_array(&env, [mock_proof(&env)]),
         &Vec::from_array(&env, [1000i128]),
-        &Vec::from_array(&env, [Address::generate(&env)]),
+        &Vec::from_array(
+            &env,
+            [employee_fixture::active_employee(&env, &payroll_client)],
+        ),
         &1000i128,
         &test_nonce(&env, 12),
         &None::<BytesN<32>>,
@@ -1106,7 +1120,10 @@ fn test_revoked_reviewer_cannot_approve_fails() {
     let run_id = payroll_client.prepare_payroll_run(
         &Vec::from_array(&env, [mock_proof(&env)]),
         &Vec::from_array(&env, [1000i128]),
-        &Vec::from_array(&env, [Address::generate(&env)]),
+        &Vec::from_array(
+            &env,
+            [employee_fixture::active_employee(&env, &payroll_client)],
+        ),
         &1000i128,
         &test_nonce(&env, 13),
         &None::<BytesN<32>>,

@@ -13,6 +13,8 @@ use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 use token::{Token, TokenClient};
+#[path = "../../contracts/payroll/tests/support/active_employee.rs"]
+mod employee_fixture;
 
 fn mock_vk(env: &Env) -> VerificationKey {
     VerificationKey {
@@ -96,10 +98,10 @@ fn setup_test_context() -> TestContext<'static> {
 }
 
 /// Builds a batch of `n` employees, each paid `amount_each`, using fresh
-/// addresses (no commitment registration needed since `prepare_payroll_run`
-/// does not touch the commitment or proof-verifier contracts).
+/// addresses and active salary commitments required by `prepare_payroll_run`.
 fn batch_of(
     env: &Env,
+    payroll: &PayrollClient,
     n: u32,
     amount_each: i128,
 ) -> (Vec<BytesN<256>>, Vec<i128>, Vec<Address>, i128) {
@@ -110,14 +112,15 @@ fn batch_of(
     for _ in 0..n {
         proofs.push_back(mock_proof(env));
         amounts.push_back(amount_each);
-        employees.push_back(Address::generate(env));
+        employees.push_back(employee_fixture::active_employee(env, payroll));
         total += amount_each;
     }
     (proofs, amounts, employees, total)
 }
 
 fn prepare_batch(ctx: &TestContext, seed: u16, n: u32, amount_each: i128) -> u64 {
-    let (proofs, amounts, employees, total) = batch_of(&ctx.env, n, amount_each);
+    let (proofs, amounts, employees, total) =
+        batch_of(&ctx.env, &ctx.payroll_client, n, amount_each);
     ctx.payroll_client.prepare_payroll_run(
         &proofs,
         &amounts,
@@ -131,7 +134,8 @@ fn prepare_batch(ctx: &TestContext, seed: u16, n: u32, amount_each: i128) -> u64
 /// Attempts to prepare a batch and returns whether the call failed
 /// (rejected by validation, e.g. a capacity limit).
 fn try_prepare_batch_fails(ctx: &TestContext, seed: u16, n: u32, amount_each: i128) -> bool {
-    let (proofs, amounts, employees, total) = batch_of(&ctx.env, n, amount_each);
+    let (proofs, amounts, employees, total) =
+        batch_of(&ctx.env, &ctx.payroll_client, n, amount_each);
     let result = ctx.payroll_client.try_prepare_payroll_run(
         &proofs,
         &amounts,

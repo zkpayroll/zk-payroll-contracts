@@ -361,7 +361,7 @@ mod e2e {
 
     /// Paying an employee who has no commitment on-chain must panic.
     #[test]
-    #[should_panic(expected = "Commitment not found")]
+    #[should_panic(expected = "Payroll batch references an inactive or removed employee")]
     fn test_unregistered_employee_cannot_be_paid() {
         let ctx = setup();
         let env = &ctx.env;

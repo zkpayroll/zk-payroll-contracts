@@ -1,13 +1,15 @@
 #![cfg(test)]
 
 mod common;
+#[path = "support/active_employee.rs"]
+mod employee_fixture;
 
 use payroll::PayrollClient;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Vec};
 
 fn prepare(env: &Env, client: &PayrollClient, amount: i128, marker: u8) -> u64 {
-    let employee = Address::generate(env);
+    let employee = employee_fixture::active_employee(env, client);
     let proofs = Vec::from_array(env, [BytesN::from_array(env, &[1; 256])]);
     let amounts = Vec::from_array(env, [amount]);
     let employees = Vec::from_array(env, [employee]);
@@ -64,7 +66,7 @@ fn failed_reservation_can_be_retried_at_the_buffer_boundary() {
 
     let proofs = Vec::from_array(&env, [BytesN::from_array(&env, &[1; 256])]);
     let amounts = Vec::from_array(&env, [900_001_i128]);
-    let employees = Vec::from_array(&env, [Address::generate(&env)]);
+    let employees = Vec::from_array(&env, [employee_fixture::active_employee(&env, &client)]);
     let nonce = common::nonce(&env, 2);
     assert!(client
         .try_prepare_payroll_run(&proofs, &amounts, &employees, &900_001, &nonce, &None)
