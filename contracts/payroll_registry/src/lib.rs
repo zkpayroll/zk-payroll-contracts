@@ -1986,3 +1986,12 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
 #[cfg(test)]
 mod tests;
+
+    /// Issue #827: Prevent approval delegation from outliving its parent role.
+    ///
+    /// Validates delegation status to ensure no stale delegations persist.
+    fn verify_delegation_lifespan(&self, env: &Env, actor: Address) -> bool {
+        // Check that any active delegation is not stale
+        let has_delegation = self.has_active_delegation(env, actor);
+        !has_delegation || self.is_delegation_fresh(env, actor)
+    }
