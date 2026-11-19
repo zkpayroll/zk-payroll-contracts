@@ -10,7 +10,7 @@
 #![cfg(test)]
 
 use ::token::{Token, TokenClient};
-use payroll::{BatchCheckpointState, Payroll, PayrollClient};
+use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::testutils::Address as _;
@@ -20,7 +20,7 @@ static NEXT_COMMITMENT_SEED: AtomicU32 = AtomicU32::new(1);
 use soroban_sdk::{Address, BytesN, Env, Vec};
 
 fn mock_proof(env: &Env, seed: u8) -> BytesN<256> {
-    let mut arr = [seed; 256];
+    let arr = [seed; 256];
     BytesN::from_array(env, &arr)
 }
 
@@ -53,27 +53,27 @@ struct TestContext<'a> {
     payroll: PayrollClient<'a>,
     commitment: SalaryCommitmentContractClient<'a>,
     token: TokenClient<'a>,
-    admin: Address,
-    treasury: Address,
+    _admin: Address,
+    _treasury: Address,
 }
 
-fn setup(env: &Env) -> TestContext {
+fn setup(env: &Env) -> TestContext<'_> {
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     verifier_client.init_verifier_admin(&Address::generate(env));
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     commitment_client.init_commitment_admin(&Address::generate(env));
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token_client = TokenClient::new(env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     let treasury = Address::generate(env);
@@ -97,8 +97,8 @@ fn setup(env: &Env) -> TestContext {
         payroll: payroll_client,
         commitment: commitment_client,
         token: token_client,
-        admin,
-        treasury,
+        _admin: admin,
+        _treasury: treasury,
     }
 }
 

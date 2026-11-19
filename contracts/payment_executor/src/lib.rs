@@ -1,4 +1,6 @@
 #![no_std]
+// Soroban generates clients for the established positional contract ABI.
+#![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
 use alloc::format;
@@ -202,6 +204,8 @@ pub enum DataKey {
 #[contract]
 pub struct PaymentExecutor;
 
+// Preserve the existing contract ABI and generated client signatures.
+#[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl PaymentExecutor {
     fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
@@ -245,7 +249,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::StorageVersion, &1u32);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
                 addresses.token.clone(),
@@ -300,7 +305,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "TreasuryAssetAllowedUpdated"), asset),
             (allowed, env.ledger().timestamp()),
         );
@@ -448,7 +454,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::AssetDecimals(asset.clone()), &decimals);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "AssetDecimalsConfigured"), asset),
             (decimals, env.ledger().timestamp()),
         );
@@ -1097,7 +1104,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::MaxBatchSize(company_id), &max_size);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "PayoutBatchSizeLimitSet"), company_id),
             max_size,
         );
@@ -1183,9 +1191,7 @@ mod tests {
         let Some(event) = recorded.events().get(index) else {
             panic!("no contract event recorded at index {index}");
         };
-        let xdr::ContractEventBody::V0(body) = &event.body else {
-            panic!("expected a v0 contract event body");
-        };
+        let xdr::ContractEventBody::V0(body) = &event.body;
         let mut topics = soroban_sdk::Vec::new(env);
         for topic in body.topics.iter() {
             topics.push_back(Val::try_from_val(env, topic).expect("invalid event topic"));
@@ -1214,10 +1220,10 @@ mod tests {
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
         let verifier_client = ProofVerifierClient::new(env, &verifier_id);
         let verifier_admin = Address::generate(env);
@@ -1277,7 +1283,7 @@ mod tests {
     #[test]
     fn test_initialize() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1288,7 +1294,7 @@ mod tests {
     fn test_is_paid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1303,7 +1309,7 @@ mod tests {
     fn test_execute_payment_transfers_after_verification() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1361,7 +1367,7 @@ mod tests {
     fn test_double_spend_proof_reuse_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1419,7 +1425,7 @@ mod tests {
     fn test_batch_array_length_mismatch_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1465,7 +1471,7 @@ mod tests {
     fn test_create_period() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1488,7 +1494,7 @@ mod tests {
     fn test_duplicate_period_creation_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1512,7 +1518,7 @@ mod tests {
     fn test_close_period() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1534,7 +1540,7 @@ mod tests {
     fn test_payment_in_closed_period_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1577,7 +1583,7 @@ mod tests {
     fn test_payment_in_nonexistent_period_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1619,7 +1625,7 @@ mod tests {
     fn test_reentrancy_cei_pattern() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1705,7 +1711,7 @@ mod tests {
     ) {
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(env, &contract_id);
 
         let addresses = setup_addresses(env);
@@ -1729,7 +1735,7 @@ mod tests {
         client.set_executor_admin(&admin);
 
         // Register and configure pause manager
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(env, &pm_id);
         let operator = Address::generate(env);
         pm_client.initialize(&operator);
@@ -1818,7 +1824,7 @@ mod tests {
     fn test_executor_works_without_pause_manager() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1866,7 +1872,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_set_pause_manager_rejects_unauthorized() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1897,7 +1903,7 @@ mod tests {
         client.set_executor_admin(&admin);
 
         // Attacker tries to set pause manager
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let attacker = Address::generate(&env);
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &attacker,
@@ -1917,7 +1923,7 @@ mod tests {
     fn test_fresh_proof_within_expiration_window() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1965,7 +1971,7 @@ mod tests {
     fn test_period_tracks_creation_time() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1999,7 +2005,7 @@ mod tests {
     #[test]
     fn test_get_max_proof_age() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let max_age = client.get_max_proof_age();
@@ -2011,7 +2017,7 @@ mod tests {
     fn test_asset_allowlist_management_and_execution() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2037,7 +2043,7 @@ mod tests {
     fn test_execute_payment_fails_when_asset_disallowed() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2080,7 +2086,7 @@ mod tests {
     #[test]
     fn test_storage_version_returns_version_1() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2093,7 +2099,7 @@ mod tests {
     fn test_asset_allowed_emits_events() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2132,7 +2138,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_company_admin_cannot_set_asset_allowed() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2167,7 +2173,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_executor_admin_cannot_execute_payment_for_foreign_company() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2361,35 +2367,12 @@ mod tests {
 
     // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #538: Withholding configuration tests ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
-    /// Helper: register a company + set up withholding config with zero rates so
-    /// tests that don't care about deductions still pass the withholding gate.
-    fn setup_zero_rate_withholding(
-        env: &Env,
-        client: &PaymentExecutorClient,
-        company_id: u64,
-        tax_recipient: &Address,
-    ) {
-        let executor_admin = Address::generate(env);
-        // set_executor_admin is a one-time call; ignore error if already set
-        let _ = client.try_set_executor_admin(&executor_admin);
-
-        client.set_withholding_config(
-            &company_id,
-            &0u32,         // income_tax_bps  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 0 % (no deductions)
-            &0u32,         // social_tax_bps  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 0 %
-            tax_recipient, // income_tax_recipient
-            tax_recipient, // social_tax_recipient
-            &0i128,        // max_gross_per_payment ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no cap
-            &0i128,        // min_net_per_payment   ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no floor
-        );
-    }
-
     /// set_withholding_config stores config and is readable via get_withholding_config.
     #[test]
     fn test_set_and_get_withholding_config() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2427,7 +2410,7 @@ mod tests {
     fn test_withholding_rate_exceeds_100_percent_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2462,7 +2445,7 @@ mod tests {
     fn test_withholding_rate_exactly_100_percent_accepted() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2494,7 +2477,7 @@ mod tests {
     fn test_execute_payment_fails_without_withholding_config() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2542,7 +2525,7 @@ mod tests {
     fn test_get_withholding_config_returns_none_when_not_set() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2556,7 +2539,7 @@ mod tests {
     fn test_execute_payment_fails_when_gross_exceeds_cap() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);

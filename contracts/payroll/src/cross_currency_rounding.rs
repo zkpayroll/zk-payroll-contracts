@@ -3,8 +3,6 @@
 //! Provides rounding validation and precision safeguards when converting amounts
 //! across foreign currency exchange rates for payroll disbursement.
 
-#![no_std]
-
 use soroban_sdk::contracttype;
 
 /// Rounding direction mode applied to currency conversion calculations.

@@ -1,21 +1,21 @@
-/// Multi-stage payroll approval rollback protections tests — issue #414.
-///
-/// # Coverage
-/// | Test | Scenario |
-/// |------|----------|
-/// | `test_multi_stage_approval_flow_success` | Sequential approvals advance stage and lock upon completion |
-/// | `test_stale_approval_reused_rejected` | Stale content hash submission panics with "Stale approval reused" |
-/// | `test_amend_draft_rolls_back_partial_approvals` | Protected field edits roll back approvals to 0 and emit rollback event |
-/// | `test_duplicate_signer_approval_rejected` | Duplicate approval from same signer panics |
-/// | `test_approval_after_lock_rejected` | Approval attempt after draft lock panics |
+//! Multi-stage payroll approval rollback protections tests — issue #414.
+//!
+//! # Coverage
+//! | Test | Scenario |
+//! |------|----------|
+//! | `test_multi_stage_approval_flow_success` | Sequential approvals advance stage and lock upon completion |
+//! | `test_stale_approval_reused_rejected` | Stale content hash submission panics with "Stale approval reused" |
+//! | `test_amend_draft_rolls_back_partial_approvals` | Protected field edits roll back approvals to 0 and emit rollback event |
+//! | `test_duplicate_signer_approval_rejected` | Duplicate approval from same signer panics |
+//! | `test_approval_after_lock_rejected` | Approval attempt after draft lock panics |
 use payroll::{signing::compute_protected_content_hash, Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Events},
-    Address, BytesN, Env, Symbol, TryFromVal, TryIntoVal, Vec,
+    Address, BytesN, Env, Symbol, TryFromVal, Vec,
 };
-use token::{Token, TokenClient};
+use token::Token;
 
 fn mock_vk(env: &Env) -> VerificationKey {
     VerificationKey {
@@ -38,7 +38,7 @@ fn mock_vk(env: &Env) -> VerificationKey {
 struct Ctx {
     env: Env,
     admin: Address,
-    treasury: Address,
+    _treasury: Address,
     payroll_id: Address,
 }
 
@@ -56,18 +56,18 @@ fn setup() -> Ctx {
     let treasury = Address::generate(&env);
     let treasury_owner = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll = PayrollClient::new(&env, &payroll_id);
 
     payroll.initialize(
@@ -82,7 +82,7 @@ fn setup() -> Ctx {
     Ctx {
         env,
         admin,
-        treasury,
+        _treasury: treasury,
         payroll_id,
     }
 }
@@ -137,7 +137,7 @@ fn test_stale_approval_reused_rejected() {
     let root = BytesN::from_array(&ctx.env, &[0x11; 32]);
     let meta = BytesN::from_array(&ctx.env, &[0x22; 32]);
 
-    let approval = ctx.payroll().init_draft_approval(
+    let _approval = ctx.payroll().init_draft_approval(
         &ctx.admin,
         &draft_id,
         &10_000i128,
@@ -199,7 +199,8 @@ fn test_amend_draft_rolls_back_partial_approvals() {
     // Verify approvals_rolled_back event was emitted
     let events = ctx.env.events().all();
     let rollback_event = events.events().iter().find(|event| {
-        if let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body {
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        {
             if let Some(val) = body.topics.get(1) {
                 if let Ok(sym) = Symbol::try_from_val(&ctx.env, val) {
                     return sym == Symbol::new(&ctx.env, "approvals_rolled_back");

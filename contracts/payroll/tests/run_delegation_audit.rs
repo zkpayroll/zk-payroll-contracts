@@ -8,6 +8,8 @@
 #![cfg(test)]
 
 mod common;
+#[path = "support/active_employee.rs"]
+mod employee_fixture;
 
 use payroll::{
     check_can_record, clamp_page_size, verify_records, DelegationAuditIssue, DelegationAuditKey,
@@ -22,7 +24,7 @@ use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 fn prepare_run(env: &Env, client: &PayrollClient, marker: u8) -> (u64, Address) {
     let proofs = Vec::from_array(env, [BytesN::from_array(env, &[1; 256])]);
     let amounts = Vec::from_array(env, [100_i128]);
-    let employees = Vec::from_array(env, [Address::generate(env)]);
+    let employees = Vec::from_array(env, [employee_fixture::active_employee(env, client)]);
     let run_id = client.prepare_payroll_run(
         &proofs,
         &amounts,

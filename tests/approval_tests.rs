@@ -6,7 +6,7 @@ use zk_payroll_contracts::{ZkPayrollContract, ZkPayrollContractClient, types::Ap
 #[test]
 fn test_successful_signed_approval_increments_nonce() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ZkPayrollContract);
+    let contract_id = env.register(ZkPayrollContract, ());
     let client = ZkPayrollContractClient::new(&env, &contract_id);
 
     let approver = Address::generate(&env);
@@ -26,7 +26,7 @@ fn test_successful_signed_approval_increments_nonce() {
 #[test]
 fn test_replayed_approval_signature_fails_with_invalid_nonce() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ZkPayrollContract);
+    let contract_id = env.register(ZkPayrollContract, ());
     let client = ZkPayrollContractClient::new(&env, &contract_id);
 
     let approver = Address::generate(&env);

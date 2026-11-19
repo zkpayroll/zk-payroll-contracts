@@ -7,12 +7,12 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
 fn setup(env: &Env) -> (Address, PayrollClient<'_>) {
     env.mock_all_auths();
     let admin = Address::generate(env);
-    let contract_id = env.register_contract(None, payroll::Payroll {});
+    let contract_id = env.register(payroll::Payroll {}, ());
     let client = PayrollClient::new(env, &contract_id);
 
     client.initialize(
         &admin,
-        &env.register_contract(None, Token),
+        &env.register(Token, ()),
         &Address::generate(env),
         &Address::generate(env),
         &Address::generate(env),

@@ -18,7 +18,7 @@ fn event_count(env: &Env) -> u32 {
 fn setup() -> (Env, soroban_sdk::Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     (env, contract_id)
 }
 
@@ -973,7 +973,7 @@ fn test_generate_view_key_has_no_caller_authorization() {
     // Deliberately no mock_all_auths() and no mocked auths whatsoever — this
     // call succeeds even for a completely unauthenticated invocation.
     let env = Env::default();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     let self_appointed_auditor = soroban_sdk::Address::generate(&env);
@@ -1327,7 +1327,7 @@ fn test_authorize_auditor_after_expiry_commitment_verification_fails_and_rolls_b
 
     // NOTE — genuine finding, not a test artifact: `authorize_auditor`
     // (contracts/audit_module/src/lib.rs) calls
-    // `env.events().publish((Symbol::new(env, "AuditAccessExpired"), ...), ...)`
+    // `payroll_events::publish(&env, (Symbol::new(env, "AuditAccessExpired"), ...), ...)`
     // immediately before returning `Err(AuditError::KeyExpired)`. But Soroban
     // rolls back *all* effects of an invocation that returns a typed
     // `contracterror` — the same atomicity guarantee that reverts storage
@@ -1486,7 +1486,6 @@ fn test_prune_expired_view_key_before_expiry_fails() {
     assert!(client.try_get_view_key(&auditor).is_ok());
 }
 
-
 #[test]
 fn delegated_grant_cannot_expand_past_issuance_expiry() {
     let (env, contract_id) = setup();
@@ -1512,7 +1511,7 @@ fn delegated_grant_cannot_expand_past_issuance_expiry() {
         AuditError::GrantExpansionNotAllowed
     );
     assert_eq!(
-        client.get_expiration(&delegate).unwrap(),
+        client.get_expiration(&delegate),
         seq + 500,
         "a rejected extension must preserve the issued expiry"
     );

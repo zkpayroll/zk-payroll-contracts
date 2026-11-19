@@ -25,7 +25,7 @@ fn mock_snarkjs_proof(env: &Env) -> BytesN<256> {
 
 fn setup_initialized_contract(env: &Env) -> (ProofVerifierClient<'_>, soroban_sdk::Address) {
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(env, &contract_id);
     let admin = soroban_sdk::Address::generate(env);
     client.init_verifier_admin(&admin);
@@ -41,7 +41,7 @@ fn setup_initialized_contract(env: &Env) -> (ProofVerifierClient<'_>, soroban_sd
 #[test]
 fn test_initialize_stores_admin() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
     let admin = soroban_sdk::Address::generate(&env);
 
@@ -53,7 +53,7 @@ fn test_initialize_stores_admin() {
 #[should_panic(expected = "Already initialized")]
 fn test_init_admin_twice_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
     let admin = soroban_sdk::Address::generate(&env);
 
@@ -65,7 +65,7 @@ fn test_init_admin_twice_panics() {
 fn test_initialize_verifier_stores_vk() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -87,7 +87,7 @@ fn test_initialize_verifier_stores_vk() {
 fn test_initialize_verifier_twice_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -106,7 +106,7 @@ fn test_initialize_verifier_twice_panics() {
 #[should_panic(expected = "Verifier not initialized")]
 fn test_get_vk_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     client.get_verification_key();
@@ -120,7 +120,7 @@ fn test_get_vk_uninitialized_panics() {
 #[should_panic]
 fn test_unauthorized_initialize_verifier_fails() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -135,7 +135,7 @@ fn test_unauthorized_initialize_verifier_fails() {
 #[should_panic]
 fn test_unauthorized_initialize_verifier_wrong_caller() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -163,7 +163,7 @@ fn test_unauthorized_initialize_verifier_wrong_caller() {
 #[should_panic]
 fn test_unauthorized_initialize_twice_different_caller() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -188,7 +188,7 @@ fn test_unauthorized_initialize_twice_different_caller() {
 fn test_verify_payment_proof_interface() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -214,7 +214,7 @@ fn test_verify_payment_proof_interface() {
 fn test_verify_rejects_wrong_input_length() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -234,7 +234,7 @@ fn test_verify_rejects_wrong_input_length() {
 #[should_panic(expected = "Verifier not initialized")]
 fn test_verify_before_initialization_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -250,7 +250,7 @@ fn test_verify_before_initialization_panics() {
 fn test_verify_rejects_empty_public_inputs() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -271,7 +271,7 @@ fn test_verify_rejects_empty_public_inputs() {
 fn test_verify_rejects_too_many_public_inputs() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -300,7 +300,7 @@ fn test_verify_rejects_too_many_public_inputs() {
 fn test_verify_with_groth16_proof_struct() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -362,7 +362,7 @@ fn test_replay_admin_init_attack() {
     // Attempting to re-initialize admin after contract is live should fail.
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -596,7 +596,7 @@ fn test_verify_rejects_replay_attack_proof() {
 fn test_verify_rejects_proof_with_mismatched_vk() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -694,7 +694,7 @@ fn test_verify_accepts_exact_expected_input_count_for_varying_vk_sizes() {
 
     for ic_len in [2usize, 3, 5, 8] {
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ProofVerifier);
+        let contract_id = env.register(ProofVerifier, ());
         let client = ProofVerifierClient::new(&env, &contract_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -715,7 +715,7 @@ fn test_verify_accepts_exact_expected_input_count_for_varying_vk_sizes() {
 #[test]
 fn test_verify_rejects_one_fewer_than_expected_input_count() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     env.mock_all_auths();
@@ -733,7 +733,7 @@ fn test_verify_rejects_one_fewer_than_expected_input_count() {
 #[test]
 fn test_verify_rejects_one_more_than_expected_input_count() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     env.mock_all_auths();

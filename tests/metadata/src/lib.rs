@@ -24,7 +24,7 @@ fn setup_system(
     Address, // employee
 ) {
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
     let admin = Address::generate(env);
@@ -32,7 +32,7 @@ fn setup_system(
     let treasury_owner = Address::generate(env);
     let employee = Address::generate(env);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token_client = TokenClient::new(env, &token_id);
     token_client.initialize(
         &admin,
@@ -42,11 +42,11 @@ fn setup_system(
     );
     token_client.mint(&treasury, &1_000_000);
 
-    let pause_manager_id = env.register_contract(None, PauseManager);
+    let pause_manager_id = env.register(PauseManager, ());
     let pause_manager_client = PauseManagerClient::new(env, &pause_manager_id);
     pause_manager_client.initialize(&admin);
 
-    let proof_verifier_id = env.register_contract(None, ProofVerifier);
+    let proof_verifier_id = env.register(ProofVerifier, ());
     let proof_verifier_client = proof_verifier::ProofVerifierClient::new(env, &proof_verifier_id);
     proof_verifier_client.init_verifier_admin(&admin);
     let mock_vk = proof_verifier::VerificationKey {
@@ -66,17 +66,17 @@ fn setup_system(
     };
     proof_verifier_client.initialize_verifier(&mock_vk);
 
-    let registry_id = env.register_contract(None, PayrollRegistry);
+    let registry_id = env.register(PayrollRegistry, ());
     let registry_client = PayrollRegistryClient::new(env, &registry_id);
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     commitment_client.init_commitment_admin(&admin);
 
-    let audit_id = env.register_contract(None, AuditModule);
+    let audit_id = env.register(AuditModule, ());
     let audit_client = AuditModuleClient::new(env, &audit_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     payroll_client.initialize(

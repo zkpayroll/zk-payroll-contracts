@@ -44,21 +44,21 @@ fn mock_vk(env: &Env) -> VerificationKey {
 fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Address) {
     env.mock_all_auths();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     let verifier_admin = Address::generate(env);
     verifier_client.init_verifier_admin(&verifier_admin);
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     let commitment_admin = Address::generate(env);
     commitment_client.init_commitment_admin(&commitment_admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token_client = TokenClient::new(env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     let treasury = Address::generate(env);
@@ -434,7 +434,7 @@ fn test_unauthorized_expire_pending_run_rejected() {
 #[test]
 fn test_exact_open_at_boundary() {
     let env = Env::default();
-    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
     let period = Symbol::new(&env, "period_a");
     open_period_with_window(&payroll, &admin, &period);
 
@@ -449,7 +449,7 @@ fn test_exact_open_at_boundary() {
 #[test]
 fn test_one_tick_before_open_at() {
     let env = Env::default();
-    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
     let period = Symbol::new(&env, "period_a");
     open_period_with_window(&payroll, &admin, &period);
 
@@ -464,7 +464,7 @@ fn test_one_tick_before_open_at() {
 #[test]
 fn test_one_tick_after_open_at() {
     let env = Env::default();
-    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
     let period = Symbol::new(&env, "period_a");
     open_period_with_window(&payroll, &admin, &period);
 

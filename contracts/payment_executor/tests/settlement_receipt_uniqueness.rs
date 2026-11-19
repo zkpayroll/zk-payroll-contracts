@@ -37,11 +37,11 @@ fn setup_system<'a>(
 ) {
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
@@ -102,19 +102,16 @@ fn payment_inputs(env: &Env, seed: u8) -> (BytesN<64>, BytesN<128>, BytesN<64>, 
     )
 }
 
-fn one_employee_batch(
-    env: &Env,
-    employee: &Address,
-    amount: i128,
-    seed: u8,
-) -> (
+type EmployeeBatch = (
     Vec<Address>,
     Vec<i128>,
     Vec<BytesN<64>>,
     Vec<BytesN<128>>,
     Vec<BytesN<64>>,
     Vec<BytesN<32>>,
-) {
+);
+
+fn one_employee_batch(env: &Env, employee: &Address, amount: i128, seed: u8) -> EmployeeBatch {
     let (a, b, c, nullifier) = payment_inputs(env, seed);
     (
         Vec::from_array(env, [employee.clone()]),

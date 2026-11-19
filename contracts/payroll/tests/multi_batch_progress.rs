@@ -17,8 +17,8 @@ use token::Token;
 fn setup(env: &Env) -> (Address, PayrollClient<'_>) {
     env.mock_all_auths();
     let admin = Address::generate(env);
-    let token_id = env.register_contract(None, Token);
-    let contract_id = env.register_contract(None, Payroll);
+    let token_id = env.register(Token, ());
+    let contract_id = env.register(Payroll, ());
     let client = PayrollClient::new(env, &contract_id);
 
     client.initialize(

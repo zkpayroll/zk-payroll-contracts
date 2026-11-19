@@ -3,8 +3,6 @@
 //! Enforces threshold and quorum validation for multi-signature payroll run approvals
 //! before execution.
 
-#![no_std]
-
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 /// Error codes for payroll approval quorum validation.

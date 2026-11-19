@@ -487,12 +487,7 @@ pub trait PayrollRegistryTrait {
     /// Record a newly approved payroll revision for a company (#864).
     /// Only the active company admin may record a strictly increasing, non-zero
     /// revision number. The record stores metadata only.
-    fn record_approved_payroll_revision(
-        env: Env,
-        company_id: u64,
-        admin: Address,
-        revision: u64,
-    );
+    fn record_approved_payroll_revision(env: Env, company_id: u64, admin: Address, revision: u64);
 
     /// Return the latest approved payroll revision metadata, if any (#864).
     fn get_latest_approved_revision(
@@ -549,23 +544,6 @@ impl PayrollRegistry {
             updated_version.version,
             updated_by,
         );
-    }
-
-    /// Validates an employer display-name/reference-id style metadata value
-    /// (issue #378): non-empty and within a reasonable length bound.
-    /// `CompanyInfo` does not yet store employer metadata fields, so this is
-    /// a standalone helper ready to be wired into a future
-    /// `set_company_metadata`-style entrypoint rather than a change to the
-    /// existing company record.
-    fn validate_employer_metadata_value(env: &Env, value: &String, field_name: &str) {
-        const MAX_METADATA_LEN: u32 = 256;
-        if value.len() == 0 {
-            panic!("{} must not be empty", field_name);
-        }
-        if value.len() > MAX_METADATA_LEN {
-            panic!("{} exceeds maximum length", field_name);
-        }
-        let _ = env; // reserved for a future emitted validation event
     }
 
     pub fn set_pause_manager(env: Env, admin: Address, pause_manager: Address) {
@@ -951,7 +929,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
                     previous_status as u32,
                     status as u32,
                 );
-                env.events().publish(
+                payroll_events::publish(
+                    &env,
                     (
                         Symbol::new(&env, "EmployeeReactivated"),
                         company_id,
@@ -973,7 +952,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
                     previous_status as u32,
                     status as u32,
                 );
-                env.events().publish(
+                payroll_events::publish(
+                    &env,
                     (
                         Symbol::new(&env, "EmployeeDeactivated"),
                         company_id,
@@ -988,7 +968,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
                 );
             }
             EmployeeStatus::Incomplete => {
-                env.events().publish(
+                payroll_events::publish(
+                    &env,
                     (
                         Symbol::new(&env, "EmployeeStatusUpdated"),
                         company_id,
@@ -1227,7 +1208,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::PendingTreasuryRotation(company_id), &proposal);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "TreasuryRotationProposed"), company_id),
             (current_admin, new_treasury, env.ledger().timestamp()),
         );
@@ -1270,7 +1252,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::PendingTreasuryRotation(company_id));
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "TreasuryRotated"), company_id),
             (old_treasury, new_treasury.clone()),
         );
@@ -1305,7 +1288,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::PendingTreasuryRotation(company_id));
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "TreasuryRotationCancelled"), company_id),
             (current_admin,),
         );
@@ -1370,7 +1354,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::PendingThresholdRotation(company_id), &pending);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "ThresholdRotationProposed"), company_id),
             (new_threshold, effective_after),
         );
@@ -1418,7 +1403,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::PendingThresholdRotation(company_id));
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "ThresholdRotationActivated"), company_id),
             (pending.new_threshold, env.ledger().timestamp()),
         );
@@ -1450,7 +1436,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .remove(&DataKey::PendingThresholdRotation(company_id));
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "ThresholdRotationCancelled"), company_id),
             (pending.new_threshold, env.ledger().timestamp()),
         );
@@ -1504,7 +1491,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             .persistent()
             .set(&DataKey::ApprovalThreshold(company_id), &threshold);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "InitialThresholdConfigured"), company_id),
             (required_approvals, env.ledger().timestamp()),
         );
@@ -1558,7 +1546,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
                 employee.clone(),
             ));
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "PayoutDestinationUpdated"),
                 company_id,
@@ -1650,7 +1639,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
         };
         env.storage().persistent().set(&review_key, &review);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "PayoutDestinationChangeProposed"),
                 company_id,
@@ -1731,7 +1721,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
                     company_id,
                     employee.clone(),
                 ));
-            env.events().publish(
+            payroll_events::publish(
+                &env,
                 (
                     Symbol::new(&env, "PayoutDestinationUpdated"),
                     company_id,
@@ -1746,7 +1737,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
         env.storage().persistent().set(&review_key, &review);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "PayoutDestinationChangeReviewed"),
                 company_id,
@@ -1785,7 +1777,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
         review.resolved_at = env.ledger().timestamp();
         env.storage().persistent().set(&review_key, &review);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "PayoutDestinationChangeCancelled"),
                 company_id,
@@ -1872,7 +1865,8 @@ impl PayrollRegistryTrait for PayrollRegistry {
             &confirmation,
         );
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "PayoutMethodConfirmed"),
                 company_id,
@@ -1930,12 +1924,7 @@ impl PayrollRegistryTrait for PayrollRegistry {
     /// Only the active company admin can update this pointer. The public
     /// record intentionally contains revision metadata only, never payroll
     /// rows, employee identifiers, salary amounts, or commitments.
-    fn record_approved_payroll_revision(
-        env: Env,
-        company_id: u64,
-        admin: Address,
-        revision: u64,
-    ) {
+    fn record_approved_payroll_revision(env: Env, company_id: u64, admin: Address, revision: u64) {
         Self::require_not_paused(&env);
         if revision == 0 {
             panic!("Approved payroll revision must be greater than zero");
@@ -1986,12 +1975,3 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
 #[cfg(test)]
 mod tests;
-
-    /// Issue #827: Prevent approval delegation from outliving its parent role.
-    ///
-    /// Validates delegation status to ensure no stale delegations persist.
-    fn verify_delegation_lifespan(&self, env: &Env, actor: Address) -> bool {
-        // Check that any active delegation is not stale
-        let has_delegation = self.has_active_delegation(env, actor);
-        !has_delegation || self.is_delegation_fresh(env, actor)
-    }

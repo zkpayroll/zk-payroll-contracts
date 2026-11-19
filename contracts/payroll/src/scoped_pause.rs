@@ -114,7 +114,8 @@ pub fn activate_scope_pause(env: &Env, admin: &Address, scope: PauseScope) {
     active.push_back(ordinal);
     save_active_scopes(env, &active);
 
-    env.events().publish(
+    payroll_events::publish(
+        env,
         (
             Symbol::new(env, "payroll"),
             Symbol::new(env, "scope_paused"),
@@ -159,7 +160,8 @@ pub fn clear_scope_pause(env: &Env, admin: &Address, scope: PauseScope) {
     }
     save_active_scopes(env, &updated);
 
-    env.events().publish(
+    payroll_events::publish(
+        env,
         (
             Symbol::new(env, "payroll"),
             Symbol::new(env, "scope_cleared"),

@@ -1,11 +1,11 @@
-/// Issue #485: Payroll run status query helper tests
-///
-/// Tests the concise status view of payroll runs for dashboards and client visibility
-/// without exposing sensitive payroll data.
+//! Issue #485: Payroll run status query helper tests
+//!
+//! Tests the concise status view of payroll runs for dashboards and client visibility
+//! without exposing sensitive payroll data.
 
 #[cfg(test)]
 mod tests {
-    use payroll::{Payroll, PayrollClient, PayrollRunState, PayrollRunStatusKind};
+    use payroll::{Payroll, PayrollClient, PayrollRunStatusKind};
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
@@ -43,27 +43,27 @@ mod tests {
     }
 
     struct TestContext<'a> {
-        env: Env,
-        admin: Address,
-        treasury: Address,
+        _env: Env,
+        _admin: Address,
+        _treasury: Address,
         alice: Address,
         bob: Address,
-        token_client: TokenClient<'a>,
+        _token_client: TokenClient<'a>,
         payroll_client: PayrollClient<'a>,
-        commitment_client: SalaryCommitmentContractClient<'a>,
+        _commitment_client: SalaryCommitmentContractClient<'a>,
         source: Address,
     }
 
-    fn setup(env: &Env) -> TestContext {
+    fn setup(env: &Env) -> TestContext<'_> {
         env.mock_all_auths();
         env.ledger().set_sequence_number(100);
         env.ledger().set_timestamp(1000);
 
-        let token = env.register_contract(None, Token);
+        let token = env.register(Token, ());
         let admin = Address::generate(env);
         let treasury = Address::generate(env);
-        let verifier = env.register_contract(None, ProofVerifier);
-        let commitment_contract = env.register_contract(None, SalaryCommitmentContract);
+        let verifier = env.register(ProofVerifier, ());
+        let commitment_contract = env.register(SalaryCommitmentContract, ());
 
         let token_client = TokenClient::new(env, &token);
         token_client.initialize(
@@ -73,7 +73,7 @@ mod tests {
             &String::from_str(env, "USD Coin"),
         );
 
-        let payroll = env.register_contract(None, Payroll);
+        let payroll = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(env, &payroll);
 
         let verifier_client = ProofVerifierClient::new(env, &verifier);
@@ -116,14 +116,14 @@ mod tests {
         commitment_client.store_commitment(&bob, &bob_commitment);
 
         TestContext {
-            env: env.clone(),
-            admin,
-            treasury,
+            _env: env.clone(),
+            _admin: admin,
+            _treasury: treasury,
             alice,
             bob,
-            token_client,
+            _token_client: token_client,
             payroll_client,
-            commitment_client,
+            _commitment_client: commitment_client,
             source,
         }
     }

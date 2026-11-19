@@ -1,7 +1,7 @@
-/// Issue #476: Contract-level payroll currency validation tests
-///
-/// Tests that the payroll contract enforces a consistent currency configuration,
-/// rejecting unsupported assets and ensuring all payroll runs use the same currency.
+//! Issue #476: Contract-level payroll currency validation tests
+//!
+//! Tests that the payroll contract enforces a consistent currency configuration,
+//! rejecting unsupported assets and ensuring all payroll runs use the same currency.
 
 #[cfg(test)]
 mod tests {
@@ -33,24 +33,24 @@ mod tests {
     }
 
     struct TestContext<'a> {
-        env: Env,
+        _env: Env,
         admin: Address,
-        treasury: Address,
+        _treasury: Address,
         usdc_token: Address,
-        token_client: TokenClient<'a>,
+        _token_client: TokenClient<'a>,
         payroll_client: PayrollClient<'a>,
     }
 
-    fn setup(env: &Env) -> TestContext {
+    fn setup(env: &Env) -> TestContext<'_> {
         env.mock_all_auths();
         env.ledger().set_sequence_number(100);
         env.ledger().set_timestamp(1000);
 
-        let usdc_token = env.register_contract(None, Token);
+        let usdc_token = env.register(Token, ());
         let admin = Address::generate(env);
         let treasury = Address::generate(env);
-        let verifier = env.register_contract(None, ProofVerifier);
-        let commitment_contract = env.register_contract(None, SalaryCommitmentContract);
+        let verifier = env.register(ProofVerifier, ());
+        let commitment_contract = env.register(SalaryCommitmentContract, ());
 
         let token_client = TokenClient::new(env, &usdc_token);
         token_client.initialize(
@@ -60,7 +60,7 @@ mod tests {
             &String::from_str(env, "USD Coin"),
         );
 
-        let payroll = env.register_contract(None, Payroll);
+        let payroll = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(env, &payroll);
 
         let verifier_client = ProofVerifierClient::new(env, &verifier);
@@ -83,11 +83,11 @@ mod tests {
         commitment_client.set_payroll_operator(&payroll);
 
         TestContext {
-            env: env.clone(),
+            _env: env.clone(),
             admin,
-            treasury,
+            _treasury: treasury,
             usdc_token,
-            token_client,
+            _token_client: token_client,
             payroll_client,
         }
     }

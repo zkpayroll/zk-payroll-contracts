@@ -26,7 +26,6 @@
 //! cargo test -p audit_revocation_event_tests
 //! ```
 
-use soroban_sdk::testutils::Events;
 use soroban_sdk::xdr::{ContractEvent, ContractEventBody};
 use soroban_sdk::{Env, TryFromVal, Val, Vec};
 
@@ -75,7 +74,7 @@ mod tests {
     fn setup() -> (Env, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AuditModule);
+        let contract_id = env.register(AuditModule, ());
         (env, contract_id)
     }
 

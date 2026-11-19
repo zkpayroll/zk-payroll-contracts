@@ -51,21 +51,21 @@ fn setup_test_context() -> TestContext<'static> {
     let env = Env::default();
     env.mock_all_auths();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     let verifier_admin = Address::generate(&env);
     verifier_client.init_verifier_admin(&verifier_admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
     let commitment_admin = Address::generate(&env);
     commitment_client.init_commitment_admin(&commitment_admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token_client = TokenClient::new(&env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     let treasury = Address::generate(&env);
@@ -86,7 +86,7 @@ fn setup_test_context() -> TestContext<'static> {
 
     commitment_client.set_payroll_operator(&payroll_id);
 
-    let pm_id = env.register_contract(None, PauseManager);
+    let pm_id = env.register(PauseManager, ());
     let pm_client = PauseManagerClient::new(&env, &pm_id);
     pm_client.initialize(&operator);
     payroll_client.set_pause_manager(&pm_id);

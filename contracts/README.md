@@ -133,6 +133,7 @@ cargo test --workspace
 |------|---------|----------------|
 | Unit / contract | `cargo test -p payroll_registry` | In-memory Soroban host, mocked auth |
 | Event schema snapshots | `cargo test -p event_schema_snapshots` | Stable event topic/payload shapes |
+| Cancellation / treasury release | `cargo test --locked -p integration_tests --test cancellation_treasury_release` | [Cleanup, release authorization, isolation, and boundaries](../docs/testing/cancellation-treasury-release.md) using in-memory contracts |
 | Workspace | `cargo test --workspace` | All crates including migration and access-control suites |
 
 Most contract unit tests call `env.mock_all_auths()` — they do **not** require

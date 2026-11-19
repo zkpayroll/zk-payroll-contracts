@@ -22,7 +22,7 @@ use treasury_isolation::{TreasuryIsolationContract, TreasuryIsolationContractCli
 fn setup() -> (Env, Address, TreasuryIsolationContractClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, TreasuryIsolationContract);
+    let contract_id = env.register(TreasuryIsolationContract, ());
     let admin = Address::generate(&env);
     let client = TreasuryIsolationContractClient::new(&env, &contract_id);
     client.initialize(&admin);

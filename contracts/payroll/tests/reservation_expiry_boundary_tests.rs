@@ -33,19 +33,19 @@ fn mock_vk(env: &Env) -> VerificationKey {
 fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address) {
     env.mock_all_auths();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     verifier_client.init_verifier_admin(&Address::generate(env));
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     commitment_client.init_commitment_admin(&Address::generate(env));
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token_client = TokenClient::new(env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     let treasury = Address::generate(env);
@@ -153,7 +153,7 @@ fn test_reservation_mid_lifetime_fails_release() {
     payroll.set_reservation_expiry_policy(&admin, &token_id, &5000i128, &expiry_offset);
 
     let reservation = payroll.get_reservation_expiry(&token_id).unwrap();
-    let expires_at = reservation.expires_at;
+    let _expires_at = reservation.expires_at;
 
     // Midway through reservation lifetime - release should fail
     let mid_lifetime = initial_timestamp + expiry_offset / 2;
@@ -230,7 +230,7 @@ fn test_multiple_reservations_with_different_expiry_times() {
     let expires_at1 = reservation1.expires_at;
 
     // Create second token
-    let token_id2 = env.register_contract(None, Token);
+    let token_id2 = env.register(Token, ());
     let token_client2 = TokenClient::new(&env, &token_id2);
     let treasury2 = Address::generate(&env);
     token_client2.mint(&treasury2, &1_000_000i128);

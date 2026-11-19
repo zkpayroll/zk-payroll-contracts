@@ -498,7 +498,7 @@ mod tests {
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RetentionManagerContract);
+        let contract_id = env.register(RetentionManagerContract, ());
         let admin = Address::generate(&env);
         let client = RetentionManagerContractClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -675,7 +675,7 @@ mod tests {
         client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &1u64);
         client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
 
-        env.ledger().with_mut(|l| l.timestamp = l.timestamp + 2);
+        env.ledger().with_mut(|l| l.timestamp += 2);
 
         // Should be eligible because custom window (1s) has passed
         assert!(client.is_eligible_for_pruning(

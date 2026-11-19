@@ -2,8 +2,6 @@
 //!
 //! Ensures employees confirm their payment destinations before payroll execution.
 
-#![no_std]
-
 use soroban_sdk::{contracttype, Address, Env, String};
 
 /// Error codes for payment destination confirmation.
@@ -83,7 +81,7 @@ pub fn request_destination_confirmation(
         requested_at: now,
         expires_at: now + expiry,
         confirmed_at: 0,
-        note: String::from_str(&env, ""),
+        note: String::from_str(env, ""),
     })
 }
 
@@ -152,7 +150,7 @@ pub fn is_confirmation_expired(env: &Env, confirmation: &DestinationConfirmation
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
-    use soroban_sdk::{Env, String};
+    use soroban_sdk::Env;
 
     #[test]
     fn test_request_confirmation() {

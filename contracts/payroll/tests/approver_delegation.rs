@@ -2,12 +2,12 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, String};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String};
 
 use payroll::{
     approver_delegation::{
         delegate_approver, get_active_delegation, is_delegation_active, resolve_effective_approver,
-        revoke_delegation, DelegationKey, MAX_DELEGATION_DURATION_SECONDS,
+        revoke_delegation,
     },
     DataKey,
 };
@@ -26,7 +26,7 @@ fn register_reviewer(e: &Env, reviewer: &Address) {
 fn test_delegate_approver_success() {
     let e = Env::default();
     e.mock_all_auths();
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         let delegator = Address::generate(&e);
         let delegate = Address::generate(&e);
@@ -59,7 +59,7 @@ fn test_delegate_approver_success() {
 fn test_delegate_to_self_fails() {
     let e = Env::default();
     e.mock_all_auths();
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         let delegator = Address::generate(&e);
         register_reviewer(&e, &delegator);
@@ -78,7 +78,7 @@ fn test_delegate_to_self_fails() {
 fn test_expired_delegation_not_active() {
     let e = Env::default();
     e.mock_all_auths();
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         let delegator = Address::generate(&e);
         let delegate = Address::generate(&e);
@@ -114,7 +114,7 @@ fn test_revoke_delegation() {
     e.mock_all_auths();
     let delegator = Address::generate(&e);
     let delegate = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         register_reviewer(&e, &delegator);
         register_reviewer(&e, &delegate);
@@ -141,7 +141,7 @@ fn test_revoke_delegation() {
 fn test_delegate_non_reviewer_fails() {
     let e = Env::default();
     e.mock_all_auths();
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         let delegator = Address::generate(&e);
         let not_a_reviewer = Address::generate(&e);
@@ -165,7 +165,7 @@ fn test_delegate_non_reviewer_fails() {
 fn test_zero_duration_fails() {
     let e = Env::default();
     e.mock_all_auths();
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         let delegator = Address::generate(&e);
         let delegate = Address::generate(&e);
@@ -180,7 +180,7 @@ fn test_zero_duration_fails() {
 fn test_resolve_effective_approver_with_active_delegation() {
     let e = Env::default();
     e.mock_all_auths();
-    let __cid = e.register_contract(None, payroll::Payroll);
+    let __cid = e.register(payroll::Payroll, ());
     e.as_contract(&__cid, || {
         let delegator = Address::generate(&e);
         let delegate = Address::generate(&e);

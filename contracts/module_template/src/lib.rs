@@ -129,7 +129,7 @@ mod tests {
     fn test_initialize_sets_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ModuleTemplate);
+        let contract_id = env.register(ModuleTemplate, ());
         let client = ModuleTemplateClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -141,7 +141,7 @@ mod tests {
     fn test_double_initialize_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ModuleTemplate);
+        let contract_id = env.register(ModuleTemplate, ());
         let client = ModuleTemplateClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn test_get_admin_before_init_returns_error() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, ModuleTemplate);
+        let contract_id = env.register(ModuleTemplate, ());
         let client = ModuleTemplateClient::new(&env, &contract_id);
 
         let result = client.try_get_admin();

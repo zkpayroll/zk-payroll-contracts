@@ -50,11 +50,11 @@ fn setup_system<'a>(
 ) {
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
@@ -112,7 +112,7 @@ fn setup_system<'a>(
 #[test]
 fn test_authorized_admin_can_reopen_closed_period() {
     let env = Env::default();
-    let (executor, registry, commitment_client, _token, company_id, admin, _treasury) =
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
         setup_system(&env);
 
     // 1. Create and close period 1
@@ -239,7 +239,7 @@ fn test_reopen_period_while_paused_fails() {
     executor.create_period(&company_id);
     executor.close_period(&company_id, &1);
 
-    let pm_id = env.register_contract(None, PauseManager);
+    let pm_id = env.register(PauseManager, ());
     let pm = PauseManagerClient::new(&env, &pm_id);
     let pm_admin = Address::generate(&env);
     pm.initialize(&pm_admin);

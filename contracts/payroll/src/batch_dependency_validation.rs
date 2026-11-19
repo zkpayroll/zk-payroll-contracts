@@ -2,9 +2,7 @@
 //!
 //! Validates that batch execution steps have proper dependencies and ordering.
 
-#![no_std]
-
-use soroban_sdk::{contracttype, Env, Vec};
+use soroban_sdk::{contracttype, Vec};
 
 /// Error codes for batch dependency validation.
 #[contracttype]
@@ -72,10 +70,10 @@ pub struct BatchValidationResult {
 pub fn validate_no_circular_dependencies(
     steps: &Vec<BatchStep>,
 ) -> Result<(), BatchDependencyError> {
-    let n = steps.len() as u32;
+    let n = steps.len();
 
     // visited: 0 = unvisited, 1 = visiting, 2 = visited
-    let mut visited: Vec<u32> = Vec::new(&steps.env());
+    let mut visited: Vec<u32> = Vec::new(steps.env());
     for _ in 0..n {
         visited.push_back(0);
     }
@@ -102,7 +100,7 @@ fn check_cycle(
 
     for dep_idx in step.dependencies.iter() {
         let dep = dep_idx;
-        if dep >= steps.len() as u32 {
+        if dep >= steps.len() {
             return Err(BatchDependencyError::DependencyOutOfBounds);
         }
 
@@ -121,7 +119,7 @@ fn check_cycle(
 
 /// Validate that all dependencies are within bounds.
 pub fn validate_dependency_bounds(steps: &Vec<BatchStep>) -> Result<(), BatchDependencyError> {
-    let n = steps.len() as u32;
+    let n = steps.len();
 
     for step in steps.iter() {
         for dep in step.dependencies.iter() {
@@ -175,43 +173,43 @@ pub fn validate_batch(
 
     let mut dependency_count = 0u32;
     for step in steps.iter() {
-        dependency_count += step.dependencies.len() as u32;
+        dependency_count += step.dependencies.len();
     }
 
     Ok(BatchValidationResult {
         is_valid: true,
-        step_count: steps.len() as u32,
+        step_count: steps.len(),
         dependency_count,
     })
 }
 
 /// Get the execution order using topological sort.
 pub fn get_execution_order(steps: &Vec<BatchStep>) -> Result<Vec<u32>, BatchDependencyError> {
-    let n = steps.len() as u32;
+    let n = steps.len();
     let env = steps.env();
 
     // Calculate in-degrees
-    let mut in_degree: Vec<u32> = Vec::new(&env);
+    let mut in_degree: Vec<u32> = Vec::new(env);
     for _ in 0..n {
         in_degree.push_back(0);
     }
 
     for step in steps.iter() {
-        for dep in step.dependencies.iter() {
+        for _dep in step.dependencies.iter() {
             let current = in_degree.get(step.id).unwrap();
             in_degree.set(step.id, current + 1);
         }
     }
 
     // Find nodes with in-degree 0
-    let mut queue: Vec<u32> = Vec::new(&env);
+    let mut queue: Vec<u32> = Vec::new(env);
     for i in 0..n {
         if in_degree.get(i).unwrap() == 0 {
             queue.push_back(i);
         }
     }
 
-    let mut order: Vec<u32> = Vec::new(&env);
+    let mut order: Vec<u32> = Vec::new(env);
 
     while !queue.is_empty() {
         let node = queue.pop_front().unwrap();
@@ -219,7 +217,7 @@ pub fn get_execution_order(steps: &Vec<BatchStep>) -> Result<Vec<u32>, BatchDepe
 
         // Reduce in-degree for dependents
         for step in steps.iter() {
-            if step.dependencies.contains(&node) {
+            if step.dependencies.contains(node) {
                 let current = in_degree.get(step.id).unwrap();
                 in_degree.set(step.id, current - 1);
                 if current - 1 == 0 {
@@ -229,7 +227,7 @@ pub fn get_execution_order(steps: &Vec<BatchStep>) -> Result<Vec<u32>, BatchDepe
         }
     }
 
-    if order.len() as u32 != n {
+    if order.len() != n {
         return Err(BatchDependencyError::CircularDependency);
     }
 
@@ -245,7 +243,7 @@ mod tests {
         let mut steps = Vec::new(env);
 
         // Step 0: no dependencies
-        let mut deps0 = Vec::new(env);
+        let deps0 = Vec::new(env);
         steps.push_back(BatchStep {
             id: 0,
             dependencies: deps0,
@@ -254,7 +252,7 @@ mod tests {
         });
 
         // Step 1: depends on 0
-        let mut deps1 = Vec::new(&env);
+        let mut deps1 = Vec::new(env);
         deps1.push_back(0);
         steps.push_back(BatchStep {
             id: 1,

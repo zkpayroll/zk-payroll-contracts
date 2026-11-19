@@ -226,7 +226,9 @@ mod tests {
     fn check_access_returns_denied_when_no_admin_configured() {
         let env = Env::default();
         let caller = Address::generate(&env);
-        let result = check_access(&env, &caller, HistoricDataScope::Admin);
+        let result = env.as_contract(&env.register(crate::Payroll, ()), || {
+            check_access(&env, &caller, HistoricDataScope::Admin)
+        });
         assert!(!result.allowed);
         assert_eq!(
             result.denial_reason,
@@ -238,7 +240,9 @@ mod tests {
     fn check_access_returns_denied_for_audit_authority_when_not_registered() {
         let env = Env::default();
         let caller = Address::generate(&env);
-        let result = check_access(&env, &caller, HistoricDataScope::AuditAuthority);
+        let result = env.as_contract(&env.register(crate::Payroll, ()), || {
+            check_access(&env, &caller, HistoricDataScope::AuditAuthority)
+        });
         assert!(!result.allowed);
     }
 
@@ -267,7 +271,9 @@ mod tests {
             page_size: 10,
             scope: HistoricDataScope::Admin,
         };
-        retrieve_run_ids(&env, &caller, query);
+        env.as_contract(&env.register(crate::Payroll, ()), || {
+            retrieve_run_ids(&env, &caller, query);
+        });
     }
 
     #[test]

@@ -165,7 +165,7 @@ pub fn open_overpayment_review(env: &Env, admin: &Address, run_id: u64) -> u64 {
         .persistent()
         .set(&ReviewDataKey::OverpaymentReview(run_id), &review);
 
-    env.events().publish(
+    payroll_events::publish(&env,
         (
             symbol_short!("payroll"),
             Symbol::new(env, "review_opened"),
@@ -243,7 +243,7 @@ pub fn resolve_overpayment_review(
 
     env.storage().persistent().set(&key, &review);
 
-    env.events().publish(
+    payroll_events::publish(&env,
         (
             symbol_short!("payroll"),
             Symbol::new(env, "review_resolved"),
@@ -290,7 +290,7 @@ pub fn has_open_review(env: &Env, run_id: u64) -> bool {
 /// open review exists.  Separated here so callers can trigger the emit before
 /// they panic, giving off-chain indexers a richer audit trail.
 pub fn emit_archival_blocked(env: &Env, run_id: u64, review_id: u64) {
-    env.events().publish(
+    payroll_events::publish(&env,
         (
             symbol_short!("payroll"),
             Symbol::new(env, "archival_blocked"),
