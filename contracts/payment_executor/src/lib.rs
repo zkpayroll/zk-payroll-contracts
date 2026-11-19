@@ -100,6 +100,12 @@ pub enum PaymentError {
     BatchTooLarge = 18,
     /// The payroll period is already open (cannot reopen an open period) (issue #484).
     PeriodAlreadyOpen = 19,
+    /// Recording the payout would overflow an aggregate counter: the company's
+    /// cumulative `TotalPaid` (`i128`) or the period's `payment_count` (`u32`)
+    /// (issue #814). Raised before any token transfer or storage write, so a
+    /// rejected payment or batch leaves state unchanged. Carries no employee
+    /// address or salary amount.
+    Overflow = 20,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -884,6 +890,20 @@ impl PaymentExecutor {
         let (net_amount, income_tax, social_tax, withholding_cfg) =
             Self::validate_and_compute_withholding(&env, company_id, amount)?;
 
+        // Issue #814: compute every aggregate counter with checked arithmetic
+        // before any token transfer or storage write. An overflow is returned
+        // as a typed `PaymentError::Overflow` instead of trapping the host,
+        // and nothing has been moved or written when it is raised.
+        let total_key = DataKey::TotalPaid(company_id);
+        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+        let new_total = current_total
+            .checked_add(amount)
+            .ok_or(PaymentError::Overflow)?;
+        let new_payment_count = period_record
+            .payment_count
+            .checked_add(1)
+            .ok_or(PaymentError::Overflow)?;
+
         // Execute token transfers: net salary to employee, withheld amounts to
         // their configured recipients.
         let token_client = token::Client::new(&env, &addresses.token);
@@ -916,23 +936,13 @@ impl PaymentExecutor {
         env.storage().persistent().set(&payment_key, &record);
         env.storage().persistent().set(&nullifier_key, &true);
 
-        // Increment period payment count
-        let period_key = DataKey::Period(company_id, period);
-        if let Some(mut period_struct) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, PayrollPeriod>(&period_key)
-        {
-            period_struct.payment_count += 1;
-            env.storage().persistent().set(&period_key, &period_struct);
-        }
+        // Increment period payment count (overflow-checked above, issue #814).
+        let mut period_struct = period_record;
+        period_struct.payment_count = new_payment_count;
+        env.storage().persistent().set(&period_key, &period_struct);
 
-        // Update total paid
-        let total_key = DataKey::TotalPaid(company_id);
-        let current_total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_key, &(current_total + amount));
+        // Update total paid (overflow-checked above, issue #814).
+        env.storage().persistent().set(&total_key, &new_total);
 
         // Emit PayrollProcessed event so off-chain indexers can reconcile payments.
         payroll_events::emit_executor_payment_processed(&env, company_id, employee, amount, period);
@@ -982,6 +992,10 @@ impl PaymentExecutor {
             return Err(PaymentError::BatchTooLarge);
         }
 
+        // Issue #814: reject a batch whose aggregate would overflow before any
+        // proof is verified, token moved, or state written.
+        Self::check_batch_aggregates(&env, company_id, period, &amounts)?;
+
         let mut records = soroban_sdk::Vec::new(&env);
 
         for i in 0..count {
@@ -1000,6 +1014,47 @@ impl PaymentExecutor {
         }
 
         Ok(records)
+    }
+
+    /// Pre-flight aggregate check for batch execution (issue #814).
+    ///
+    /// Projects the company's cumulative `TotalPaid` after every amount in the
+    /// batch, and the period's `payment_count` after every row, using checked
+    /// arithmetic. Returns `PaymentError::Overflow` if either would overflow.
+    ///
+    /// `execute_payment` still performs its own per-payment checks, so this is
+    /// a fail-fast guard rather than the only line of defense. It deliberately
+    /// leaves every other validation (period state, negative amounts, proofs)
+    /// to `execute_payment` so existing error precedence is unchanged.
+    fn check_batch_aggregates(
+        env: &Env,
+        company_id: u64,
+        period: u32,
+        amounts: &soroban_sdk::Vec<i128>,
+    ) -> Result<(), PaymentError> {
+        let mut projected_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalPaid(company_id))
+            .unwrap_or(0);
+        for amount in amounts.iter() {
+            projected_total = projected_total
+                .checked_add(amount)
+                .ok_or(PaymentError::Overflow)?;
+        }
+
+        if let Some(period_record) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayrollPeriod>(&DataKey::Period(company_id, period))
+        {
+            period_record
+                .payment_count
+                .checked_add(amounts.len())
+                .ok_or(PaymentError::Overflow)?;
+        }
+
+        Ok(())
     }
 
     /// Execute a batch payroll run tied to a unique settlement receipt.
