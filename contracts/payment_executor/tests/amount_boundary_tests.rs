@@ -1,5 +1,5 @@
 use ::token::{Token, TokenClient};
-use payment_executor::{ContractAddresses, PaymentExecutor, PaymentExecutorClient};
+use payment_executor::{ContractAddresses, PaymentError, PaymentExecutor, PaymentExecutorClient};
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::SalaryCommitmentContract;
@@ -192,14 +192,14 @@ fn test_maximum_i128_amount_payment_succeeds() {
     assert_eq!(executor.get_total_paid(&company_id), i128::MAX);
 }
 
-/// Overflow-prone: `get_total_paid` accumulates every payment for a company
-/// via plain `i128` addition with no upper bound of its own. A treasury can
-/// be fully drained and re-minted, so the running total can legitimately be
-/// pushed past `i128::MAX` across two payments — this must panic on
-/// overflow rather than silently wrap to a negative "total paid".
+/// Overflow-prone: `get_total_paid` accumulates every payment for a company.
+/// A treasury can be fully drained and re-minted, so the running total can
+/// legitimately be pushed past `i128::MAX` across two payments. Since issue
+/// #814 this is rejected with the typed `PaymentError::Overflow` (instead of
+/// a host trap or a silent wrap), and the rejected payment moves no funds and
+/// writes no state.
 #[test]
-#[should_panic(expected = "overflow")]
-fn test_total_paid_overflow_panics_after_treasury_replenishment() {
+fn test_total_paid_overflow_returns_typed_error_after_treasury_replenishment() {
     let env = Env::default();
     let (executor, registry, commitment_client, token, company_id, treasury) = setup_system(&env);
 
@@ -226,7 +226,7 @@ fn test_total_paid_overflow_panics_after_treasury_replenishment() {
     token.mint(&treasury, &100i128);
     executor.close_period(&company_id, &1);
     executor.create_period(&company_id);
-    executor.execute_payment(
+    let result = executor.try_execute_payment(
         &company_id,
         &employee,
         &100i128,
@@ -235,6 +235,17 @@ fn test_total_paid_overflow_panics_after_treasury_replenishment() {
         &BytesN::from_array(&env, &[7u8; 64]),
         &BytesN::from_array(&env, &[8u8; 32]),
         &2,
+    );
+    assert_eq!(result.unwrap_err().unwrap(), PaymentError::Overflow);
+
+    // Nothing moved and nothing was recorded for the rejected payment.
+    assert_eq!(executor.get_total_paid(&company_id), i128::MAX);
+    assert_eq!(token.balance(&treasury), 100i128);
+    assert_eq!(token.balance(&employee), i128::MAX);
+    assert!(!executor.is_paid(&employee, &2));
+    assert_eq!(
+        executor.get_period(&company_id, &2).unwrap().payment_count,
+        0
     );
 }
 
