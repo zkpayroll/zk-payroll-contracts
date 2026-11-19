@@ -516,7 +516,7 @@ impl SalaryCommitmentContract {
         let mut out_buf = [0u8; 256];
         for i in 0..trimmed_len {
             let b = slice[start + i];
-            if b < 32 || b > 126 {
+            if !(32..=126).contains(&b) {
                 panic!("Employee identifier contains invalid characters: must be printable ASCII");
             }
             out_buf[i] = if b.is_ascii_lowercase() { b - 32 } else { b };
@@ -569,7 +569,7 @@ impl SalaryCommitmentContract {
         let mut out_buf = [0u8; 256];
         for i in 0..trimmed_len {
             let b = slice[start + i];
-            if b < 32 || b > 126 {
+            if !(32..=126).contains(&b) {
                 return None;
             }
             out_buf[i] = if b.is_ascii_lowercase() { b - 32 } else { b };
@@ -997,9 +997,7 @@ mod tests {
         let Some(event) = recorded.events().get(index) else {
             panic!("no contract event recorded at index {index}");
         };
-        let xdr::ContractEventBody::V0(body) = &event.body else {
-            panic!("expected a v0 contract event body");
-        };
+        let xdr::ContractEventBody::V0(body) = &event.body;
         let mut topics = soroban_sdk::Vec::new(env);
         for topic in body.topics.iter() {
             topics.push_back(Val::try_from_val(env, topic).expect("invalid event topic"));
@@ -1018,16 +1016,14 @@ mod tests {
         let Some(event) = recorded.events().get(index) else {
             panic!("no contract event recorded at index {index}");
         };
-        let xdr::ContractEventBody::V0(body) = &event.body else {
-            panic!("expected a v0 contract event body");
-        };
+        let xdr::ContractEventBody::V0(body) = &event.body;
         Val::try_from_val(env, &body.data).expect("invalid event data")
     }
 
     fn setup_with_admin() -> (Env, soroban_sdk::Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
@@ -1260,7 +1256,7 @@ mod tests {
     #[should_panic]
     fn test_unauthorized_store_commitment_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1282,7 +1278,7 @@ mod tests {
     fn test_payroll_operator_cannot_store_commitment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1319,7 +1315,7 @@ mod tests {
     fn test_admin_cannot_record_nullifier_once_operator_delegated() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1462,7 +1458,7 @@ mod tests {
     fn test_stranger_cannot_record_nullifier_when_operator_set() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1497,7 +1493,7 @@ mod tests {
     fn test_treasury_role_cannot_store_commitment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
@@ -1527,7 +1523,7 @@ mod tests {
     fn test_treasury_role_cannot_set_payroll_operator() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
@@ -1553,7 +1549,7 @@ mod tests {
     fn test_auditor_role_cannot_record_nullifier() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
@@ -1580,7 +1576,7 @@ mod tests {
     fn test_auditor_role_cannot_set_payroll_operator() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.init_commitment_admin(&admin);
@@ -1833,7 +1829,7 @@ mod tests {
     fn test_unauthorized_set_reference_id_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2025,7 +2021,10 @@ mod tests {
         assert!(client
             .try_store_commitment(&collision_employee, &last_commitment)
             .is_err());
-        assert_eq!(client.get_commitment(&last_employee).commitment, last_commitment);
+        assert_eq!(
+            client.get_commitment(&last_employee).commitment,
+            last_commitment
+        );
 
         // Archived values remain reserved after rotation; uniqueness spans the
         // complete commitment history, not only active records.

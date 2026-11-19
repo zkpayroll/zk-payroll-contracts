@@ -16,7 +16,7 @@ use soroban_sdk::{Address, BytesN, Env};
 fn setup(env: &Env) -> (PayrollRegistryClient<'_>, u64, Address) {
     env.mock_all_auths();
     let admin = Address::generate(env);
-    let contract_id = env.register_contract(None, payroll_registry::PayrollRegistry);
+    let contract_id = env.register(payroll_registry::PayrollRegistry, ());
     let client = PayrollRegistryClient::new(env, &contract_id);
 
     let treasury = Address::generate(env);
@@ -30,7 +30,7 @@ fn setup(env: &Env) -> (PayrollRegistryClient<'_>, u64, Address) {
 #[test]
 fn test_activate_employee_with_commitment() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[1u8; 32]);
@@ -48,7 +48,7 @@ fn test_activate_employee_with_commitment() {
 #[test]
 fn test_reactivate_suspended_employee_with_commitment() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[2u8; 32]);
@@ -104,7 +104,7 @@ fn test_activate_employee_without_commitment() {
 #[test]
 fn test_activate_already_active_employee_is_idempotent() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[4u8; 32]);
@@ -130,7 +130,7 @@ fn test_activate_already_active_employee_is_idempotent() {
 #[test]
 fn test_activate_then_suspend_then_reactivate_cycle() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[5u8; 32]);
@@ -156,7 +156,7 @@ fn test_activate_then_suspend_then_reactivate_cycle() {
 #[test]
 fn test_multiple_employees_activation_independent() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let emp1 = Address::generate(&env);
     let emp2 = Address::generate(&env);
@@ -196,7 +196,7 @@ fn test_multiple_employees_activation_independent() {
 #[should_panic(expected = "Employee not found")]
 fn test_activate_nonexistent_employee() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let nonexistent = Address::generate(&env);
 
@@ -207,7 +207,7 @@ fn test_activate_nonexistent_employee() {
 #[test]
 fn test_activate_different_company_employee() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let other_admin = Address::generate(&env);
     let other_treasury = Address::generate(&env);
@@ -228,7 +228,7 @@ fn test_activate_different_company_employee() {
 #[should_panic(expected = "Offboarded employee status cannot be changed")]
 fn test_cannot_activate_offboarded_employee() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[9u8; 32]);
@@ -244,7 +244,7 @@ fn test_cannot_activate_offboarded_employee() {
 #[test]
 fn test_activation_prerequisites_error_message_privacy() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[10u8; 32]);
@@ -266,7 +266,7 @@ fn test_activation_prerequisites_error_message_privacy() {
 #[test]
 fn test_activation_status_transitions_valid() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[11u8; 32]);
@@ -299,7 +299,7 @@ fn test_activation_status_transitions_valid() {
 #[test]
 fn test_activation_only_validates_on_transition_to_active() {
     let env = Env::default();
-    let (client, company_id, admin) = setup(&env);
+    let (client, company_id, _admin) = setup(&env);
 
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[12u8; 32]);

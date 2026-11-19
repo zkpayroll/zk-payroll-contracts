@@ -52,7 +52,7 @@ fn a_non_admin_address_is_not_authorized() {
 #[test]
 fn uninitialized_contract_reports_not_initialized() {
     let env = Env::default();
-    let payroll_id = env.register_contract(None, payroll::Payroll);
+    let payroll_id = env.register(payroll::Payroll, ());
     let client = payroll::PayrollClient::new(&env, &payroll_id);
     let anyone = Address::generate(&env);
 
@@ -101,7 +101,7 @@ fn validate_execution_initiator_rejects_a_non_admin() {
 #[should_panic(expected = "Contract not initialized")]
 fn validate_execution_initiator_requires_initialization() {
     let env = Env::default();
-    let payroll_id = env.register_contract(None, payroll::Payroll);
+    let payroll_id = env.register(payroll::Payroll, ());
     let client = payroll::PayrollClient::new(&env, &payroll_id);
     let anyone = Address::generate(&env);
 

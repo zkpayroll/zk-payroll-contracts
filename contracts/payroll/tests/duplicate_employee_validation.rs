@@ -1,17 +1,17 @@
-/// Issue #482: Duplicate employee validation tests
-///
-/// Ensures that the same employee cannot be paid multiple times in a single payroll run,
-/// preventing accidental overpayment due to duplicate entries.
+//! Issue #482: Duplicate employee validation tests
+//!
+//! Ensures that the same employee cannot be paid multiple times in a single payroll run,
+//! preventing accidental overpayment due to duplicate entries.
 
 #[cfg(test)]
 mod tests {
-    use payroll::{Payroll, PayrollClient, PayrollRunState};
-    use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
+    use payroll::{Payroll, PayrollClient};
+
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger as _},
-        Address, BytesN, Env, String, Symbol, Vec,
+        Address, BytesN, Env, String, Vec,
     };
     use token::{Token, TokenClient};
 
@@ -44,9 +44,9 @@ mod tests {
     }
 
     struct TestContext<'a> {
-        env: Env,
-        admin: Address,
-        treasury: Address,
+        _env: Env,
+        _admin: Address,
+        _treasury: Address,
         alice: Address,
         bob: Address,
         token_client: TokenClient<'a>,
@@ -55,16 +55,16 @@ mod tests {
         source: Address,
     }
 
-    fn setup(env: &Env) -> TestContext {
+    fn setup(env: &Env) -> TestContext<'_> {
         env.mock_all_auths();
         env.ledger().set_sequence_number(100);
         env.ledger().set_timestamp(1000);
 
-        let token = env.register_contract(None, Token);
+        let token = env.register(Token, ());
         let admin = Address::generate(env);
         let treasury = Address::generate(env);
-        let verifier = env.register_contract(None, ProofVerifier);
-        let commitment_contract = env.register_contract(None, SalaryCommitmentContract);
+        let verifier = env.register(ProofVerifier, ());
+        let commitment_contract = env.register(SalaryCommitmentContract, ());
 
         let token_client = TokenClient::new(env, &token);
         token_client.initialize(
@@ -74,7 +74,7 @@ mod tests {
             &String::from_str(env, "USD Coin"),
         );
 
-        let payroll = env.register_contract(None, Payroll);
+        let payroll = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(env, &payroll);
 
         let verifier_client = ProofVerifierClient::new(env, &verifier);
@@ -117,9 +117,9 @@ mod tests {
         commitment_client.store_commitment(&bob, &bob_commitment);
 
         TestContext {
-            env: env.clone(),
-            admin,
-            treasury,
+            _env: env.clone(),
+            _admin: admin,
+            _treasury: treasury,
             alice,
             bob,
             token_client,

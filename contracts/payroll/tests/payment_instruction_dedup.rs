@@ -22,10 +22,6 @@ fn mock_vk(env: &Env) -> proof_verifier::VerificationKey {
     }
 }
 
-fn mock_proof(env: &Env) -> BytesN<256> {
-    BytesN::from_array(env, &[0u8; 256])
-}
-
 struct Ctx {
     env: Env,
     payroll_id: Address,
@@ -43,18 +39,18 @@ fn setup() -> Ctx {
 
     let admin = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, proof_verifier::ProofVerifier);
+    let verifier_id = env.register(proof_verifier::ProofVerifier, ());
     let verifier_client = proof_verifier::ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, salary_commitment::SalaryCommitmentContract);
+    let commitment_id = env.register(salary_commitment::SalaryCommitmentContract, ());
     let commitment = salary_commitment::SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, token::Token);
+    let token_id = env.register(token::Token, ());
 
-    let payroll_id = env.register_contract(None, payroll::Payroll);
+    let payroll_id = env.register(payroll::Payroll, ());
     let payroll = PayrollClient::new(&env, &payroll_id);
 
     payroll.initialize(
@@ -67,10 +63,7 @@ fn setup() -> Ctx {
     );
     commitment.set_payroll_operator(&payroll_id);
 
-    Ctx {
-        env,
-        payroll_id,
-    }
+    Ctx { env, payroll_id }
 }
 
 // ── Duplicate payout instruction detection ──────────────────────────────────
@@ -81,7 +74,10 @@ fn setup() -> Ctx {
 fn record_payment_instruction_success_path() {
     let ctx = setup();
 
-    let first = ctx.payroll().try_record_payment_instruction(&1, &100).unwrap();
+    let first = ctx
+        .payroll()
+        .try_record_payment_instruction(&1, &100)
+        .unwrap();
     assert!(first.is_ok(), "first recording of a pair must succeed");
 
     assert!(
@@ -111,10 +107,16 @@ fn record_payment_instruction_duplicate_is_rejected() {
 fn same_instruction_id_different_period_is_not_duplicate() {
     let ctx = setup();
 
-    let first = ctx.payroll().try_record_payment_instruction(&1, &100).unwrap();
+    let first = ctx
+        .payroll()
+        .try_record_payment_instruction(&1, &100)
+        .unwrap();
     assert!(first.is_ok(), "recording in period 1 must succeed");
 
-    let second_period = ctx.payroll().try_record_payment_instruction(&2, &100).unwrap();
+    let second_period = ctx
+        .payroll()
+        .try_record_payment_instruction(&2, &100)
+        .unwrap();
     assert!(
         second_period.is_ok(),
         "same instruction_id in a different period must be accepted"

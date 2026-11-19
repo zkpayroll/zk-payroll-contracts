@@ -530,7 +530,8 @@ impl AuditModule {
             &AuditLifecycleStage::Active,
         );
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "ViewKeyRefreshed"), admin, auditor),
             (new_expiration_ledger,),
         );
@@ -803,7 +804,8 @@ impl AuditModule {
             .ok_or(AuditError::KeyNotFound)?;
 
         if env.ledger().sequence() > record.expiration_ledger {
-            env.events().publish(
+            payroll_events::publish(
+                env,
                 (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
                 (record.expiration_ledger, env.ledger().sequence()),
             );
@@ -1110,12 +1112,14 @@ impl AuditModule {
         Self::record_audit_log(&env, &auditor, scope, matched);
 
         if matched {
-            env.events().publish(
+            payroll_events::publish(
+                &env,
                 (Symbol::new(&env, "MetadataVerified"), auditor.clone()),
                 (stored_hash, scope),
             );
         } else {
-            env.events().publish(
+            payroll_events::publish(
+                &env,
                 (Symbol::new(&env, "MetadataMismatch"), auditor.clone()),
                 (stored_hash, expected_hash),
             );

@@ -88,9 +88,7 @@ fn archive_employee_retains_commitment_and_emits_event() {
     // Event shape: topics ("EmployeeArchived", company_id, employee),
     // data (previous_status, new_status, ledger_sequence, timestamp).
     let last = events.first().expect("archival event should exist");
-    let ContractEventBody::V0(v0) = &last.body else {
-        panic!("expected V0 event body");
-    };
+    let ContractEventBody::V0(v0) = &last.body;
     let topics = v0.topics.to_vec();
     assert_eq!(topics.len(), 3);
     let name: Symbol = topics[0].try_into_val(&env).unwrap();

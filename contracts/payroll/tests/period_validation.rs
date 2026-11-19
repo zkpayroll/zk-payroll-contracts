@@ -74,7 +74,7 @@ pub fn parse_period_id(raw: &Option<String>) -> Result<PeriodId, PeriodValidatio
         .parse()
         .map_err(|_| PeriodValidationError::MalformedPeriod)?;
 
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(PeriodValidationError::MalformedPeriod);
     }
 
@@ -108,7 +108,7 @@ pub fn validate_submission_sequence(
     }
 
     let months_apart = months_between(last, period);
-    if months_apart > MAX_SEQUENCE_MONTHS_APROAD as u32 {
+    if months_apart > MAX_SEQUENCE_MONTHS_APROAD {
         return Err(PeriodValidationError::PeriodTooFarAwead);
     }
 

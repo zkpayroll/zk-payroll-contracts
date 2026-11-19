@@ -47,16 +47,16 @@ mod payroll_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -85,16 +85,16 @@ mod payroll_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -131,11 +131,11 @@ mod payroll_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -164,16 +164,16 @@ mod payroll_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -208,16 +208,16 @@ mod payroll_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -241,16 +241,16 @@ mod payroll_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -270,8 +270,8 @@ mod payroll_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let token_id = env.register_contract(None, Token);
-        let payroll_id = env.register_contract(None, Payroll);
+        let token_id = env.register(Token, ());
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         assert!(!payroll_client.is_asset_allowed(&token_id));
@@ -290,12 +290,12 @@ mod executor_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ExecutorAddresses {
@@ -319,12 +319,12 @@ mod executor_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ExecutorAddresses {
@@ -353,12 +353,12 @@ mod executor_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ExecutorAddresses {
@@ -377,12 +377,12 @@ mod executor_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ExecutorAddresses {
@@ -403,13 +403,13 @@ mod executor_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_a = env.register_contract(None, Token);
-        let token_b = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_a = env.register(Token, ());
+        let token_b = env.register(Token, ());
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ExecutorAddresses {
@@ -438,7 +438,7 @@ mod pause_manager_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(&env, &pm_id);
         let operator = Address::generate(&env);
 
@@ -454,7 +454,7 @@ mod pause_manager_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(&env, &pm_id);
         let operator = Address::generate(&env);
 
@@ -467,7 +467,7 @@ mod pause_manager_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(&env, &pm_id);
         let operator = Address::generate(&env);
 
@@ -482,7 +482,7 @@ mod pause_manager_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(&env, &pm_id);
         let operator_a = Address::generate(&env);
         let operator_b = Address::generate(&env);
@@ -508,7 +508,7 @@ mod verifier_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let admin = Address::generate(&env);
 
@@ -523,7 +523,7 @@ mod verifier_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let admin = Address::generate(&env);
 
@@ -536,7 +536,7 @@ mod verifier_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let admin = Address::generate(&env);
 
@@ -553,7 +553,7 @@ mod verifier_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let admin = Address::generate(&env);
 
@@ -567,7 +567,7 @@ mod verifier_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         let admin = Address::generate(&env);
 
@@ -589,7 +589,7 @@ mod commitment_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         let admin = Address::generate(&env);
 
@@ -605,7 +605,7 @@ mod commitment_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         let admin = Address::generate(&env);
 
@@ -618,7 +618,7 @@ mod commitment_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         let admin = Address::generate(&env);
         let employee = Address::generate(&env);
@@ -647,7 +647,7 @@ mod token_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let token_id = env.register_contract(None, Token);
+        let token_id = env.register(Token, ());
         let token_client = TokenClient::new(&env, &token_id);
         let admin = Address::generate(&env);
 
@@ -666,7 +666,7 @@ mod token_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let token_id = env.register_contract(None, Token);
+        let token_id = env.register(Token, ());
         let token_client = TokenClient::new(&env, &token_id);
         let admin = Address::generate(&env);
 
@@ -701,7 +701,7 @@ mod cross_contract_init {
         let _employee = Address::generate(&env);
 
         // 1. Token
-        let token_id = env.register_contract(None, Token);
+        let token_id = env.register(Token, ());
         let token_client = TokenClient::new(&env, &token_id);
         token_client.initialize(
             &admin,
@@ -712,28 +712,28 @@ mod cross_contract_init {
         token_client.mint(&treasury, &1_000_000);
 
         // 2. PauseManager
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(&env, &pm_id);
         pm_client.initialize(&admin);
 
         // 3. ProofVerifier
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
 
         // 4. SalaryCommitment
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
         // 5. PayrollRegistry
-        let registry_id = env.register_contract(None, PayrollRegistry);
+        let registry_id = env.register(PayrollRegistry, ());
         let registry_client = PayrollRegistryClient::new(&env, &registry_id);
         let company_id = registry_client.register_company(&admin, &treasury);
 
         // 6. PaymentExecutor
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
         let executor_addrs = ExecutorAddresses {
             registry: registry_id,
@@ -744,7 +744,7 @@ mod cross_contract_init {
         executor_client.initialize(&executor_addrs);
 
         // 7. Payroll
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
         let payroll_addrs = PayrollAddresses {
             admin: admin.clone(),
@@ -783,16 +783,16 @@ mod cross_contract_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -816,16 +816,16 @@ mod cross_contract_init {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let treasury_owner = Address::generate(&env);
-        let token_id = env.register_contract(None, Token);
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let token_id = env.register(Token, ());
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
         verifier_client.init_verifier_admin(&admin);
         verifier_client.initialize_verifier(&mock_vk(&env));
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+        let commitment_id = env.register(SalaryCommitmentContract, ());
         let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
         commitment_client.init_commitment_admin(&admin);
 
-        let payroll_id = env.register_contract(None, Payroll);
+        let payroll_id = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(&env, &payroll_id);
 
         payroll_client.initialize(
@@ -846,12 +846,12 @@ mod cross_contract_init {
         let env = Env::default();
         env.mock_all_auths();
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor_client = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ExecutorAddresses {

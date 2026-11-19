@@ -28,20 +28,20 @@ fn mock_vk(env: &Env) -> VerificationKey {
 pub fn setup(env: &Env) -> (PayrollClient<'_>, Address, Address) {
     env.mock_all_auths();
 
-    let verifier = env.register_contract(None, ProofVerifier);
+    let verifier = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier);
     verifier_client.init_verifier_admin(&Address::generate(env));
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment = env.register_contract(None, SalaryCommitmentContract);
+    let commitment = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment);
     commitment_client.init_commitment_admin(&Address::generate(env));
 
-    let token = env.register_contract(None, Token);
+    let token = env.register(Token, ());
     let treasury = Address::generate(env);
     TokenClient::new(env, &token).mint(&treasury, &1_000_000);
 
-    let contract = env.register_contract(None, Payroll);
+    let contract = env.register(Payroll, ());
     let client = PayrollClient::new(env, &contract);
     let admin = Address::generate(env);
     client.initialize(

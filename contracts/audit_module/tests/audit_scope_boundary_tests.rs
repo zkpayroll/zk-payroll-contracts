@@ -122,7 +122,7 @@ mod audit_scope_boundary_tests {
     fn test_auditor_grant_expiration_blocks_access() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AuditModule);
+        let contract_id = env.register(AuditModule, ());
         let client = AuditModuleClient::new(&env, &contract_id);
 
         let auditor = Address::generate(&env);

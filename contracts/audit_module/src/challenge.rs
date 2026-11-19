@@ -131,6 +131,7 @@ pub enum ChallengeDataKey {
 /// - `UnauthorizedAuditor` — caller is not an authorized auditor
 /// - `InsufficientAuditScope` — auditor scope doesn't cover this period/company
 /// - `InvalidChallenge` — invalid deadline or parameters
+///
 /// Validates that a proof reference identifier is well-formed (#389).
 ///
 /// This only checks the reference's *format* — that it is not the empty/
@@ -162,6 +163,8 @@ pub fn validate_audit_reference_attachment(
     Ok(())
 }
 
+// The existing challenge call retains its positional arguments.
+#[allow(clippy::too_many_arguments)]
 pub fn create_challenge(
     env: &Env,
     company_id: Symbol,
@@ -207,7 +210,8 @@ pub fn create_challenge(
         .set(&counter_key, &new_challenge_id);
 
     // Emit challenge created event
-    env.events().publish(
+    payroll_events::publish(
+        env,
         (Symbol::new(env, "challenge_created"), company_id),
         (new_challenge_id, auditor, deadline_ledger),
     );
@@ -289,7 +293,8 @@ pub fn respond_to_challenge(
     env.storage().persistent().set(&challenge_key, &challenge);
 
     // Emit response event
-    env.events().publish(
+    payroll_events::publish(
+        env,
         (Symbol::new(env, "challenge_responded"), company_id),
         (challenge_id, responder, rejection_reason.is_some()),
     );

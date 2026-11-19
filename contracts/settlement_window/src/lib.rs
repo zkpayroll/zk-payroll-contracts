@@ -623,7 +623,7 @@ mod tests {
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SettlementWindowContract);
+        let contract_id = env.register(SettlementWindowContract, ());
         let admin = Address::generate(&env);
         let client = SettlementWindowContractClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -809,15 +809,13 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 7u64;
 
-        client
-            .create_period(
-                &company_id,
-                &base,
-                &(base + 10),
-                &(base + 100),
-                &(base + 200),
-            )
-            .period_id;
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
         // Second call while first is still active
         let result = client.try_create_period(
             &company_id,
@@ -1174,8 +1172,7 @@ mod tests {
         );
 
         // With valid token: succeeds
-        let valid_res = client.check_settlement_payout(&company_id, &1, &token_id);
-        assert_eq!(valid_res, ());
+        client.check_settlement_payout(&company_id, &1, &token_id);
     }
 
     #[test]

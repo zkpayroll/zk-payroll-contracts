@@ -15,7 +15,7 @@ fn event_count(env: &Env) -> u32 {
 fn assignment_and_removal_events_have_stable_privacy_safe_payloads() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract = env.register_contract(None, AuditModule);
+    let contract = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract);
     let auditor = Address::generate(&env);
     let admin = contract.clone();
@@ -64,7 +64,7 @@ fn assignment_and_removal_events_have_stable_privacy_safe_payloads() {
 fn failed_removal_emits_no_role_event_and_keeps_assignment() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract = env.register_contract(None, AuditModule);
+    let contract = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract);
     let auditor = Address::generate(&env);
 

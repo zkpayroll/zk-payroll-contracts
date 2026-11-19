@@ -67,7 +67,7 @@ fn non_positive_required_amount_is_rejected() {
 #[test]
 fn uninitialized_payroll_reports_missing_funding_configuration() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, Payroll);
+    let contract_id = env.register(Payroll, ());
     let client = PayrollClient::new(&env, &contract_id);
 
     let result = client.check_funding_source_readiness(&100);
@@ -94,7 +94,7 @@ fn unavailable_token_contract_is_reported_cleanly() {
     let (existing, _token, _employee) = common::setup(&env);
     let existing_addresses = existing.get_addresses();
     let missing_token = Address::generate(&env);
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let client = PayrollClient::new(&env, &payroll_id);
 
     client.initialize(
@@ -131,7 +131,7 @@ fn initialization_rejects_unavailable_asset_contract() {
     let (existing, _token, _employee) = common::setup(&env);
     let addresses = existing.get_addresses();
     let unavailable_asset = Address::generate(&env);
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let client = PayrollClient::new(&env, &payroll_id);
 
     client.initialize(
@@ -152,7 +152,7 @@ fn initialization_rejects_contract_without_token_balance_interface() {
     let env = Env::default();
     let (existing, _token, _employee) = common::setup(&env);
     let addresses = existing.get_addresses();
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let client = PayrollClient::new(&env, &payroll_id);
 
     client.initialize(

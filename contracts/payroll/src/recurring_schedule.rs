@@ -33,7 +33,7 @@
 //! stored or emitted. No salary amounts, employee identities, or proof
 //! material are involved.
 
-use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 
 /// Lifecycle state of a recurring payroll schedule period.
 #[contracttype]
@@ -205,7 +205,8 @@ pub fn create_schedule(
     let key = ScheduleKey::RecurringSchedule(schedule_id.clone());
     e.storage().persistent().set(&key, &schedule);
 
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (symbol_short!("payroll"), Symbol::new(e, "schedule_created")),
         (schedule_id.clone(), company_id, now),
     );
@@ -343,7 +344,8 @@ fn emit_transitioned(
     new_state: ScheduleState,
     now: u64,
 ) {
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (
             symbol_short!("payroll"),
             Symbol::new(e, "schedule_transitioned"),

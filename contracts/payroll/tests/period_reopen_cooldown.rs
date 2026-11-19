@@ -10,19 +10,19 @@
 use ::token::Token;
 use payroll::{Payroll, PayrollClient};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, BytesN, Env, Symbol};
+use soroban_sdk::{Address, Env, Symbol};
 
 fn setup(env: &Env) -> (PayrollClient<'_>, Address, Symbol) {
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000);
     let admin = Address::generate(env);
-    let contract_id = env.register_contract(None, Payroll);
+    let contract_id = env.register(Payroll, ());
     let client = PayrollClient::new(env, &contract_id);
 
     client.initialize(
         &admin,
-        &env.register_contract(None, Token),
+        &env.register(Token, ()),
         &Address::generate(env),
         &Address::generate(env),
         &Address::generate(env),
@@ -119,7 +119,7 @@ fn test_reopen_after_cooldown_expires() {
 
     // Advance time beyond cooldown
     env.ledger().with_mut(|ledger| {
-        ledger.timestamp = ledger.timestamp + 101;
+        ledger.timestamp += 101;
     });
 
     // Second freeze/reopen should succeed
@@ -252,13 +252,13 @@ fn test_multiple_periods_independent_cooldowns() {
 fn test_non_admin_cannot_set_cooldown() {
     use soroban_sdk::IntoVal;
     let env = Env::default();
-    let (payroll, admin, period) = setup(&env);
+    let (payroll, _admin, period) = setup(&env);
 
     let attacker = Address::generate(&env);
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &attacker,
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
-            contract: &env.register_contract(None, Payroll),
+            contract: &env.register(Payroll, ()),
             fn_name: "set_period_reopen_cooldown",
             args: (&attacker, &period, &3600u64).into_val(&env),
             sub_invokes: &[],
@@ -308,7 +308,7 @@ fn test_cooldown_exact_boundary() {
 
     // Advance to just before the boundary (99 of 100 seconds)
     env.ledger().with_mut(|ledger| {
-        ledger.timestamp = ledger.timestamp + 99;
+        ledger.timestamp += 99;
     });
 
     // Reopen should still be blocked before the cooldown has fully elapsed
@@ -318,7 +318,7 @@ fn test_cooldown_exact_boundary() {
 
     // Advance one more second to reach the boundary exactly
     env.ledger().with_mut(|ledger| {
-        ledger.timestamp = ledger.timestamp + 1;
+        ledger.timestamp += 1;
     });
 
     // Now it should succeed
@@ -339,7 +339,7 @@ fn test_cooldown_persists_across_freeze_unfreeze_cycles() {
     payroll.reopen_payroll_period(&admin, &period);
 
     env.ledger().with_mut(|ledger| {
-        ledger.timestamp = ledger.timestamp + 150;
+        ledger.timestamp += 150;
     });
 
     // Second freeze - immediate reopen should fail (still in cooldown)
@@ -348,7 +348,7 @@ fn test_cooldown_persists_across_freeze_unfreeze_cycles() {
     assert!(result.is_err(), "Should be in cooldown from first reopen");
 
     env.ledger().with_mut(|ledger| {
-        ledger.timestamp = ledger.timestamp + 100; // Now 250 total from first reopen
+        ledger.timestamp += 100; // Now 250 total from first reopen
     });
 
     // Now reopen should succeed

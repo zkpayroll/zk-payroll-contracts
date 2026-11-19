@@ -81,11 +81,11 @@ struct Executor<'a> {
 fn setup_executor<'a>(env: &'a Env, readiness: Readiness) -> Executor<'a> {
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
@@ -302,7 +302,7 @@ fn test_check_upgrade_compatibility_is_read_only() {
 fn test_check_upgrade_compatibility_rejects_uninitialized_contract() {
     let env = Env::default();
     env.mock_all_auths();
-    let executor_id = env.register_contract(None, PaymentExecutor);
+    let executor_id = env.register(PaymentExecutor, ());
     let executor = PaymentExecutorClient::new(&env, &executor_id);
 
     let result = executor.try_check_upgrade_compatibility(&1);

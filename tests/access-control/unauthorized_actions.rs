@@ -69,19 +69,19 @@ fn test_unauthorized_prepare_payroll_run_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -138,19 +138,19 @@ fn test_unauthorized_batch_process_payroll_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -208,19 +208,19 @@ fn test_unauthorized_cancel_payroll_run_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -263,19 +263,19 @@ fn test_unauthorized_commit_draft_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -304,7 +304,7 @@ fn test_unauthorized_commit_draft_fails() {
 fn test_unauthorized_add_employee_fails() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, PayrollRegistry);
+    let registry_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_id);
 
     let admin = Address::generate(&env);
@@ -347,7 +347,7 @@ fn test_unauthorized_update_commitment_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, PayrollRegistry);
+    let registry_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_id);
 
     let admin = Address::generate(&env);
@@ -382,7 +382,7 @@ fn test_unauthorized_set_employee_status_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, PayrollRegistry);
+    let registry_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_id);
 
     let admin = Address::generate(&env);
@@ -425,7 +425,7 @@ fn test_unauthorized_remove_employee_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, PayrollRegistry);
+    let registry_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_id);
 
     let admin = Address::generate(&env);
@@ -463,11 +463,11 @@ fn test_unauthorized_execute_payment_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(&env, &executor_id);
     let registry = PayrollRegistryClient::new(&env, &registry_id);
@@ -548,11 +548,11 @@ fn test_unauthorized_create_period_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(&env, &executor_id);
     let registry = PayrollRegistryClient::new(&env, &registry_id);
@@ -600,11 +600,11 @@ fn test_unauthorized_close_period_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(&env, &executor_id);
     let registry = PayrollRegistryClient::new(&env, &registry_id);
@@ -654,11 +654,11 @@ fn test_unauthorized_reopen_period_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(&env, &executor_id);
     let registry = PayrollRegistryClient::new(&env, &registry_id);
@@ -712,7 +712,7 @@ fn test_unauthorized_revoke_view_key_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     let auditor = Address::generate(&env);
@@ -741,7 +741,7 @@ fn test_unauthorized_set_audit_pause_manager_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -774,20 +774,20 @@ fn test_unauthorized_approve_emergency_withdrawal_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
     let token_client = TokenClient::new(&env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -826,19 +826,19 @@ fn test_unauthorized_request_emergency_withdrawal_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -876,19 +876,19 @@ fn test_unauthorized_approve_payroll_run_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -928,19 +928,19 @@ fn test_unauthorized_reject_payroll_run_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -981,19 +981,19 @@ fn test_unauthorized_request_changes_payroll_run_fails() {
     let treasury_owner = Address::generate(&env);
     let unauthorized_user = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -1034,19 +1034,19 @@ fn test_unauthorized_add_reviewer_fails() {
     let attacker = Address::generate(&env);
     let target_reviewer = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(
@@ -1073,19 +1073,19 @@ fn test_revoked_reviewer_cannot_approve_fails() {
     let treasury_owner = Address::generate(&env);
     let reviewer = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client_init = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client_init.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     TokenClient::new(&env, &token_id).mint(&treasury, &1_000_000i128);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(&env, &payroll_id);
 
     payroll_client.initialize(

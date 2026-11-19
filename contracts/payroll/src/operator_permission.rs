@@ -75,12 +75,12 @@ pub struct OperatorPermissionCheck {
 /// SDK preflight calls.  Does **not** call `operator.require_auth()` — use
 /// [`require_operator_capability`] on the hot path instead.
 pub fn check_operator_capability(
-    env: &Env,
+    _env: &Env,
     operator: &Address,
     required: OperatorCapability,
     grant: Option<&OperatorGrant>,
 ) -> OperatorPermissionCheck {
-    let authorized = grant.map_or(false, |g| g.capabilities.iter().any(|c| c == required));
+    let authorized = grant.is_some_and(|g| g.capabilities.iter().any(|c| c == required));
     OperatorPermissionCheck {
         operator: operator.clone(),
         required,

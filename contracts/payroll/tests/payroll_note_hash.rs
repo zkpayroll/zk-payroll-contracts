@@ -1,19 +1,19 @@
-/// Payroll note hash commit/bind/verify tests — issue #617.
-///
-/// # Coverage
-/// | Test | Scenario |
-/// |------|----------|
-/// | `test_note_hash_defaults_to_zero_and_matches_zero_query` | Before any bind, get returns the zero hash and verify(zero) is true |
-/// | `test_commit_then_bind_note_hash_success` | Full happy path: commit, bind, get, verify |
-/// | `test_verify_returns_false_for_wrong_hash` | Bound note verifies false against a different hash |
-/// | `test_commit_zero_hash_rejected` | `commit_payroll_note_hash` panics on the all-zero digest |
-/// | `test_commit_duplicate_hash_rejected` | Re-committing the same hash before it is bound panics |
-/// | `test_bind_without_commit_rejected` | `set_run_note_hash` fails if the hash was never pre-committed |
-/// | `test_bind_consumes_commitment` | Binding removes the commitment so a second, independent run cannot reuse it |
-/// | `test_commit_by_non_admin_rejected` | Only the admin may pre-commit a note hash |
-/// | `test_bind_to_nonexistent_run_rejected` | Binding to a run_id that does not exist fails |
-/// | `test_note_hash_independent_of_metadata_hash` | Binding a note hash does not disturb an already-bound metadata hash |
-/// | `test_note_and_draft_hash_do_not_collide` | The same byte value pre-committed as a draft hash does not satisfy the note hash's own pre-commitment check |
+//! Payroll note hash commit/bind/verify tests — issue #617.
+//!
+//! # Coverage
+//! | Test | Scenario |
+//! |------|----------|
+//! | `test_note_hash_defaults_to_zero_and_matches_zero_query` | Before any bind, get returns the zero hash and verify(zero) is true |
+//! | `test_commit_then_bind_note_hash_success` | Full happy path: commit, bind, get, verify |
+//! | `test_verify_returns_false_for_wrong_hash` | Bound note verifies false against a different hash |
+//! | `test_commit_zero_hash_rejected` | `commit_payroll_note_hash` panics on the all-zero digest |
+//! | `test_commit_duplicate_hash_rejected` | Re-committing the same hash before it is bound panics |
+//! | `test_bind_without_commit_rejected` | `set_run_note_hash` fails if the hash was never pre-committed |
+//! | `test_bind_consumes_commitment` | Binding removes the commitment so a second, independent run cannot reuse it |
+//! | `test_commit_by_non_admin_rejected` | Only the admin may pre-commit a note hash |
+//! | `test_bind_to_nonexistent_run_rejected` | Binding to a run_id that does not exist fails |
+//! | `test_note_hash_independent_of_metadata_hash` | Binding a note hash does not disturb an already-bound metadata hash |
+//! | `test_note_and_draft_hash_do_not_collide` | The same byte value pre-committed as a draft hash does not satisfy the note hash's own pre-commitment check |
 use payroll::{Payroll, PayrollClient};
 use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
@@ -95,18 +95,18 @@ fn setup() -> Ctx {
     let treasury_owner = Address::generate(&env);
     let alice = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let payroll_id = env.register_contract(None, Payroll);
+    let token_id = env.register(Token, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let payroll_id = env.register(Payroll, ());
 
     let payroll_client = PayrollClient::new(&env, &payroll_id);
     payroll_client.initialize(

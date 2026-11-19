@@ -45,7 +45,7 @@ fn public_inputs(env: &Env) -> Vec<BytesN<32>> {
 
 fn setup(env: &Env) -> (ProofVerifierClient<'_>, soroban_sdk::Address) {
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(env, &contract_id);
     let admin = soroban_sdk::Address::generate(env);
     client.init_verifier_admin(&admin);
@@ -311,7 +311,7 @@ fn non_admin_cannot_register() {
     let env = Env::default();
     // No mock_all_auths here: a non-admin address has no way to satisfy
     // admin.require_auth(), so registration must be rejected.
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
     let attacker = soroban_sdk::Address::generate(&env);
     let result = client.try_register_proof_reference(

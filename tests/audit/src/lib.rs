@@ -27,7 +27,7 @@ mod tests {
     fn setup() -> (Env, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, AuditModule);
+        let contract_id = env.register(AuditModule, ());
         (env, contract_id)
     }
 

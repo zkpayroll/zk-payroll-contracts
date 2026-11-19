@@ -4,31 +4,11 @@
 
 mod common;
 
-use payroll::{PauseScope, Payroll, PayrollClient};
+use payroll::PauseScope;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
-
-/// Create a minimal env + registered Payroll contract + a mock admin address.
-/// Returns `(env, client, admin)`.
-fn setup_scoped() -> (Env, PayrollClient<'static>, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _token, _employee) = common::setup(&env);
-
-    // The admin is baked into the contract during `common::setup`; for scoped
-    // pause tests we only need *any* authorized address — `mock_all_auths()`
-    // approves everything, so we can use a fresh address without worrying
-    // about matching the stored admin.
-    let admin = client.get_addresses().admin.clone();
-
-    // SAFETY: `common::setup` already registered the contract so the client
-    // outlives the env reference; we transmute the lifetime for test convenience.
-    let client: PayrollClient<'static> = unsafe { core::mem::transmute(client) };
-    (env, client, admin)
-}
 
 // ── Test 1 ─────────────────────────────────────────────────────────────────────
 

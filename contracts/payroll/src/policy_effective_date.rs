@@ -3,8 +3,6 @@
 //! Validates that payroll policies have valid effective dates and that
 //! policy changes are applied at the correct time.
 
-#![no_std]
-
 use soroban_sdk::{contracttype, Env};
 
 /// Error codes for policy effective-date validation.

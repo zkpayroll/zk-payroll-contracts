@@ -1,19 +1,19 @@
 #![cfg(test)]
 
 use ::token::Token;
-use payroll::{BatchCheckpointState, ContractAddresses, PayrollClient};
+use payroll::{BatchCheckpointState, PayrollClient};
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
 
 fn setup(e: &Env) -> (Address, PayrollClient<'static>) {
     e.mock_all_auths();
     let admin = Address::generate(e);
-    let token = e.register_contract(None, Token);
+    let token = e.register(Token, ());
     let verifier = Address::generate(e);
     let commitment = Address::generate(e);
     let treasury = Address::generate(e);
     let treasury_owner = Address::generate(e);
 
-    let contract_id = e.register_contract(None, payroll::Payroll {});
+    let contract_id = e.register(payroll::Payroll {}, ());
     let client = PayrollClient::new(e, &contract_id);
     client.initialize(
         &admin,

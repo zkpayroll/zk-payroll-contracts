@@ -215,7 +215,8 @@ impl PauseManager {
             .persistent()
             .set(&DataKey::PendingOperator, &proposal);
 
-        e.events().publish(
+        payroll_events::publish(
+            &e,
             (
                 Symbol::new(&e, "PauseManager"),
                 Symbol::new(&e, "op_proposed"),
@@ -241,7 +242,8 @@ impl PauseManager {
             .set(&DataKey::Operator, &new_operator);
         e.storage().persistent().remove(&DataKey::PendingOperator);
 
-        e.events().publish(
+        payroll_events::publish(
+            &e,
             (
                 Symbol::new(&e, "PauseManager"),
                 Symbol::new(&e, "op_rotated"),
@@ -266,7 +268,8 @@ impl PauseManager {
         }
         e.storage().persistent().remove(&DataKey::PendingOperator);
 
-        e.events().publish(
+        payroll_events::publish(
+            &e,
             (
                 Symbol::new(&e, "PauseManager"),
                 Symbol::new(&e, "op_cancelled"),
@@ -437,7 +440,7 @@ mod tests {
     fn setup() -> (Env, PauseManagerClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -448,7 +451,7 @@ mod tests {
     fn test_initialize_sets_operator_and_unpaused() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -461,7 +464,7 @@ mod tests {
     fn test_initialize_cannot_be_called_twice() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -499,7 +502,7 @@ mod tests {
     fn test_propose_operator_rotation_creates_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -516,7 +519,7 @@ mod tests {
     fn test_accept_operator_rotation_completes_transfer() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -534,7 +537,7 @@ mod tests {
     fn test_cancel_operator_rotation_removes_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -553,7 +556,7 @@ mod tests {
     fn test_duplicate_operator_rotation_proposal_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -569,7 +572,7 @@ mod tests {
     fn test_cancel_operator_rotation_rejects_non_operator() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -585,7 +588,7 @@ mod tests {
     fn test_cancel_operator_rotation_without_proposal_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -598,7 +601,7 @@ mod tests {
     fn test_accept_operator_rotation_without_proposal_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -621,7 +624,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_old_operator_cannot_pause_after_rotation_completed() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -679,7 +682,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_old_operator_cannot_unpause_after_rotation_completed() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -711,7 +714,7 @@ mod tests {
     fn test_old_operator_cannot_propose_new_rotation_after_being_replaced() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -731,7 +734,7 @@ mod tests {
     fn test_old_operator_cannot_cancel_after_rotation_completed() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -751,7 +754,7 @@ mod tests {
         // rotation in turn.
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let op_1 = Address::generate(&env);
@@ -777,7 +780,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_pause_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -811,7 +814,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_unpause_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -856,7 +859,7 @@ mod tests {
     #[test]
     fn test_is_paused_returns_false_when_not_initialized() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         assert!(!client.is_paused());
     }
@@ -866,7 +869,7 @@ mod tests {
     fn test_pause_panics_when_not_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         client.pause();
     }
@@ -877,7 +880,7 @@ mod tests {
     fn test_initialize_sets_all_categories_unpaused() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -986,7 +989,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_pause_category_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -1019,7 +1022,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_unpause_category_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -1064,7 +1067,7 @@ mod tests {
     fn test_pause_category_panics_when_not_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         client.pause_category(&PauseCategory::Payroll);
     }
@@ -1072,7 +1075,7 @@ mod tests {
     #[test]
     fn test_get_pause_status_without_initialization() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let status = client.get_pause_status();

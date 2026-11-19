@@ -87,11 +87,11 @@ struct Ctx<'a> {
 fn setup_system<'a>(env: &'a Env, decimals: u32) -> Ctx<'a> {
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
@@ -300,9 +300,9 @@ fn zero_rate_leg_contributes_nothing_and_does_not_perturb_other_leg() {
     assert_eq!(ctx.token.balance(&ctx.income_tax_recipient), 0);
     assert_eq!(ctx.token.balance(&ctx.social_tax_recipient), 250_000);
 
-    let net = gross - 0 - 250_000;
+    let net = gross - 250_000;
     assert_eq!(net, 750_001);
-    assert_eq!(net + 0 + 250_000, gross);
+    assert_eq!(net + 250_000, gross);
 }
 
 /// Fixture E - boundary: the asset's decimal precision does not change the
