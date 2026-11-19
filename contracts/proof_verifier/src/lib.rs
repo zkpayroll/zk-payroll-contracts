@@ -55,6 +55,11 @@ pub enum ProofError {
     InvalidExpiry = 7,
     ExpiryBeyondCap = 8,
     ProofMismatch = 9,
+    /// The public input vector does not have the length the stored
+    /// verification key expects (`vk.ic.len() - 1`) (issue #821). This means
+    /// the proof was built for a different circuit or schema version, not
+    /// that the proof itself is invalid. The error carries no input values.
+    InvalidPublicInputLength = 10,
 }
 
 #[contracttype]
@@ -121,11 +126,42 @@ impl ProofVerifier {
             .get(&DataKey::VerificationKey)
             .expect("Verifier not initialized");
 
-        if public_inputs.len() + 1 != vk.ic.len() {
+        // Same rule as `validate_public_inputs`; the bool API keeps returning
+        // `false` (never panics) on a length mismatch.
+        if Self::check_public_input_len(&vk, &public_inputs).is_err() {
             return false;
         }
 
         Self::simulated_verify_groth16(&env, &vk, proof, public_inputs)
+    }
+
+    /// Check the public input length against the stored verification key
+    /// before verifying a proof (issue #821).
+    ///
+    /// A Groth16 verification key has one `IC` point per public input plus
+    /// the constant term `IC[0]`, so exactly `vk.ic.len() - 1` inputs are
+    /// accepted. Returns that count on success.
+    ///
+    /// Errors:
+    /// - [`ProofError::NotInitialized`]: no verification key is stored.
+    /// - [`ProofError::InvalidPublicInputLength`]: too few, too many, or no
+    ///   inputs. This includes a key with an empty `ic`, which no input
+    ///   vector can satisfy.
+    ///
+    /// Only lengths are compared, and the error carries no input values, so
+    /// callers can report why a payment was rejected without exposing
+    /// commitments or amounts. `verify` and `verify_payment_proof` apply the
+    /// same rule and keep returning `false`.
+    pub fn validate_public_inputs(
+        env: Env,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<u32, ProofError> {
+        let vk: VerificationKey = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerificationKey)
+            .ok_or(ProofError::NotInitialized)?;
+        Self::check_public_input_len(&vk, &public_inputs)
     }
 
     // ------------------------------------------------------------------
@@ -286,6 +322,19 @@ impl ProofVerifier {
         Ok(())
     }
 
+    /// `inputs.len() + 1 == vk.ic.len()`, computed without overflow.
+    fn check_public_input_len(
+        vk: &VerificationKey,
+        public_inputs: &Vec<BytesN<32>>,
+    ) -> Result<u32, ProofError> {
+        let len = public_inputs.len();
+        if len.checked_add(1) == Some(vk.ic.len()) {
+            Ok(len)
+        } else {
+            Err(ProofError::InvalidPublicInputLength)
+        }
+    }
+
     fn proof_digest(env: &Env, proof: &BytesN<256>) -> BytesN<32> {
         env.crypto()
             .sha256(&Bytes::from_array(env, &proof.to_array()))
@@ -324,3 +373,6 @@ mod tests;
 
 #[cfg(test)]
 mod expiry_tests;
+
+#[cfg(test)]
+mod input_length_tests;
