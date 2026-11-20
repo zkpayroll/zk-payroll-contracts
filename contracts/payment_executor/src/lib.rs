@@ -438,6 +438,10 @@ impl PaymentExecutor {
     /// Configure the decimal places for an asset token (issue #354).
     /// Required to ensure proper amount normalization and prevent decimal mismatches.
     /// Only executor admin can set this configuration.
+    ///
+    /// Decimal precision must be between 1 and 18 (inclusive). A value of 0
+    /// is rejected because it cannot represent fractional base units and would
+    /// make precision enforcement ambiguous.
     pub fn set_asset_decimals(env: Env, asset: Address, decimals: u32) {
         let admin: Address = env
             .storage()
@@ -446,6 +450,9 @@ impl PaymentExecutor {
             .expect("Executor admin not set");
         admin.require_auth();
 
+        if decimals == 0 {
+            panic!("Asset decimals must be greater than zero");
+        }
         if decimals > 18 {
             panic!("Asset decimals must not exceed 18");
         }
@@ -876,6 +883,14 @@ impl PaymentExecutor {
             return Err(PaymentError::AssetDecimalsMissing);
         }
 
+        // Enforce configured precision matches the token contract to prevent
+        // mis-scaled payouts when an asset's declared decimals drift.
+        let token_client = token::Client::new(&env, &addresses.token);
+        let token_decimals = token_client.decimals();
+        if token_decimals != asset_decimals {
+            return Err(PaymentError::AssetDecimalsMismatch);
+        }
+
         // Verify amount is properly normalized according to asset decimal configuration
         if amount < 0 {
             return Err(PaymentError::AssetDecimalsMismatch);
@@ -1022,6 +1037,21 @@ impl PaymentExecutor {
     /// Receipt IDs are never emitted in events and carry no salary or
     /// employee data — the contract treats them as opaque 32-byte
     /// identifiers, so error paths stay privacy-safe.
+    ///
+    /// ## Settlement receipt replay invariants
+    ///
+    /// - **Global uniqueness:** a `receipt_id` is a single-use token across the
+    ///   entire contract (all companies and periods). Reuse is always rejected.
+    /// - **Check-before-effects:** the duplicate guard runs before any payment
+    ///   state is mutated, so a replay attempt is a pure no-op.
+    /// - **Commit-on-success only:** the receipt marker is written only after the
+    ///   full batch succeeds. Any failure or trap leaves the receipt unused so a
+    ///   corrected retry with the same `receipt_id` may proceed.
+    /// - **Privacy:** receipt IDs are opaque identifiers and are never emitted in
+    ///   events or error payloads.
+    /// - **Composable guards:** receipt replay protection is independent of proof
+    ///   nullifier and per-employee-per-period checks; all applicable guards must
+    ///   pass for execution to succeed.
     pub fn execute_batch_with_receipt(
         env: Env,
         company_id: u64,
