@@ -231,8 +231,7 @@ fn test_verify_rejects_wrong_input_length() {
 }
 
 #[test]
-#[should_panic(expected = "Verifier not initialized")]
-fn test_verify_before_initialization_panics() {
+fn test_verify_before_initialization_returns_false() {
     let env = Env::default();
     let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
@@ -240,10 +239,11 @@ fn test_verify_before_initialization_panics() {
     let admin = soroban_sdk::Address::generate(&env);
     client.init_verifier_admin(&admin);
 
-    // VK not yet set — verify must panic.
+    // VK not yet set: structural validation rejects the call silently so
+    // cross-contract callers never have to handle a host panic.
     let proof = mock_snarkjs_proof(&env);
     let public_inputs = Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 32])]);
-    client.verify_payment_proof(&proof, &public_inputs);
+    assert!(!client.verify_payment_proof(&proof, &public_inputs));
 }
 
 #[test]
@@ -1129,4 +1129,92 @@ fn invariant_expired_reference_error_generic() {
         !result,
         "INVARIANT #5: ReferenceExpired returns false, not panic with details"
     );
+}
+
+// =========================================================================
+// Issue #980/#981/#979: safe proof input validation errors
+// =========================================================================
+
+#[test]
+fn test_validator_reports_uninitialized_verifier() {
+    let env = Env::default();
+    let contract_id = env.register(ProofVerifier, ());
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    let public_inputs = Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 32])]);
+    assert_eq!(
+        client
+            .try_validate_proof_inputs(&public_inputs)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::VerifierNotInitialized
+    );
+}
+
+#[test]
+fn test_validator_accepts_correct_input_count() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+    let public_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    client.validate_proof_inputs(&public_inputs);
+    assert!(client.verify_payment_proof(&mock_snarkjs_proof(&env), &public_inputs));
+}
+
+#[test]
+fn test_validator_reports_input_count_mismatch() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+    // The mock verification key has three IC points, so two inputs are needed.
+    let public_inputs = Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 32])]);
+
+    assert_eq!(
+        client
+            .try_validate_proof_inputs(&public_inputs)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::InvalidPublicInputCount
+    );
+    assert!(!client.verify_payment_proof(&mock_snarkjs_proof(&env), &public_inputs));
+}
+
+#[test]
+fn test_verify_with_empty_verification_key_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(ProofVerifier, ());
+    let client = ProofVerifierClient::new(&env, &contract_id);
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+
+    let empty_vk = VerificationKey {
+        alpha: BytesN::from_array(&env, &[1u8; 64]),
+        beta: BytesN::from_array(&env, &[2u8; 128]),
+        gamma: BytesN::from_array(&env, &[3u8; 128]),
+        delta: BytesN::from_array(&env, &[4u8; 128]),
+        ic: Vec::new(&env),
+    };
+    client.initialize_verifier(&empty_vk);
+
+    let public_inputs = Vec::new(&env);
+    assert_eq!(
+        client
+            .try_validate_proof_inputs(&public_inputs)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::InvalidPublicInputCount
+    );
+    assert!(!client.verify_payment_proof(&mock_snarkjs_proof(&env), &public_inputs));
+}
+
+#[test]
+fn test_validation_error_codes_are_stable_and_data_free() {
+    assert_eq!(ProofError::InvalidPublicInputCount as u32, 10);
+    assert_eq!(ProofError::VerifierNotInitialized as u32, 11);
 }
