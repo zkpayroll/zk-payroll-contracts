@@ -760,6 +760,33 @@ impl PaymentExecutor {
     // -----------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
+    /// Execute a payment for a single employee in a given period.
+    ///
+    /// Records the payment, marks the employee as paid for the period,
+    /// and updates the running total. Rejected payments do not alter state.
+    ///
+    /// For batch execution with idempotency, use `execute_batch_with_receipt`
+    /// (issue #551).
+    ///
+    /// # Retry Invariants (see RETRY_INVARIANTS.md)
+    ///
+    /// **R-2: Nullifier Global Uniqueness**
+    /// Each nullifier is consumed globally (across all employees, companies,
+    /// and periods). Reuse returns `ProofAlreadyUsed`. Retry must use a fresh
+    /// proof with a new nullifier.
+    ///
+    /// **R-3: Per-Employee Per-Period Uniqueness**
+    /// Each (employee, period) pair receives at most one successful payment.
+    /// A second attempt (even with a fresh proof) returns `AlreadyPaid`. Retry
+    /// by opening a new period and paying with a fresh proof.
+    ///
+    /// **R-5: Closed Period Barrier**
+    /// A payment to a closed period returns `PeriodClosed` without state
+    /// mutation. Retry by opening a new period.
+    ///
+    /// **R-7: Total Paid Monotonicity**
+    /// A failed payment does not decrease `get_total_paid`. On success, the
+    /// total increases by the payment amount.
     pub fn execute_payment(
         env: Env,
         company_id: u64,
@@ -951,6 +978,30 @@ impl PaymentExecutor {
 
     /// Execute batch payroll for multiple employees
     #[allow(clippy::too_many_arguments)]
+    /// Execute a batch payroll run for multiple employees in a single period.
+    ///
+    /// Processes each employee's payment sequentially. Payments that succeed
+    /// are irreversible; if payment k fails, employees 0..k-1 are paid,
+    /// employees k..n are not processed.
+    ///
+    /// For idempotent batch execution with RPC retry safety, use
+    /// `execute_batch_with_receipt` instead (issue #551).
+    ///
+    /// # Retry Invariants (see RETRY_INVARIANTS.md)
+    ///
+    /// **R-4: Batch-Level Atomicity Boundary**
+    /// Batch payment is not atomic. Callers must query `is_paid` for each
+    /// employee to identify which were paid on partial failure, then retry
+    /// only the unpaid employees.
+    ///
+    /// **R-5: Closed Period Barrier**
+    /// A payment to a closed period is rejected with `PeriodClosed` without
+    /// state mutation. Retry by opening a new period.
+    ///
+    /// **R-6: Pre-Validation Before State Mutation**
+    /// Array length mismatches return `ArrayLengthMismatch` before any state
+    /// is mutated. Empty batches return `EmptyBatch`. Oversized batches
+    /// return `BatchTooLarge`. All pre-checks are safe for retry.
     pub fn execute_batch_payroll(
         env: Env,
         company_id: u64,
@@ -1022,6 +1073,24 @@ impl PaymentExecutor {
     /// Receipt IDs are never emitted in events and carry no salary or
     /// employee data — the contract treats them as opaque 32-byte
     /// identifiers, so error paths stay privacy-safe.
+    ///
+    /// # Retry Invariants (see RETRY_INVARIANTS.md)
+    ///
+    /// **R-1: Settlement Receipt Idempotency**
+    /// The receipt is checked before any state mutation. If already consumed,
+    /// the call returns `SettlementReceiptAlreadyUsed` without altering state.
+    /// The receipt is recorded only after the entire batch succeeds. If any
+    /// payment in the batch fails, the receipt remains unconsumed, allowing
+    /// a corrected retry with the same receipt ID.
+    ///
+    /// **R-4: Batch-Level Atomicity Boundary**
+    /// Batch payment is not atomic. If employee k fails, employees 1..k-1
+    /// are permanently paid; employees k..n are not processed. Callers must
+    /// query which employees were paid and retry the unpaid ones.
+    ///
+    /// **R-6: Pre-Validation Before State Mutation**
+    /// Array length mismatches return `ArrayLengthMismatch` before any state
+    /// is mutated, allowing safe retry with corrected arrays.
     pub fn execute_batch_with_receipt(
         env: Env,
         company_id: u64,
