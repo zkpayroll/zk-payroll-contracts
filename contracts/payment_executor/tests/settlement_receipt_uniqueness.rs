@@ -319,3 +319,69 @@ fn test_receipt_is_rejected_in_a_later_period() {
 
     assert_eq!(result, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
 }
+
+#[test]
+fn test_zero_receipt_id_is_opaque_and_replay_protected() {
+    let env = Env::default();
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_000);
+    let receipt = BytesN::from_array(&env, &[0u8; 32]);
+
+    let (e1, a1, pa1, pb1, pc1, n1) = one_employee_batch(&env, &employee, 500, 30);
+    executor.execute_batch_with_receipt(&company_id, &e1, &a1, &pa1, &pb1, &pc1, &n1, &1, &receipt);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+
+    // The all-zero id is not special cased: it is still single-use.
+    let (e2, a2, pa2, pb2, pc2, n2) = one_employee_batch(&env, &employee, 500, 31);
+    let replay = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &e2,
+        &a2,
+        &pa2,
+        &pb2,
+        &pc2,
+        &n2,
+        &1,
+        &receipt,
+    );
+    assert_eq!(replay, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
+}
+
+#[test]
+fn test_pre_validation_failure_leaves_receipt_unused() {
+    let env = Env::default();
+    let (executor, _reg, _com, _tok, company_id, _treasury, employee) = setup_system(&env, 1_500);
+    let receipt = BytesN::from_array(&env, &[13u8; 32]);
+
+    let (employees, amounts, proof_a, proof_b, proof_c, nullifiers) =
+        one_employee_batch(&env, &employee, 500, 32);
+    let mut bad_amounts = amounts.clone();
+    bad_amounts.push_back(250i128);
+
+    let rejected = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &bad_amounts,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(rejected, Err(Ok(PaymentError::ArrayLengthMismatch)));
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+
+    // A corrected retry with the same receipt must still succeed.
+    executor.execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert!(executor.is_settlement_receipt_used(&receipt));
+}
