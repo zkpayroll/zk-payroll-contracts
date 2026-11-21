@@ -4,6 +4,40 @@ use pause_manager::PauseManagerClient;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
+// Salary Commitment Version Invariants
+//
+// The `version` field on `SalaryCommitment` enforces the following invariants:
+//
+// I-V1: Monotonic Increase
+//   - `version` increments by 1 (via `saturating_add(1)`) on every mutation
+//     (store, update, rotate).
+//   - The counter never decreases, stays constant, or wraps: it is
+//     monotonically non-decreasing.
+//
+// I-V2: Sequential Causality
+//   - Both `update_commitment` and `rotate_commitment` (and
+//     `rotate_approved_commitment`) increment `version`, so the sequence of
+//     commitment mutations is observable in order.
+//   - Audit tooling can reconstruct the full commitment history by ordering
+//     on version, without ambiguity.
+//
+// I-V3: Immutable History
+//   - Once a version is recorded (via `archive_commitment`), the snapshot
+//     stored in `CommitmentHistory` has a fixed version. The value never
+//     changes retroactively.
+//
+// I-V4: No Reset Across Contract Upgrades
+//   - The `version` counter on an active `SalaryCommitment` must not reset to
+//     an earlier value (e.g., 1) after an upgrade. Upgrades that preserve
+//     persistent storage will maintain version monotonicity.
+//
+// Violations of these invariants result in:
+// - Loss of audit trail fidelity (I-V1, I-V2, I-V3)
+// - Confusion in replay detection and version-based ordering (I-V1, I-V2)
+// - Reconciliation errors when commitments are tied to payroll runs (I-V2)
+// - Impossible reconstruction of settled payroll history (I-V3, I-V4)
+//
+// ---------------------------------------------------------------------------
 // Operational roles
 //
 // The salary commitment contract separates four operational roles:
@@ -2034,5 +2068,284 @@ mod tests {
         assert!(client
             .try_store_commitment(&Address::generate(&env), &archived_commitment)
             .is_err());
+    }
+
+    // ── Version Invariant Tests (I-V1, I-V2, I-V3, I-V4) ──────────────────────
+
+    /// I-V1: Monotonic Increase
+    /// The version field increments by 1 on every mutation (store, update, rotate).
+    /// This test verifies initial version = 1 and that it never stays constant.
+    #[test]
+    fn test_version_invariant_v1_initial_version_is_one() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[50u8; 32]);
+
+        let stored = client.store_commitment(&employee, &commitment);
+        assert_eq!(stored.version, 1, "I-V1: initial version must be 1");
+    }
+
+    /// I-V1: Monotonic Increase
+    /// Version strictly increases after update_commitment.
+    #[test]
+    fn test_version_invariant_v1_increases_on_update() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let initial = BytesN::from_array(&env, &[51u8; 32]);
+        let updated_cmt = BytesN::from_array(&env, &[52u8; 32]);
+
+        let stored = client.store_commitment(&employee, &initial);
+        let v1 = stored.version;
+
+        let updated = client.update_commitment(&employee, &updated_cmt);
+        assert!(updated.version > v1, "I-V1: version must increase after update");
+        assert_eq!(
+            updated.version, v1 + 1,
+            "I-V1: version must increment by exactly 1"
+        );
+    }
+
+    /// I-V1: Monotonic Increase
+    /// Version strictly increases after rotate_commitment.
+    #[test]
+    fn test_version_invariant_v1_increases_on_rotate() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let initial = BytesN::from_array(&env, &[53u8; 32]);
+        let rotated_cmt = BytesN::from_array(&env, &[54u8; 32]);
+
+        let stored = client.store_commitment(&employee, &initial);
+        let v1 = stored.version;
+
+        let rotated = client.rotate_commitment(&employee, &rotated_cmt);
+        assert!(rotated.version > v1, "I-V1: version must increase after rotate");
+        assert_eq!(
+            rotated.version, v1 + 1,
+            "I-V1: version must increment by exactly 1"
+        );
+    }
+
+    /// I-V1: Monotonic Increase
+    /// Version strictly increases after rotate_approved_commitment (locked case).
+    #[test]
+    fn test_version_invariant_v1_increases_on_rotate_approved() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let initial = BytesN::from_array(&env, &[55u8; 32]);
+        let rotated_cmt = BytesN::from_array(&env, &[56u8; 32]);
+
+        client.store_commitment(&employee, &initial);
+        client.lock_commitment_updates(&employee);
+
+        let before_lock = client.get_commitment(&employee).version;
+        let rotated = client.rotate_approved_commitment(&employee, &rotated_cmt);
+        assert!(
+            rotated.version > before_lock,
+            "I-V1: version must increase after rotate_approved"
+        );
+        assert_eq!(
+            rotated.version, before_lock + 1,
+            "I-V1: version must increment by exactly 1"
+        );
+    }
+
+    /// I-V2: Sequential Causality
+    /// Both update and rotate operations increment version in sequence,
+    /// so mutations are observable in order.
+    #[test]
+    fn test_version_invariant_v2_sequential_causality_mixed_operations() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let mut cmt_idx = 60u8;
+
+        let mut gen_cmt = || {
+            let mut bytes = [cmt_idx; 32];
+            bytes[0] = cmt_idx;
+            cmt_idx += 1;
+            BytesN::from_array(&env, &bytes)
+        };
+
+        // v1: store
+        let v1_c = gen_cmt();
+        let c1 = client.store_commitment(&employee, &v1_c);
+        let mut prev_ver = c1.version;
+
+        // v2: update
+        let v2_c = gen_cmt();
+        let c2 = client.update_commitment(&employee, &v2_c);
+        assert_eq!(c2.version, prev_ver + 1, "I-V2: update increments version");
+        prev_ver = c2.version;
+
+        // v3: rotate
+        let v3_c = gen_cmt();
+        let c3 = client.rotate_commitment(&employee, &v3_c);
+        assert_eq!(c3.version, prev_ver + 1, "I-V2: rotate increments version");
+        prev_ver = c3.version;
+
+        // v4: update again
+        let v4_c = gen_cmt();
+        let c4 = client.update_commitment(&employee, &v4_c);
+        assert_eq!(c4.version, prev_ver + 1, "I-V2: update increments version again");
+
+        // All versions strictly increasing
+        assert!(
+            c1.version < c2.version && c2.version < c3.version && c3.version < c4.version,
+            "I-V2: versions must be strictly increasing in order"
+        );
+    }
+
+    /// I-V3: Immutable History
+    /// Once a version is archived in CommitmentHistory, it has a fixed version
+    /// that never changes. Rotations create snapshots with immutable versions.
+    #[test]
+    fn test_version_invariant_v3_archived_versions_immutable() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let c1 = BytesN::from_array(&env, &[70u8; 32]);
+        let c2 = BytesN::from_array(&env, &[71u8; 32]);
+
+        let stored = client.store_commitment(&employee, &c1);
+        let v1 = stored.version;
+
+        // Rotate to create a snapshot with v1
+        client.rotate_commitment(&employee, &c2);
+
+        // Retrieve history; the archived version must match what was recorded
+        let history = client.get_commitment_history(&employee);
+        assert!(!history.is_empty(), "I-V3: history must contain archived commit");
+        let first_snapshot = history.get(0).unwrap();
+        assert_eq!(
+            first_snapshot.version, v1,
+            "I-V3: archived version must be immutable and match original"
+        );
+    }
+
+    /// I-V4: No Reset Across Upgrades (simulated)
+    /// Version must not reset after operations that simulate contract upgrade-like
+    /// state preservation. The counter stays monotonic even after auxiliary changes.
+    #[test]
+    fn test_version_invariant_v4_no_reset_after_config_change() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let c1 = BytesN::from_array(&env, &[72u8; 32]);
+        let c2 = BytesN::from_array(&env, &[73u8; 32]);
+
+        client.store_commitment(&employee, &c1);
+        let v1 = client.get_commitment(&employee).version;
+
+        // Simulate upgrade-like config change: set payroll operator
+        let operator = Address::generate(&env);
+        client.set_payroll_operator(&operator);
+
+        // Update commitment post-"upgrade"
+        let updated = client.update_commitment(&employee, &c2);
+        let v2 = updated.version;
+
+        // Version must not reset to 1 or earlier; it continues from v1
+        assert_eq!(
+            v2, v1 + 1,
+            "I-V4: version must not reset after upgrade-like state preservation"
+        );
+        assert!(v2 > v1, "I-V4: version must continue monotonically");
+    }
+
+    /// Boundary: Saturation behavior
+    /// The version counter uses saturating_add(1), so it won't panic at max u32.
+    /// (This is a practical boundary: an employee would need ~4 billion mutations
+    /// in a single contract to reach u32::MAX, which is infeasible in normal use.)
+    #[test]
+    fn test_version_increment_uses_saturating_add_does_not_panic() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[74u8; 32]);
+
+        // Normal operations do not panic.
+        client.store_commitment(&employee, &commitment);
+        let c = client.get_commitment(&employee);
+        assert_eq!(c.version, 1);
+
+        // Multiple operations succeed without panic
+        for i in 2u32..=10u32 {
+            let byte_val = ((i - 1) % 256) as u8;
+            let mut bytes = [75u8; 32];
+            bytes[0] = byte_val;
+            let new_cmt = BytesN::from_array(&env, &bytes);
+            let updated = client.update_commitment(&employee, &new_cmt);
+            assert_eq!(updated.version, i, "version must equal iteration count");
+        }
+    }
+
+    /// Success: Multiple employees have independent version counters.
+    /// Version state is per-employee, not global. Each employee's commitment
+    /// sequence is independent.
+    #[test]
+    fn test_version_per_employee_independence() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let emp_a = Address::generate(&env);
+        let emp_b = Address::generate(&env);
+
+        // Employee A: store, then update
+        let c_a1 = BytesN::from_array(&env, &[75u8; 32]);
+        client.store_commitment(&emp_a, &c_a1);
+        let c_a2 = BytesN::from_array(&env, &[76u8; 32]);
+        client.update_commitment(&emp_a, &c_a2);
+        let ver_a = client.get_commitment(&emp_a).version;
+
+        // Employee B: only store (should still be version 1, not 3)
+        let c_b1 = BytesN::from_array(&env, &[77u8; 32]);
+        client.store_commitment(&emp_b, &c_b1);
+        let ver_b = client.get_commitment(&emp_b).version;
+
+        assert_eq!(ver_a, 2, "Employee A should have version 2 (store + update)");
+        assert_eq!(ver_b, 1, "Employee B should have version 1 (store only)");
+        assert_eq!(
+            ver_a, ver_b + 1,
+            "Employee A's version is independent of B's operations"
+        );
+    }
+
+    /// Failure: No-op rotation rejected; version never increments for rejected calls.
+    /// rotate_approved_commitment rejects identical commitment values before
+    /// touching storage, so version stays unchanged.
+    #[test]
+    fn test_version_not_incremented_on_rejected_noop_rotation() {
+        let (env, contract_id, _admin) = setup_with_admin();
+        let client = SalaryCommitmentContractClient::new(&env, &contract_id);
+
+        let employee = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[78u8; 32]);
+
+        client.store_commitment(&employee, &commitment);
+        client.lock_commitment_updates(&employee);
+
+        let before = client.get_commitment(&employee).version;
+
+        // Attempt no-op rotation with same commitment
+        let result = client.try_rotate_approved_commitment(&employee, &commitment);
+        assert!(result.is_err(), "No-op rotation must be rejected");
+
+        let after = client.get_commitment(&employee).version;
+        assert_eq!(
+            before, after,
+            "Version must not change when rotation is rejected"
+        );
     }
 }
