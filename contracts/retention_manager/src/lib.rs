@@ -184,6 +184,8 @@ impl RetentionManagerContract {
     /// `company_id` — owning company.
     /// `record_id`  — caller-supplied opaque identifier (run_id, grant_id, …).
     /// `record_type` — determines the retention window.
+    ///
+    /// Panics if the same (company, record, type) is already registered.
     pub fn register_record(
         env: Env,
         company_id: u64,
@@ -192,6 +194,16 @@ impl RetentionManagerContract {
     ) -> RetentionRecord {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
+
+        // Registering again would overwrite the entry: it would clear the audit and challenge
+        // blocks and un-prune a tombstone, which is the on-chain proof that pruning happened.
+        if env
+            .storage()
+            .persistent()
+            .has(&Self::record_key(company_id, record_id, &record_type))
+        {
+            panic!("Record already registered");
+        }
 
         let now = env.ledger().timestamp();
         let window = Self::retention_window_for(&env, company_id, &record_type);
@@ -492,6 +504,9 @@ impl RetentionManagerContract {
 // ---------------------------------------------------------------------------
 // Tests — Issue #321
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod policy_update_regression_tests;
 
 #[cfg(test)]
 mod tests {
