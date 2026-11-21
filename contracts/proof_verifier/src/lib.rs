@@ -3,6 +3,45 @@
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Bytes, BytesN, Env, Vec};
 
+/// # Proof Input Validation Invariants
+///
+/// All proof verification in this module enforces the following invariants:
+///
+/// ## 1. **Public Input Count Must Match Verification Key**
+///    - The number of public inputs plus one must equal `vk.ic.len()`
+///    - Format: `public_inputs.len() + 1 == vk.ic.len()`
+///    - Violation Result: `verify()` returns `false` (format rejection, not cryptographic)
+///    - Rationale: Groth16 verification requires exact positional alignment with IC vector
+///
+/// ## 2. **Proof Digest Binding (Reference Mode Only)**
+///    - When using `verify_with_reference()`, the proof bytes must exactly match the digest stored at registration
+///    - Format: `sha256(proof) == reference.proof_hash`
+///    - Violation Result: `verify_with_reference()` returns `false`
+///    - Rationale: Prevents replay and proof mutation attacks; each reference authorizes specific proof material
+///
+/// ## 3. **Reference Expiry Window**
+///    - A reference is valid from registration through `expires_at_ledger` (inclusive)
+///    - Invalid from `expires_at_ledger + 1` onward
+///    - Format: `ledger.sequence() <= reference.expires_at_ledger` for validity
+///    - Violation Result: `verify_with_reference()` returns `false`
+///    - Rationale: Enforces mandatory proof lifetime cap (~30 days); prevents indefinite authorization
+///
+/// ## 4. **Reference Revocation**
+///    - A revoked reference may never authorize verification, regardless of expiry status
+///    - Format: `reference.revoked == false` required for any verification
+///    - Violation Result: `verify_with_reference()` returns `false`
+///    - Rationale: Allows immediate cancellation of compromised or mistaken authorizations
+///
+/// ## 5. **No Private Data Exposure**
+///    - Error messages must not leak employee identities, salary amounts, or raw proof material
+///    - All rejection codes are generic (e.g., `ReferenceExpired`, `ReferenceRevoked`, `ProofMismatch`)
+///    - Rationale: Preserves privacy in payroll contexts; operators can correlate events internally via audit logs
+///
+/// These invariants are enforced across all public entry points:
+/// - `verify()` / `verify_payment_proof()`: inputs 1, 5
+/// - `verify_with_reference()`: inputs 1–5
+/// - `register_proof_reference()`: input 3 (TTL cap checked via `MAX_REFERENCE_TTL_LEDGERS`)
+
 /// Groth16 proof components (G1 A, G2 B, G1 C) for BN254.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
