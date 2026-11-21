@@ -10050,6 +10050,11 @@ impl Payroll {
 
     /// Initialise the multi-stage approval tracker for a draft revision.
     ///
+    /// This entry point and [`Self::submit_draft_approval`] enforce approval
+    /// invalidation invariants A1 to A4 in `APPROVAL_INVALIDATION_INVARIANTS.md`:
+    /// one protected hash per revision, rejection of stale hashes, one approval
+    /// per signer, and a locked revision that accepts no further approvals.
+    ///
     /// Only the admin may call. The tracker is bound to the **protected
     /// content hash** of the revision — total amount, employee count,
     /// obligation root, and metadata hash — so any later revision of those
@@ -10098,6 +10103,10 @@ impl Payroll {
     }
 
     /// Record an approval signature against a draft's protected revision.
+    ///
+    /// See invariants A1 to A4 in `APPROVAL_INVALIDATION_INVARIANTS.md`. Rejection
+    /// carries only a generic reason, never the stale hash, signer data, or
+    /// payroll values.
     ///
     /// The supplied `protected_content_hash` must match the revision the
     /// tracker is bound to; a stale hash is rejected so an approval collected
