@@ -9,8 +9,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Sy
 // The `version` field on `SalaryCommitment` enforces the following invariants:
 //
 // I-V1: Monotonic Increase
-//   - `version` increments by 1 (via `saturating_add(1)`) on every mutation
-//     (store, update, rotate).
+//   - `version` starts at 1 on `store_commitment` and increments by 1 (via
+//     `saturating_add(1)`) on every update or rotate. `store_commitment` rejects an
+//     employee that already has a commitment, so the counter cannot be reset.
 //   - The counter never decreases, stays constant, or wraps: it is
 //     monotonically non-decreasing.
 //
@@ -246,6 +247,18 @@ impl SalaryCommitmentContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
         Self::validate_commitment_value(&env, &commitment);
+
+        // A second store would reset `version` to 1 and replace the live record without archiving
+        // it, breaking I-V1 and I-V4. Changes to an existing commitment go through
+        // `update_commitment` or `rotate_commitment`.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Commitment(employee.clone()))
+        {
+            panic!("Commitment already exists: use update_commitment or rotate_commitment");
+        }
+
         Self::register_commitment_uniqueness(&env, &commitment);
 
         let timestamp = env.ledger().timestamp();
@@ -308,7 +321,7 @@ impl SalaryCommitmentContract {
             commitment: new_commitment.clone(),
             created_at: existing.created_at,
             updated_at: env.ledger().timestamp(),
-            version: existing.version + 1,
+            version: existing.version.saturating_add(1),
             revoked: false,
         };
 
@@ -1018,6 +1031,12 @@ impl SalaryCommitmentContract {
         }
     }
 }
+
+#[cfg(test)]
+mod beneficiary_change_tests;
+
+#[cfg(test)]
+mod version_regression_tests;
 
 #[cfg(test)]
 mod tests {
