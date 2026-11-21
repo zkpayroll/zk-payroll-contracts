@@ -18,6 +18,10 @@ This document formalizes the invariants enforced by the proof verifier module to
 - `invariant_input_count_match_success()` — accepts correct counts
 - `invariant_input_count_match_boundary_zero()` — edge case: zero inputs with ic.len() == 1
 - `invariant_input_count_mismatch_returns_false()` — mismatch returns false, not panic
+- `test_validator_reports_input_count_mismatch()` — validator returns the exact safe error code
+- `test_verify_with_empty_verification_key_is_rejected()` — an empty IC vector rejects every input count
+
+**Typed enforcement:** `validate_proof_inputs()` returns `ProofError::InvalidPublicInputCount` for this violation and `ProofError::VerifierNotInitialized` when no key is registered. Both codes are stable integers. The `verify*` entry points call the same validation path and return `false` on rejection, so no private data is exposed through either surface.
 
 ---
 
@@ -113,6 +117,8 @@ All five invariants are:
 1. **Documented** in module docstring (`lib.rs`)
 2. **Implemented** in contract code with enforcement checks
 3. **Tested** with focused success, failure, and boundary tests in `tests.rs` and `expiry_tests.rs`
+
+Structural checks are also available through `validate_proof_inputs()`, which reports `VerifierNotInitialized` (11) and `InvalidPublicInputCount` (10) without exposing any proof or payroll data.
 
 ### Test Breakdown
 - **Invariant #1 (Input Count):** 5 tests
