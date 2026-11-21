@@ -1747,6 +1747,31 @@ pub fn emit_retention_policy_set(
     );
 }
 
+/// Emitted when a per-company retention window override is set, extended, or
+/// cleared (#975). This is a distinct event from `retention_policy_set` because
+/// its payload has a different shape; indexers must not confuse the two.
+///
+/// Privacy-safe: only the company id, record-type symbol, and the previous and
+/// new numeric windows are disclosed. No retained record content is included.
+pub fn emit_retention_override_set(
+    e: &Env,
+    company_id: u64,
+    record_type: Symbol,
+    previous_window_secs: u64,
+    new_window_secs: u64,
+) {
+    publish(
+        e,
+        (payroll_topic(), Symbol::new(e, "retention_override_set")),
+        (
+            company_id,
+            record_type,
+            previous_window_secs,
+            new_window_secs,
+        ),
+    );
+}
+
 /// Emitted when an address is granted dispute-authority permission (#342).
 pub fn emit_dispute_authority_added(e: &Env, authority: Address) {
     publish(
