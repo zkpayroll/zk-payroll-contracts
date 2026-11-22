@@ -66,6 +66,44 @@ pub enum AuditError {
     ConflictingGrant = 20,
     /// An issued delegated grant cannot be expanded; issue a new grant instead.
     GrantExpansionNotAllowed = 21,
+    /// The grant exists but its expiration ledger has not been reached yet.
+    GrantNotExpired = 22,
+    /// The grant expired but the retention grace period has not elapsed yet.
+    GrantNotYetPrunable = 23,
+}
+
+impl AuditError {
+    /// Returns a fixed, actionable message safe to display to clients.
+    ///
+    /// Messages never contain auditor identifiers, employee data, salary
+    /// amounts, or commitment material. Codes and messages are append-only.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::KeyNotFound => "No auditor grant exists; ask an admin to grant access.",
+            Self::WrongAuditor => "The caller does not match the auditor on this grant.",
+            Self::KeyExpired => "The auditor grant has expired; request a fresh grant.",
+            Self::NotKeyGranter => "Only the admin that granted this key may change it.",
+            Self::InsufficientScope => "The grant scope does not cover this query; narrow it or request broader scope.",
+            Self::CommitmentMismatch => "The disclosed values do not match the stored commitment.",
+            Self::InvalidViewKey => "The supplied view key does not belong to this auditor.",
+            Self::ExpirationNotExtended => "The new expiration must be later than the current one.",
+            Self::DelegationNotAllowed => "Delegation is disabled for this grant.",
+            Self::DelegationExceedsParentScope => "The delegated scope exceeds the parent grant scope.",
+            Self::DelegationExceedsParentExpiry => "The delegated expiry exceeds the parent grant expiry.",
+            Self::DelegationRevoked => "The parent grant is gone or revoked; request a new grant.",
+            Self::InvalidProofReference => "The proof reference is empty or invalid.",
+            Self::ChallengeNotFound => "The challenge ID does not exist.",
+            Self::ChallengeExpired => "The challenge deadline has passed; open a new challenge.",
+            Self::ChallengeAlreadyResolved => "This challenge already has a response.",
+            Self::InvalidChallenge => "The challenge is malformed or out of scope.",
+            Self::IntegrityMarkerMissing => "The export has no integrity marker; re-export and verify it.",
+            Self::InvalidEventSequence => "The audit event sequence does not follow the canonical lifecycle.",
+            Self::ConflictingGrant => "This delegate already holds a conflicting grant.",
+            Self::GrantExpansionNotAllowed => "A delegated grant cannot be expanded; issue a new grant.",
+            Self::GrantNotExpired => "The grant is still valid; no expiry action is needed.",
+            Self::GrantNotYetPrunable => "The grant expired but its retention grace period has not elapsed.",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +367,11 @@ impl AuditModule {
 
     /// Remove an expired grant after an administrator-defined ledger grace
     /// period. The grantor remains the authority for its own grant.
+    ///
+    /// Returns `GrantNotExpired` while the key is still valid and
+    /// `GrantNotYetPrunable` during the retention window, matching
+    /// `check_grant_expiry`. `KeyExpired` is reserved for operations that
+    /// genuinely require a fresh grant (verification and delegation).
     pub fn prune_expired_view_key(
         env: Env,
         admin: Address,
@@ -345,10 +388,16 @@ impl AuditModule {
         if record.granted_by != admin {
             return Err(AuditError::NotKeyGranter);
         }
-        if env.ledger().sequence() <= record.expiration_ledger
-            || env.ledger().sequence() < record.expiration_ledger.saturating_add(retention_ledgers)
-        {
-            return Err(AuditError::KeyExpired);
+        // Distinguish "still valid" from "expired but retained". The old
+        // shared `KeyExpired` error was misleading on both paths: it told an
+        // operator to request a fresh grant while the current one was still
+        // active, and gave no hint that waiting out the grace period was the
+        // correct action. `check_grant_expiry` uses the same two conditions.
+        if env.ledger().sequence() <= record.expiration_ledger {
+            return Err(AuditError::GrantNotExpired);
+        }
+        if env.ledger().sequence() < record.expiration_ledger.saturating_add(retention_ledgers) {
+            return Err(AuditError::GrantNotYetPrunable);
         }
 
         Self::revoke_descendants(&env, &auditor);
@@ -471,6 +520,41 @@ impl AuditModule {
             .get(&DataKey::AuditorKey(auditor))
             .ok_or(AuditError::KeyNotFound)?;
         Ok(record.expiration_ledger)
+    }
+
+    /// Read-only expiry diagnostic for an auditor grant (issue #971).
+    ///
+    /// Returns `Ok(())` only when the grant has expired and is past its
+    /// retention grace period, i.e. when `prune_expired_view_key` is safe to
+    /// call. Otherwise returns a stable typed error with an actionable,
+    /// privacy-safe message:
+    ///
+    /// - `KeyNotFound` when no grant exists,
+    /// - `GrantNotExpired` while the key is still valid,
+    /// - `GrantNotYetPrunable` during the retention grace window.
+    ///
+    /// The query is permissionless, never mutates storage, and never emits an
+    /// event, so dashboards can explain expiry state before asking an admin to
+    /// prune. Authorization for the pruning call itself is unchanged.
+    pub fn check_grant_expiry(
+        env: Env,
+        auditor: Address,
+        retention_ledgers: u32,
+    ) -> Result<(), AuditError> {
+        let record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor))
+            .ok_or(AuditError::KeyNotFound)?;
+        let now = env.ledger().sequence();
+
+        if now <= record.expiration_ledger {
+            return Err(AuditError::GrantNotExpired);
+        }
+        if now < record.expiration_ledger.saturating_add(retention_ledgers) {
+            return Err(AuditError::GrantNotYetPrunable);
+        }
+        Ok(())
     }
 
     /// Extend an existing auditor view key to a new `new_expiration_ledger`.
