@@ -148,6 +148,7 @@ for code stability guarantees.
 | `audit_module` | `AuditError::KeyExpired (3)` | The view key expired by ledger sequence. | Retryable after renewal | Request a fresh grant; do not retry the old key. |
 | `audit_module.check_grant_expiry`, `audit_module.prune_expired_view_key` | `AuditError::GrantNotExpired (22)` | Grant is still valid at or before its expiration ledger. | Non-retryable until expiry | Do not resubmit; wait or renew with `refresh_view_key`. |
 | `audit_module.check_grant_expiry`, `audit_module.prune_expired_view_key` | `AuditError::GrantNotYetPrunable (23)` | Grant expired but the retention window has not elapsed. | Retryable after the retention window | Wait until `expiration_ledger + retention_ledgers`, or renew the grant. |
+| `audit_module.generate_view_key`, `audit_module.delegate_view_key` | `AuditError::ExpirationInPast (24)` | Requested expiration ledger is earlier than the current ledger. | Non-retryable as submitted | Resubmit with an expiration at or after the current ledger. |
 | `audit_module` | `AuditError::NotKeyGranter (4)` | Caller is not the administrator that granted the key. | Non-retryable until signer changes | Ask the original grantor to sign. |
 
 See [Auditor Grant Expiry Invariants](./audit-grant-expiry-invariants.md) for the
