@@ -818,4 +818,131 @@ mod e2e {
         assert!(ctx.commitment_client.is_nullifier_used(&alice_nullifier));
         assert!(ctx.commitment_client.is_commitment_locked(&ctx.alice));
     }
+
+    // ── Issue #896: settlement event order when batches finish together ──────
+
+    extern crate std;
+
+    /// Settlement events (`payment_executed`, `run_executed`) for the most
+    /// recent run: the last `run_executed` plus the payments emitted since the
+    /// run before it. Works whether `events().all()` holds one invocation or many.
+    fn last_run_settlement(env: &Env) -> Option<(std::vec::Vec<(Address, i128)>, (u64, i128))> {
+        let all = env.events().all();
+        let mut payments = std::vec::Vec::new();
+        let mut run = None;
+        for event in all.events().iter() {
+            let topics = ev_topics(env, event);
+            if topics.len() < 2 {
+                continue;
+            }
+            let Ok(head) = Symbol::try_from_val(env, &topics.get(0).unwrap()) else { continue };
+            let Ok(kind) = Symbol::try_from_val(env, &topics.get(1).unwrap()) else { continue };
+            if head != Symbol::new(env, "payroll") {
+                continue;
+            }
+            let ContractEventBody::V0(body) = &event.body;
+            let data = Val::try_from_val(env, &body.data).unwrap();
+            if kind == Symbol::new(env, "payment_executed") {
+                if run.is_some() {
+                    payments.clear();
+                    run = None;
+                }
+                payments.push(data.try_into_val(env).unwrap());
+            } else if kind == Symbol::new(env, "run_executed") {
+                run = Some(data.try_into_val(env).unwrap());
+            }
+        }
+        run.map(|run| (payments, run))
+    }
+
+    fn enrol(ctx: &TestContext, employee: &Address, blinding: u8) {
+        let mut blinding_bytes = [0u8; 32];
+        blinding_bytes[31] = blinding;
+        let commitment = ctx
+            .commitment_client
+            .compute_commitment(&5000u64, &BytesN::from_array(&ctx.env, &blinding_bytes));
+        ctx.commitment_client.store_commitment(employee, &commitment);
+        ctx.registry_client
+            .add_employee(&ctx.company_id, employee, &commitment);
+    }
+
+    fn batch(env: &Env, employees: &[&Address]) -> (Vec<BytesN<256>>, Vec<i128>, Vec<Address>) {
+        let (mut proofs, mut amounts, mut list) = (Vec::new(env), Vec::new(env), Vec::new(env));
+        for employee in employees {
+            proofs.push_back(mock_proof(env));
+            amounts.push_back(5_000i128);
+            list.push_back((*employee).clone());
+        }
+        (proofs, amounts, list)
+    }
+
+    /// Two batches settling in the same ledger emit their settlement events in
+    /// execution order: each run's payments (in batch order) precede its own
+    /// `run_executed`, and run ids strictly increase even with no ledger advance.
+    #[test]
+    fn test_settlement_event_order_for_batches_in_same_ledger() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let bob = Address::generate(env);
+        let carol = Address::generate(env);
+        enrol(&ctx, &ctx.alice, 123);
+        enrol(&ctx, &bob, 124);
+        enrol(&ctx, &carol, 125);
+        ctx.token_client.mint(&ctx.treasury, &50_000i128);
+        let ledger = (env.ledger().sequence(), env.ledger().timestamp());
+
+        let (p, a, e) = batch(env, &[&ctx.alice, &bob]);
+        let run_1 = ctx.payroll_client.batch_process_payroll(
+            &p, &a, &e, &10_000i128, &test_nonce(env, 40), &None, &ctx.source,
+        );
+        let (payments_1, settled_1) = last_run_settlement(env).expect("run 1 settled");
+
+        let (p, a, e) = batch(env, &[&carol]);
+        let run_2 = ctx.payroll_client.batch_process_payroll(
+            &p, &a, &e, &5_000i128, &test_nonce(env, 41), &None, &ctx.source,
+        );
+        let (payments_2, settled_2) = last_run_settlement(env).expect("run 2 settled");
+
+        // Boundary: both batches finished without the ledger moving.
+        assert_eq!((env.ledger().sequence(), env.ledger().timestamp()), ledger);
+        assert!(run_2 > run_1, "run ids must strictly increase within a ledger");
+        assert_eq!(settled_1, (run_1, 10_000i128));
+        assert_eq!(settled_2, (run_2, 5_000i128));
+        assert_eq!(payments_1, std::vec![(ctx.alice.clone(), 5_000i128), (bob.clone(), 5_000i128)]);
+        assert_eq!(payments_2, std::vec![(carol.clone(), 5_000i128)]);
+    }
+
+    /// A batch replaying a nonce in the same ledger is rejected and settles
+    /// nothing: balances are unchanged and the earlier run stays the last one.
+    #[test]
+    fn test_replayed_batch_in_same_ledger_emits_no_settlement() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let bob = Address::generate(env);
+        enrol(&ctx, &ctx.alice, 123);
+        enrol(&ctx, &bob, 124);
+        ctx.token_client.mint(&ctx.treasury, &50_000i128);
+
+        let (p, a, e) = batch(env, &[&ctx.alice]);
+        let run_1 = ctx.payroll_client.batch_process_payroll(
+            &p, &a, &e, &5_000i128, &test_nonce(env, 42), &None, &ctx.source,
+        );
+
+        let settled_before = last_run_settlement(env).expect("run 1 settled");
+        assert_eq!(settled_before, (std::vec![(ctx.alice.clone(), 5_000i128)], (run_1, 5_000i128)));
+
+        let (p, a, e) = batch(env, &[&bob]);
+        let replay = ctx.payroll_client.try_batch_process_payroll(
+            &p, &a, &e, &5_000i128, &test_nonce(env, 42), &None, &ctx.source,
+        );
+        assert!(replay.is_err(), "replayed nonce must be rejected");
+        assert_eq!(ctx.token_client.balance(&bob), 0);
+        assert_eq!(ctx.token_client.balance(&ctx.treasury), 45_000i128);
+
+        // No new run_executed: either nothing was recorded for the failed call,
+        // or the latest settlement is still run 1.
+        if let Some((_, settled)) = last_run_settlement(env) {
+            assert_eq!(settled, (run_1, 5_000i128));
+        }
+    }
 }
