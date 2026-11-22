@@ -194,6 +194,56 @@ fn test_execute_after_close_rejected() {
 }
 
 #[test]
+fn adversarial_timestamps_classify_each_period_boundary_inclusively() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_boundaries");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // Exercise both sides of every transition. The execution end and close
+    // timestamps are inclusive; the next second moves into the next state.
+    let cases = [
+        (EXEC_START - 1, SettlementWindowStatus::PreOpen),
+        (EXEC_START, SettlementWindowStatus::Executable),
+        (EXEC_END, SettlementWindowStatus::Executable),
+        (EXEC_END + 1, SettlementWindowStatus::Grace),
+        (CLOSE_AT, SettlementWindowStatus::Grace),
+        (CLOSE_AT + 1, SettlementWindowStatus::Closed),
+    ];
+
+    for (timestamp, expected) in cases {
+        set_timestamp(&env, timestamp);
+        assert_eq!(
+            payroll.get_settlement_window_status(&period),
+            Some(expected),
+            "unexpected period status at timestamp {timestamp}"
+        );
+    }
+}
+
+#[test]
+fn reversed_timestamp_after_close_does_not_keep_period_closed() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_clock_regression");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, CLOSE_AT + 1);
+    assert_eq!(
+        payroll.get_settlement_window_status(&period),
+        Some(SettlementWindowStatus::Closed)
+    );
+
+    // A clock rollback must be evaluated from the current ledger timestamp,
+    // without persisting a stale Closed classification.
+    set_timestamp(&env, EXEC_START);
+    assert_eq!(
+        payroll.get_settlement_window_status(&period),
+        Some(SettlementWindowStatus::Executable)
+    );
+}
+
+#[test]
 fn test_batch_process_payroll_respects_window() {
     let env = Env::default();
     let (payroll, _admin, treasury, _treasury_owner, employee) = setup_payroll(&env);
