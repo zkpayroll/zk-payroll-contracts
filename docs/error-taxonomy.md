@@ -80,6 +80,14 @@ Audit errors relate to auditor permissions, view keys, and audit scope constrain
 permissions or stale state. `ViewKeyExpired` (202) is retryable after requesting
 renewal from the admin.
 
+The `audit_module` contract also defines contract-local codes `GrantNotExpired
+(22)` and `GrantNotYetPrunable (23)` for its read-only expiry diagnostic and
+prune gating. These are classified by the `audit_module` contract name, not by
+the shared global ranges above. `GrantNotYetPrunable` is the only retryable one
+of the pair, and only after the retention window has elapsed. See [Auditor Grant
+Expiry Invariants](./audit-grant-expiry-invariants.md) for the exact boundary
+rules and privacy guarantees.
+
 ### Payment Execution (300-399)
 
 Payment errors occur during payment processing and employee payment state transitions.

@@ -129,6 +129,14 @@ report it rather than displaying it to end users.
 | `audit_module` | `AuditError::KeyNotFound (1)` | Auditor has no granted view key. | Non-retryable until granted | Ask an admin to grant a view key. |
 | `audit_module` | `AuditError::WrongAuditor (2)` / `InvalidViewKey (7)` | The caller or supplied key material does not match the grant. | Non-retryable until corrected | Re-authenticate the auditor and load the correct key material. |
 | `audit_module` | `AuditError::KeyExpired (3)` | The view key expired by ledger sequence. | Retryable after renewal | Request a fresh grant; do not retry the old key. |
+| `audit_module.check_grant_expiry`, `audit_module.prune_expired_view_key` | `AuditError::GrantNotExpired (22)` | Grant is still valid at or before its expiration ledger. | Non-retryable until expiry | Do not resubmit; wait or renew with `refresh_view_key`. |
+| `audit_module.check_grant_expiry`, `audit_module.prune_expired_view_key` | `AuditError::GrantNotYetPrunable (23)` | Grant expired but the retention window has not elapsed. | Retryable after the retention window | Wait until `expiration_ledger + retention_ledgers`, or renew the grant. |
+| `audit_module` | `AuditError::NotKeyGranter (4)` | Caller is not the administrator that granted the key. | Non-retryable until signer changes | Ask the original grantor to sign. |
+
+See [Auditor Grant Expiry Invariants](./audit-grant-expiry-invariants.md) for the
+full state model, boundary semantics (expiration is inclusive, retention is
+inclusive at its far edge), and the guarantee that a rejected prune never
+changes grant state.
 | `audit_module` | `AuditError::InsufficientScope (5)` | Auditor scope does not cover the requested report or employee. | Non-retryable until scope changes | Request broader scope or narrow the query. |
 | `audit_module` | `AuditError::CommitmentMismatch (6)` | Claimed salary/blinding pair does not match stored commitment. | Non-retryable for same proof data | Regenerate the disclosure package from source payroll data. |
 | `audit_module.verify_audit_export_integrity` | `AuditError::IntegrityMarkerMissing (18)` | The supplied `AuditMetadataSummary` has an all-zero integrity marker, so its contents cannot be bound. | Non-retryable until re-exported | Re-run `export_audit_summary` and verify the fresh summary; do not trust summaries received without a marker. See [Audit Export Integrity](./audit-export-integrity.md). |
