@@ -235,6 +235,31 @@ pub struct PendingThresholdRotation {
     pub effective_after: u64,
 }
 
+// -- Issue #990: payroll run identifiers -------------------------------------
+
+/// A scoped, per-company payroll run identifier recorded in the registry.
+///
+/// The identifier (`run_id_bytes`) is a 32-byte token supplied by the caller
+/// (e.g. a hash of the period label, company ID, and a nonce). The registry
+/// enforces that the same identifier cannot be registered twice for the same
+/// company, so any two executions that would otherwise collide are rejected
+/// before they reach the payroll contract.
+///
+/// No salary, employee, or amount data is stored here; the struct carries only
+/// what an audit needs to correlate an on-chain event with an off-chain run.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayrollRunIdentifier {
+    /// The company this run is scoped to.
+    pub company_id: u64,
+    /// Caller-supplied 32-byte run identifier (e.g. H(period || company || nonce)).
+    pub run_id_bytes: BytesN<32>,
+    /// Ledger timestamp at which this identifier was registered.
+    pub registered_at: u64,
+    /// Company admin that registered it.
+    pub registered_by: Address,
+}
+
 /// Storage key space for the payroll registry.
 ///
 /// - `Company(u64)`               ? `CompanyInfo`              (Persistent)
@@ -247,6 +272,7 @@ pub struct PendingThresholdRotation {
 /// - `PendingThresholdRotation(u64)` ? `PendingThresholdRotation` (Persistent, issue #353)
 /// - `CompensationPolicy(u64, u64)` ? `CompensationPolicy`     (Persistent, keyed by effective date)
 /// - `CompensationPolicySchedule(u64)` ? `Vec<u64>`            (Persistent, ascending effective dates)
+/// - `RunIdentifier(u64, BytesN<32>)` ? `PayrollRunIdentifier` (Persistent, issue #990)
 #[contracttype]
 pub enum DataKey {
     Company(u64),
@@ -273,6 +299,9 @@ pub enum DataKey {
     /// "latest scheduled date" used by effective-date validation and as the
     /// ordering used to resolve the policy in force at a timestamp.
     CompensationPolicySchedule(u64),
+    /// Consumed payroll run identifier scoped to a company (issue #990).
+    /// Keyed by `(company_id, run_id_bytes)`; value is `PayrollRunIdentifier`.
+    RunIdentifier(u64, BytesN<32>),
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +508,42 @@ pub trait PayrollRegistryTrait {
 
     /// Return `true` iff a compensation policy is in force at `at_timestamp`.
     fn is_compensation_policy_effective(env: Env, company_id: u64, at_timestamp: u64) -> bool;
+
+    // -- Issue #990: payroll run identifiers ----------------------------------
+
+    /// Register a unique payroll run identifier for a company.
+    ///
+    /// `run_id_bytes` is a 32-byte caller-supplied token. The registry
+    /// enforces per-company uniqueness: a second call with the same
+    /// `(company_id, run_id_bytes)` pair panics with an actionable message.
+    /// The all-zeros identifier is rejected as an uninitialised value.
+    ///
+    /// Requires authorisation from the company admin.
+    fn register_payroll_run_id(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        run_id_bytes: BytesN<32>,
+    ) -> PayrollRunIdentifier;
+
+    /// Return `true` iff `run_id_bytes` has already been registered for
+    /// `company_id`.
+    fn is_run_id_registered(env: Env, company_id: u64, run_id_bytes: BytesN<32>) -> bool;
+
+    /// Return the stored `PayrollRunIdentifier` for a company and identifier,
+    /// or `None` when it has never been registered.
+    fn get_run_identifier(
+        env: Env,
+        company_id: u64,
+        run_id_bytes: BytesN<32>,
+    ) -> Option<PayrollRunIdentifier>;
+
+    /// Assert that `run_id_bytes` has not been used for `company_id`, panicking
+    /// with an actionable message otherwise.
+    ///
+    /// Read-only: no authorisation and no state change. Use this as a
+    /// preflight guard before submitting a payroll execution.
+    fn require_run_id_available(env: Env, company_id: u64, run_id_bytes: BytesN<32>);
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,6 +1538,92 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
     fn is_compensation_policy_effective(env: Env, company_id: u64, at_timestamp: u64) -> bool {
         Self::resolve_effective_compensation_policy(&env, company_id, at_timestamp).is_some()
+    }
+
+    // -- Issue #990: payroll run identifiers ----------------------------------
+
+    fn register_payroll_run_id(
+        env: Env,
+        company_id: u64,
+        admin: Address,
+        run_id_bytes: BytesN<32>,
+    ) -> PayrollRunIdentifier {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        // Verify the company exists and that the caller is its admin.
+        let company = env
+            .storage()
+            .persistent()
+            .get::<DataKey, CompanyInfo>(&DataKey::Company(company_id))
+            .expect("Company not found");
+
+        if company.admin != admin {
+            panic!("Only the company admin can register a payroll run identifier");
+        }
+
+        // Reject the all-zeros sentinel so callers that forget to initialise
+        // the field get a clear error rather than a silently consumed slot.
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if run_id_bytes == zero {
+            panic!("Payroll run identifier must not be the zero value");
+        }
+
+        let key = DataKey::RunIdentifier(company_id, run_id_bytes.clone());
+
+        if env.storage().persistent().has(&key) {
+            panic!(
+                "Payroll run identifier already registered for company {}; \
+                 each run must use a distinct identifier",
+                company_id
+            );
+        }
+
+        let record = PayrollRunIdentifier {
+            company_id,
+            run_id_bytes: run_id_bytes.clone(),
+            registered_at: env.ledger().timestamp(),
+            registered_by: admin.clone(),
+        };
+
+        env.storage().persistent().set(&key, &record);
+
+        env.events().publish(
+            (Symbol::new(&env, "RunIdentifierRegistered"), company_id),
+            run_id_bytes,
+        );
+
+        record
+    }
+
+    fn is_run_id_registered(env: Env, company_id: u64, run_id_bytes: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::RunIdentifier(company_id, run_id_bytes))
+    }
+
+    fn get_run_identifier(
+        env: Env,
+        company_id: u64,
+        run_id_bytes: BytesN<32>,
+    ) -> Option<PayrollRunIdentifier> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RunIdentifier(company_id, run_id_bytes))
+    }
+
+    fn require_run_id_available(env: Env, company_id: u64, run_id_bytes: BytesN<32>) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::RunIdentifier(company_id, run_id_bytes))
+        {
+            panic!(
+                "Payroll run identifier already registered for company {}; \
+                 use a distinct identifier for each run",
+                company_id
+            );
+        }
     }
 }
 
