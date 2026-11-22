@@ -38,6 +38,23 @@ Once `current_approvals` reaches `required_approvals`, the tracker is locked and
 
 **Enforcement points:** `cleanup_stale_approval`, `check_stale_approval`, `get_stale_approval_status`.
 
+## A7: Checked amendment failures are typed and leave no partial state
+
+`amend_draft_rollback_checked` is the additive, non-panicking counterpart to
+`amend_draft_with_rollback`. It validates every precondition in a read-only preflight
+helper (`preflight_amend_draft_with_rollback`) before any storage write, then applies the
+change with at most one write via `apply_amendment`. A rejection therefore cannot leave a
+partially updated approval tracker.
+
+Errors are unit-only, append-only `ApprovalInvalidationError` codes (8401 to 8407). They
+name only the failed precondition, never an amount, signer, or content hash. An unchanged
+protected revision returns `NoRevisionChange` rather than a misleading success, since
+there is nothing to invalidate. The legacy panicking API maps these codes back to its
+original messages, so existing callers behave identically.
+
+**Enforcement points:** `preflight_amend_draft_with_rollback`, `apply_amendment`,
+`amend_draft_rollback_checked`.
+
 ## Test coverage
 
 - `contracts/payroll/tests/approval_rollback.rs`: stale hash, duplicate signer, lock, and amendment rollback.
