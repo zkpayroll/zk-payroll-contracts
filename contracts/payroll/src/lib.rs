@@ -1901,8 +1901,8 @@ impl Payroll {
                     "Treasury token unavailable: cannot confirm the balance to reserve against"
                 ),
             };
-        let reserved = Self::get_locked_funds(e.clone(), addrs.token.clone());
         let buffer = Self::get_treasury_balance_buffer(e.clone());
+        let reserved = Self::get_locked_funds(e.clone(), addrs.token.clone());
 
         match treasury_reservation::check_reservation_with_buffer(
             total_balance,
@@ -1931,6 +1931,7 @@ impl Payroll {
                 _ => panic!("Treasury token unavailable: cannot confirm balance before payout"),
             };
         let buffer = Self::get_treasury_balance_buffer(e.clone());
+        let reserved = Self::get_locked_funds(e.clone(), addrs.token.clone());
         if total_balance < amount {
             panic!(
                 "Insufficient treasury balance: available {} but batch requires {}",
@@ -1938,10 +1939,11 @@ impl Payroll {
             );
         }
         let remaining = total_balance - amount;
-        if remaining < buffer {
+        let protected = buffer.saturating_add(reserved.max(0));
+        if remaining < protected {
             panic!(
-                "Treasury balance buffer would be breached: payout of {} leaves {}, below the configured buffer of {}",
-                amount, remaining, buffer
+                "Treasury reservation would be breached: payout of {} leaves {}, below {} reserved for pending payroll and the configured {} buffer",
+                amount, remaining, reserved.max(0), buffer
             );
         }
     }
