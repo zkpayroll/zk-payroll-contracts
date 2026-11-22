@@ -66,6 +66,15 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Sy
 /// (the all-zero "no commitment" sentinel).
 pub const MIN_COMMITTABLE_SALARY: u64 = 1;
 
+/// Commitment scheme `Poseidon(salary, blinding_factor)` (issue #897). Every
+/// commitment stored before scheme versions existed uses this scheme.
+pub const COMMITMENT_SCHEME_POSEIDON_V1: u32 = 1;
+
+/// Scheme versions the proof circuit can verify. A commitment produced under
+/// any other scheme could never be proven against, so it is rejected at store
+/// time rather than failing later during payroll.
+pub const SUPPORTED_COMMITMENT_SCHEMES: [u32; 1] = [COMMITMENT_SCHEME_POSEIDON_V1];
+
 /// Commitment data structure
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -135,6 +144,10 @@ pub enum DataKey {
     PauseManager,
     /// Pending admin rotation proposal (issue #192).
     PendingAdminRotation,
+    /// Commitment scheme version for an employee's commitment (issue #897).
+    /// Absent for commitments stored via `store_commitment`, which are
+    /// `COMMITMENT_SCHEME_POSEIDON_V1`.
+    CommitmentScheme(Address),
 }
 
 #[contract]
@@ -278,6 +291,49 @@ impl SalaryCommitmentContract {
         payroll_events::emit_commitment_stored(&env, employee, commitment);
 
         salary_commitment
+    }
+
+    /// Store a new salary commitment produced under an explicit scheme
+    /// version (issue #897). Only the HR admin may call.
+    ///
+    /// An unsupported `scheme_version` is rejected before any other check or
+    /// storage write, so the commitment value is not reserved and the
+    /// employee can be stored again with a valid version. Otherwise behaves
+    /// exactly like `store_commitment`.
+    pub fn store_commitment_with_scheme(
+        env: Env,
+        employee: Address,
+        commitment: BytesN<32>,
+        scheme_version: u32,
+    ) -> SalaryCommitment {
+        if !Self::is_supported_scheme_version(env.clone(), scheme_version) {
+            panic!("Invalid commitment scheme version: not supported by the payroll circuit (issue #897)");
+        }
+        let stored = Self::store_commitment(env.clone(), employee.clone(), commitment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommitmentScheme(employee), &scheme_version);
+        stored
+    }
+
+    /// True when `scheme_version` is one the payroll circuit can verify.
+    pub fn is_supported_scheme_version(_env: Env, scheme_version: u32) -> bool {
+        SUPPORTED_COMMITMENT_SCHEMES.contains(&scheme_version)
+    }
+
+    /// Scheme version of the employee's commitment, or `None` when the
+    /// employee has no commitment. Legacy commitments report
+    /// `COMMITMENT_SCHEME_POSEIDON_V1`.
+    pub fn get_commitment_scheme(env: Env, employee: Address) -> Option<u32> {
+        if !env.storage().persistent().has(&DataKey::Commitment(employee.clone())) {
+            return None;
+        }
+        Some(
+            env.storage()
+                .persistent()
+                .get(&DataKey::CommitmentScheme(employee))
+                .unwrap_or(COMMITMENT_SCHEME_POSEIDON_V1),
+        )
     }
 
     /// Update an existing salary commitment (rotation for compensation changes).
@@ -1037,6 +1093,9 @@ mod beneficiary_change_tests;
 
 #[cfg(test)]
 mod version_regression_tests;
+
+#[cfg(test)]
+mod scheme_version_tests;
 
 #[cfg(test)]
 mod tests {
