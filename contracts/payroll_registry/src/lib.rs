@@ -246,6 +246,9 @@ pub enum DataKey {
     PayoutMethodConfirmation(u64, Address),
     /// Latest approved payroll revision metadata for a company (#864).
     LatestApprovedPayrollRevision(u64),
+    /// Owning company of a payroll run identifier (#887). Run identifiers are
+    /// claimed globally so two employers can never share one.
+    PayrollRunOwner(BytesN<32>),
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +520,44 @@ impl PayrollRegistry {
                 panic!("Payroll is paused");
             }
         }
+    }
+
+    /// Claim a payroll run identifier for a company (#887).
+    ///
+    /// Run identifiers are unique across *all* employers: a run reference
+    /// already owned by another company is rejected as a collision, and the
+    /// same company cannot claim it twice. Only the active company admin may
+    /// claim. The index stores the owning company id only — no payroll data.
+    pub fn claim_payroll_run_id(env: Env, company_id: u64, admin: Address, run_ref: BytesN<32>) {
+        Self::require_not_paused(&env);
+        let company: CompanyInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Company(company_id))
+            .expect("Company not found");
+        if company.revoked {
+            panic!("Company admin is revoked");
+        }
+        if company.admin != admin {
+            panic!("Only company admin can claim a payroll run identifier");
+        }
+        admin.require_auth();
+
+        let key = DataKey::PayrollRunOwner(run_ref);
+        if let Some(owner) = env.storage().persistent().get::<_, u64>(&key) {
+            if owner == company_id {
+                panic!("Payroll run identifier already claimed by this company");
+            }
+            panic!("Payroll run identifier collides with another employer");
+        }
+        env.storage().persistent().set(&key, &company_id);
+    }
+
+    /// Return the company that owns a payroll run identifier, if claimed (#887).
+    pub fn get_payroll_run_owner(env: Env, run_ref: BytesN<32>) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayrollRunOwner(run_ref))
     }
 
     /// Bump the per-company admin configuration revision and publish an
