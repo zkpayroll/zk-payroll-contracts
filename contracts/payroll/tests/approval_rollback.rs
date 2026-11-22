@@ -8,7 +8,10 @@
 //! | `test_amend_draft_rolls_back_partial_approvals` | Protected field edits roll back approvals to 0 and emit rollback event |
 //! | `test_duplicate_signer_approval_rejected` | Duplicate approval from same signer panics |
 //! | `test_approval_after_lock_rejected` | Approval attempt after draft lock panics |
-use payroll::{signing::compute_protected_content_hash, Payroll, PayrollClient};
+use payroll::{
+    signing::compute_protected_content_hash, ApprovalInvalidationError, Payroll, PayrollClient,
+    PayrollRunIdError,
+};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::{
@@ -265,4 +268,120 @@ fn test_approval_after_lock_rejected() {
     let signer2 = Address::generate(&ctx.env);
     ctx.payroll()
         .submit_draft_approval(&signer2, &draft_id, &approval.protected_content_hash);
+}
+
+// ── Checked approval-invalidation errors (#986) ──────────────────────────────
+// These pin the additive `*_checked` entrypoint: typed, payload-free errors
+// and no state change on every rejection path.
+
+type CheckedAmend = Result<
+    Result<payroll::signing::MultiStageApproval, soroban_sdk::ConversionError>,
+    Result<ApprovalInvalidationError, soroban_sdk::InvokeError>,
+>;
+
+fn checked_amend(
+    ctx: &Ctx,
+    admin: &Address,
+    draft_id: u64,
+    amount: i128,
+    count: u32,
+    root: &BytesN<32>,
+    meta: &BytesN<32>,
+) -> CheckedAmend {
+    ctx.payroll()
+        .try_amend_draft_rollback_checked(admin, &draft_id, &amount, &count, root, meta)
+}
+
+#[test]
+fn test_checked_amend_success_invalidates_prior_approvals() {
+    let ctx = setup();
+    let draft_id = 200u64;
+    let root = BytesN::from_array(&ctx.env, &[0x11; 32]);
+    let meta = BytesN::from_array(&ctx.env, &[0x22; 32]);
+
+    let approval = ctx.payroll().init_draft_approval(
+        &ctx.admin, &draft_id, &10_000i128, &2u32, &root, &meta, &2u32,
+    );
+    let signer = Address::generate(&ctx.env);
+    ctx.payroll()
+        .submit_draft_approval(&signer, &draft_id, &approval.protected_content_hash);
+    assert_eq!(
+        ctx.payroll()
+            .get_draft_approval_state(&draft_id)
+            .unwrap()
+            .current_approvals,
+        1
+    );
+
+    let new_root = BytesN::from_array(&ctx.env, &[0x33; 32]);
+    let updated = checked_amend(
+        &ctx, &ctx.admin, draft_id, 20_000i128, 2u32, &new_root, &meta,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_ne!(updated.protected_content_hash, approval.protected_content_hash);
+    assert_eq!(updated.current_approvals, 0);
+    assert_eq!(updated.current_stage, 0);
+    assert!(!updated.is_locked);
+    assert_eq!(updated.signers.len(), 0);
+}
+
+#[test]
+fn test_checked_amend_rejects_without_state_change() {
+    let ctx = setup();
+    let draft_id = 201u64;
+    let root = BytesN::from_array(&ctx.env, &[0x11; 32]);
+    let meta = BytesN::from_array(&ctx.env, &[0x22; 32]);
+
+    let approval = ctx.payroll().init_draft_approval(
+        &ctx.admin, &draft_id, &10_000i128, &2u32, &root, &meta, &2u32,
+    );
+    let before = ctx.payroll().get_draft_approval_state(&draft_id).unwrap();
+
+    // Non-positive amount.
+    let err = checked_amend(&ctx, &ctx.admin, draft_id, 0i128, 2u32, &root, &meta).unwrap_err();
+    assert_eq!(err, Ok(ApprovalInvalidationError::InvalidTotalAmount));
+
+    // Non-admin caller (explicit check, independent of mocked auth).
+    let intruder = Address::generate(&ctx.env);
+    let err = checked_amend(&ctx, &intruder, draft_id, 20_000i128, 2u32, &root, &meta).unwrap_err();
+    assert_eq!(err, Ok(ApprovalInvalidationError::Unauthorized));
+
+    // Unchanged revision is reported explicitly as a no-op.
+    let err = checked_amend(
+        &ctx, &ctx.admin, draft_id, 10_000i128, 2u32, &root, &meta,
+    )
+    .unwrap_err();
+    assert_eq!(err, Ok(ApprovalInvalidationError::NoRevisionChange));
+
+    // No approval tracker for this draft.
+    let err = checked_amend(&ctx, &ctx.admin, 9999u64, 10_000i128, 2u32, &root, &meta).unwrap_err();
+    assert_eq!(err, Ok(ApprovalInvalidationError::ApprovalNotInitialized));
+
+    let after = ctx.payroll().get_draft_approval_state(&draft_id).unwrap();
+    assert_eq!(before.protected_content_hash, after.protected_content_hash);
+    assert_eq!(before.current_approvals, after.current_approvals);
+    assert_eq!(before.signers.len(), after.signers.len());
+    assert_eq!(approval.protected_content_hash, after.protected_content_hash);
+}
+
+// ── Safe run-identifier errors (#991) ────────────────────────────────────────
+
+#[test]
+fn test_checked_run_id_rejects_reserved_and_missing_without_panic() {
+    let ctx = setup();
+    let admin = ctx.admin.clone();
+
+    let err = ctx
+        .payroll()
+        .try_get_payroll_run_checked(&admin, &u64::MAX)
+        .unwrap_err();
+    assert_eq!(err, Ok(PayrollRunIdError::ReservedRunId));
+
+    let err = ctx
+        .payroll()
+        .try_get_payroll_run_checked(&admin, &12345u64)
+        .unwrap_err();
+    assert_eq!(err, Ok(PayrollRunIdError::RunNotFound));
 }
