@@ -307,6 +307,20 @@ pub fn emit_payment_executed(e: &Env, employee: Address, amount: i128) {
     );
 }
 
+/// Emitted when a payroll correction (draft amendment) is rejected (#886).
+///
+/// Privacy-safe: carries only the opaque draft id, the period label and a
+/// short reason code (`not_pending`, `invalid_total`, `count_limit`,
+/// `delta_limit`, `employee_limit`). Amounts, employee counts, employee
+/// addresses and commitments are deliberately omitted.
+pub fn emit_correction_rejected(e: &Env, draft_id: u64, period: Symbol, reason: Symbol) {
+    publish(
+        e,
+        (payroll_topic(), Symbol::new(e, "correction_rejected")),
+        (draft_id, period, reason),
+    );
+}
+
 /// Emitted when a payroll run is fully executed and recorded on-chain.
 pub fn emit_run_executed(e: &Env, run_id: u64, total_spend: i128) {
     publish(

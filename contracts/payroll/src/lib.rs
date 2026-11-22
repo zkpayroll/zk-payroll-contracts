@@ -6295,6 +6295,74 @@ impl Payroll {
         Self::record_correction_usage(&e, &draft.period_label, delta, new_employee_count);
     }
 
+    /// Check whether a correction to a draft would be accepted (#886).
+    ///
+    /// Read-only preflight for `amend_run_draft`: returns `true` when the
+    /// amendment would pass the draft-state, amount and correction-limit
+    /// checks. On rejection it publishes a privacy-safe `correction_rejected`
+    /// event (draft id, period, reason code only) and returns `false`. Because
+    /// it does not panic, the event is recorded even though the correction is
+    /// refused. No draft or correction budget state is written.
+    pub fn check_draft_correction(
+        e: Env,
+        admin: Address,
+        draft_id: u64,
+        new_total_amount: i128,
+        new_employee_count: u32,
+    ) -> bool {
+        Self::validate_draft_id(draft_id);
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        if admin != addrs.admin {
+            panic!("Unauthorized");
+        }
+        admin.require_auth();
+        let draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+
+        let reason = if draft.state != RunDraftState::Pending {
+            Some("not_pending")
+        } else if new_total_amount <= 0 {
+            Some("invalid_total")
+        } else {
+            let delta = (new_total_amount - draft.total_amount).abs();
+            e.storage()
+                .persistent()
+                .get::<DataKey, CorrectionAuthorizationLimits>(&DataKey::CorrectionAuthorizationLimits)
+                .filter(|limits| limits.is_effective())
+                .and_then(|limits| {
+                    let usage: CorrectionUsage = e
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::CorrectionUsage(draft.period_label.clone()))
+                        .unwrap_or(CorrectionUsage::ZERO);
+                    limits
+                        .check(&usage, delta, new_employee_count)
+                        .err()
+                        .map(|breach| breach.reason_code())
+                })
+        };
+
+        match reason {
+            Some(code) => {
+                payroll_events::emit_correction_rejected(
+                    &e,
+                    draft_id,
+                    draft.period_label,
+                    Symbol::new(&e, code),
+                );
+                false
+            }
+            None => true,
+        }
+    }
+
     // ── Issue #577: payroll correction authorization limits ──────────────────
 
     /// Configure the employer's correction authorization ceilings.
