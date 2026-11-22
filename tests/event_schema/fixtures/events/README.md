@@ -1,7 +1,9 @@
-#Event schema fixtures
+# Event schema fixtures
 
 This directory pins the wire shape of every Soroban event emitted through
-`payroll_events` (`contracts/events/src/lib.rs`). Each file is a JSON map,
+`payroll_events` (`contracts/events/src/lib.rs`). See the
+[human-readable event registry](../../../../contracts/events/EVENT_REGISTRY.md)
+for the supported topic tuples and payload versions. Each file is a JSON map,
 keyed `"<contract-domain>.<event>`, of the topics and payload fields that
 event is expected to publish:
 
@@ -25,7 +27,7 @@ event is expected to publish:
   carries a per-invocation identifier (`Address`, `u64`, ...) only records
   its `type`, since the value is naturally dynamic.
 - `data` is also positional — Soroban events don't carry field names on the
-  wire — `nome` here is documentation for the humans and tools consuming
+  wire — `name` here is documentation for the humans and tools consuming
   the event; only `type` (and field order/count) is actually enforced.
 - `schema_version` is a per-event, repo-only counter. It is **not** part of
   the on-chain payload; consumers key off event name plus shape. Bump it
@@ -36,13 +38,13 @@ event is expected to publish:
 
 The event schema snapshot tests are run with:
 
-```shs
+```sh
 cargo test -p event_schema_snapshots
 ```
 
 To run a single domain's tests or a specific case, use a test filter:
 
-```shs
+```sh
 cargo test -p event_schema_snapshots payroll       # all payroll tests
 cargo test -p event_schema_snapshots case_deposit  # specific scenario
 ```
@@ -66,7 +68,7 @@ Each test:
 3. Decodes the published **data** into the exact Rust type the emitter
    passed in and asserts it back against the input values. If a field is
    added, removed, reordered, or retyped, this decode fails (or the
-   `assert_eql` after it fails).
+   `assert_eq` after it fails).
 4. Builds an `EventSchema` description of what it just observed and
    compares the whole domain's map against the checked-in fixture here.
 
