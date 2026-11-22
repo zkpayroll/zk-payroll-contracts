@@ -2052,6 +2052,7 @@ impl Payroll {
         // Backward-compatible: global pause or any category pause blocks payroll.
         if status.payroll_paused || status.treasury_paused || status.audit_paused || status.admin_paused {
             panic!("Payroll operations are paused");
+        }
         if Self::is_paused(e) {
             panic!("Payroll is paused");
         }
