@@ -13,7 +13,7 @@
 //! payroll cannot be executed early, late, or after expiry.
 
 use pause_manager::PauseManagerClient;
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -22,6 +22,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 /// Errors returned by the settlement window contract.
 ///
 /// Error codes are stable; SDK clients should classify on the numeric value.
+/// Error messages/variants are operational and must not expose employee or salary data.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -49,6 +50,9 @@ pub enum SettlementError {
     PayoutScheduleCollision = 10,
     /// The token interface is not supported for payout settlement (#824).
     UnsupportedTokenInterface = 11,
+    /// Settlement receipt was already consumed; replay is rejected.
+    /// Safe/idempotent: callers may treat this as already-settled.
+    SettlementReceiptReplay = 12,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +124,8 @@ pub enum DataKey {
     PauseManager,
     /// Token interface support override keyed by token Address (#824).
     TokenInterfaceOverride(Address),
+    /// Consumed settlement receipt marker keyed by opaque receipt id.
+    SettlementReceipt(BytesN<32>),
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +512,37 @@ impl SettlementWindowContract {
         Self::check_execution_allowed(env.clone(), company_id, period_id)?;
         Self::validate_payout_token(env, token)?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Settlement receipt replay guard (#1001)
+    // -----------------------------------------------------------------------
+
+    /// Consume an opaque settlement receipt exactly once.
+    ///
+    /// Safe error behavior: replay returns `SettlementReceiptReplay` and
+    /// performs no state mutation. Receipt IDs are opaque; no employee/salary
+    /// data is stored or emitted.
+    pub fn consume_settlement_receipt(
+        env: Env,
+        receipt_id: BytesN<32>,
+    ) -> Result<(), SettlementError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        let key = DataKey::SettlementReceipt(receipt_id);
+        if env.storage().persistent().has(&key) {
+            return Err(SettlementError::SettlementReceiptReplay);
+        }
+        env.storage().persistent().set(&key, &true);
+        Ok(())
+    }
+
+    /// Check whether an opaque settlement receipt has already been consumed.
+    pub fn is_settlement_receipt_consumed(env: Env, receipt_id: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::SettlementReceipt(receipt_id))
     }
 
     // -----------------------------------------------------------------------
@@ -1173,6 +1210,25 @@ mod tests {
 
         // With valid token: succeeds
         client.check_settlement_payout(&company_id, &1, &token_id);
+    }
+
+    #[test]
+    fn test_settlement_receipt_replay_rejected_and_safe() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let receipt = BytesN::from_array(&env, &[7u8; 32]);
+
+        assert!(!client.is_settlement_receipt_consumed(&receipt));
+        assert_eq!(client.try_consume_settlement_receipt(&receipt), Ok(Ok(())));
+        assert!(client.is_settlement_receipt_consumed(&receipt));
+
+        let replay = client.try_consume_settlement_receipt(&receipt);
+        assert_eq!(
+            replay.unwrap_err().unwrap(),
+            SettlementError::SettlementReceiptReplay
+        );
+        // Replay is rejected without mutating consumed state.
+        assert!(client.is_settlement_receipt_consumed(&receipt));
     }
 
     #[test]

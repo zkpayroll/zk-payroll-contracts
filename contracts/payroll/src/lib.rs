@@ -1970,16 +1970,19 @@ impl Payroll {
     }
 
     fn require_not_paused(e: &Env) {
-        if e.storage().persistent().has(&DataKey::PauseManager) {
-            let pm_addr: Address = e
-                .storage()
-                .persistent()
-                .get(&DataKey::PauseManager)
-                .unwrap();
-            let pm_client = PauseManagerClient::new(e, &pm_addr);
-            if pm_client.is_paused() {
-                panic!("Payroll is paused");
-            }
+        if !e.storage().persistent().has(&DataKey::PauseManager) {
+            return;
+        }
+        let pm_addr: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseManager)
+            .unwrap();
+        let pm_client = PauseManagerClient::new(e, &pm_addr);
+        let status = pm_client.get_pause_status();
+        // Backward-compatible: global pause or any category pause blocks payroll.
+        if status.payroll_paused || status.treasury_paused || status.audit_paused || status.admin_paused {
+            panic!("Payroll operations are paused");
         }
     }
 
