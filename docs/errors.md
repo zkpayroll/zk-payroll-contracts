@@ -112,6 +112,23 @@ report it rather than displaying it to end users.
 | `payroll.amend_run_draft`, `amend_draft_with_rollback`, `init_draft_approval` | `"Draft approval snapshot is locked: ..."` | The draft's approved content is snapshot-locked (#648). | Retryable after release | Call `release_draft_approval_snapshot` (which resets approvals), amend, then re-approve. |
 | `payroll.check_run_references`, `check_draft_references` | `PayrollReferenceError` 6490–6500 | A run or draft reference is dangling or contradictory (#649). | Non-retryable; investigate | See [Payroll Reference Integrity Validation](./payroll-reference-integrity.md). |
 
+## Administrative Pause State
+
+| Contract / entrypoint | Error case | Likely cause | Retry? | Recommended recovery |
+|-----------------------|------------|--------------|--------|----------------------|
+| `pause_manager.check_pause_action` | `PauseError::NotInitialized (1)` | No operator has been configured. | No | Initialize the manager before changing pause state. |
+| `pause_manager.check_pause_action` | `PauseError::AlreadyInitialized (2)` | An operator already exists. | No | Use the existing operator; reinitialization is not supported. |
+| `pause_manager.check_pause_action` | `PauseError::UnauthorizedOperator (3)` | The signer is not the operator authorized for this action. | No | Ask the current operator to sign; do not retry with another key. |
+| `pause_manager.check_pause_action` | `PauseError::PendingRotationExists (4)` | A rotation proposal is already pending. | No | Accept or cancel the pending rotation before proposing another. |
+| `pause_manager.check_pause_action` | `PauseError::NoPendingRotation (5)` | There is no proposal to accept or cancel. | No | Propose a rotation first. |
+| `pause_manager.check_pause_action` | `PauseError::InvalidRotationTarget (6)` | The proposed operator is the current operator. | No | Choose a different operator address. |
+
+The preflight query is read-only and permissionless. Its messages are stable,
+actionable, and contain no payroll data. The state-changing pause entrypoints
+retain their existing panic behavior for backward compatibility. See the
+[pause-manager error taxonomy](./error-taxonomy.md#contract-local-pause-manager-errors-1-6)
+for code stability guarantees.
+
 ## Treasury and Token Checks
 
 | Contract / entrypoint | Error case | Likely cause | Retry? | Recommended recovery |
