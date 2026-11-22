@@ -552,6 +552,9 @@ impl RetentionManagerContract {
 mod policy_update_regression_tests;
 
 #[cfg(test)]
+mod archive_query_migration_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pause_manager::{PauseManager, PauseManagerClient};
