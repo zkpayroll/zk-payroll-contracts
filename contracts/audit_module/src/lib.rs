@@ -2,7 +2,7 @@
 
 use pause_manager::PauseManagerClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env,
     Symbol, Vec,
 };
 
@@ -70,6 +70,8 @@ pub enum AuditError {
     GrantNotExpired = 22,
     /// The grant expired but the retention grace period has not elapsed yet.
     GrantNotYetPrunable = 23,
+    /// The requested expiration ledger is already in the past (#890).
+    ExpirationInPast = 24,
 }
 
 impl AuditError {
@@ -102,6 +104,7 @@ impl AuditError {
             Self::GrantExpansionNotAllowed => "A delegated grant cannot be expanded; issue a new grant.",
             Self::GrantNotExpired => "The grant is still valid; no expiry action is needed.",
             Self::GrantNotYetPrunable => "The grant expired but its retention grace period has not elapsed.",
+            Self::ExpirationInPast => "The expiration ledger is already in the past; choose a later ledger.",
         }
     }
 }
@@ -272,6 +275,12 @@ impl AuditModule {
 
     pub fn generate_view_key(env: Env, auditor: Address, expiration_ledger: u32) -> BytesN<32> {
         Self::require_not_paused(&env);
+        // A grant is valid while `sequence <= expiration_ledger`, so the
+        // current ledger is the earliest expiration that is not dead on
+        // arrival (#890). Panics with a typed error to keep the ABI.
+        if let Err(e) = require_future_expiration(&env, expiration_ledger) {
+            panic_with_error!(&env, e);
+        }
         let admin = env.current_contract_address();
 
         let key_bytes = Self::derive_key_bytes(&env, &auditor, expiration_ledger);
@@ -678,6 +687,7 @@ impl AuditModule {
         if !scope_within(parent.max_scope, scope) {
             return Err(AuditError::DelegationExceedsParentScope);
         }
+        require_future_expiration(&env, expiration_ledger)?;
         if expiration_ledger > parent.max_expiration_ledger
             || expiration_ledger > parent.expiration_ledger
         {
@@ -1315,6 +1325,16 @@ fn scope_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
         AuditScope::AggregateOnly => 1,
     };
     rank(child_scope) <= rank(parent_scope)
+}
+
+/// Rejects an expiration ledger that has already passed. The boundary is
+/// inclusive: `expiration_ledger == sequence` is valid for this ledger only,
+/// matching `check_grant_active` (#890).
+fn require_future_expiration(env: &Env, expiration_ledger: u32) -> Result<(), AuditError> {
+    if expiration_ledger < env.ledger().sequence() {
+        return Err(AuditError::ExpirationInPast);
+    }
+    Ok(())
 }
 
 /// Pure check over records the caller already loaded. It performs no storage

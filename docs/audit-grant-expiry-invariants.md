@@ -71,6 +71,14 @@ wrap around and make a live grant appear prunable.
     identifiers, employee data, salary amounts, or commitments. `KeyExpired
     (3)` remains reserved for operations that genuinely require a fresh grant
     (verification and delegation), not for pruning gating.
+12. **Exact expiration boundary (#890).** A grant is valid on its expiration
+    ledger itself (`now == exp`) and expired from `exp + 1`, on every read
+    path (`verify_access`, `is_grant_active`, `check_grant_expiry`) and for
+    delegates, whose access also ends at the parent's `exp + 1`.
+13. **No dead-on-arrival grants (#890).** `generate_view_key` and
+    `delegate_view_key` reject `expiration_ledger < now` with
+    `ExpirationInPast (24)`; `expiration_ledger == now` is accepted and valid
+    for the current ledger only. Covered by `auditor_grant_exact_boundary`.
 
 ## Client guidance
 
