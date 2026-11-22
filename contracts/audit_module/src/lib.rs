@@ -301,40 +301,19 @@ impl AuditModule {
     }
 
     pub fn verify_access(env: Env, auditor: Address) -> bool {
-        match env
+        let record: ViewKeyRecord = match env
             .storage()
             .persistent()
-            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(auditor.clone()))
+            .get(&DataKey::AuditorKey(auditor))
         {
-            Some(record) => {
-                if env.ledger().sequence() > record.expiration_ledger {
-                    return false;
-                }
-                if let Some(parent) = record.parent_auditor.clone() {
-                    let parent_record: ViewKeyRecord = match env
-                        .storage()
-                        .persistent()
-                        .get(&DataKey::AuditorKey(parent.clone()))
-                    {
-                        Some(value) => value,
-                        None => return false,
-                    };
-                    if env.ledger().sequence() > parent_record.expiration_ledger {
-                        return false;
-                    }
-                    if !Self::scope_is_within(parent_record.max_scope, record.scope) {
-                        return false;
-                    }
-                    if record.expiration_ledger > parent_record.max_expiration_ledger
-                        || record.expiration_ledger > parent_record.expiration_ledger
-                    {
-                        return false;
-                    }
-                }
-                true
-            }
-            None => false,
-        }
+            Some(record) => record,
+            None => return false,
+        };
+        let parent = match load_parent_record(&env, &record) {
+            Ok(parent) => parent,
+            Err(_) => return false,
+        };
+        check_grant_active(&env, &record, parent.as_ref()).is_ok()
     }
 
     pub fn revoke_view_key(env: Env, admin: Address, auditor: Address) -> Result<(), AuditError> {
@@ -588,6 +567,11 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
+        // An expired grant cannot be revived by extending it. Regrants must
+        // go through generate_view_key so the new scope is explicit (#970).
+        let parent = load_parent_record(&env, &record)?;
+        require_active_grant(&env, &auditor, &record, parent.as_ref())?;
+
         // Guard against accidentally shortening an active key.
         if new_expiration_ledger <= record.expiration_ledger {
             return Err(AuditError::ExpirationNotExtended);
@@ -646,6 +630,11 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
+        // Expired grants are immutable. Changing their delegation policy
+        // would silently widen a grant that is no longer valid (#970).
+        let parent = load_parent_record(&env, &record)?;
+        require_active_grant(&env, &auditor, &record, parent.as_ref())?;
+
         record.allow_delegation = allow_delegation;
         record.max_scope = max_scope;
         record.max_expiration_ledger = max_expiration_ledger;
@@ -686,7 +675,7 @@ impl AuditModule {
         if !parent.allow_delegation {
             return Err(AuditError::DelegationNotAllowed);
         }
-        if !Self::scope_is_within(parent.max_scope, scope) {
+        if !scope_within(parent.max_scope, scope) {
             return Err(AuditError::DelegationExceedsParentScope);
         }
         if expiration_ledger > parent.max_expiration_ledger
@@ -758,15 +747,16 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
-        if env.ledger().sequence() > record.expiration_ledger {
-            return Err(AuditError::KeyExpired);
-        }
-
         let parent: ViewKeyRecord = env
             .storage()
             .persistent()
             .get(&DataKey::AuditorKey(auditor.clone()))
             .ok_or(AuditError::DelegationRevoked)?;
+
+        // Use the shared rule so an expired delegate or an expired parent can
+        // never be revived by extending the grant (#970). The parent is
+        // required for a delegated grant, so it is passed explicitly here.
+        require_active_grant(&env, &delegate, &record, Some(&parent))?;
 
         if !parent.allow_delegation {
             return Err(AuditError::DelegationNotAllowed);
@@ -786,7 +776,7 @@ impl AuditModule {
         {
             return Err(AuditError::DelegationExceedsParentExpiry);
         }
-        if !Self::scope_is_within(parent.max_scope, record.scope) {
+        if !scope_within(parent.max_scope, record.scope) {
             return Err(AuditError::DelegationExceedsParentScope);
         }
 
@@ -886,35 +876,8 @@ impl AuditModule {
             .persistent()
             .get(&DataKey::AuditorKey(auditor.clone()))
             .ok_or(AuditError::KeyNotFound)?;
-
-        if env.ledger().sequence() > record.expiration_ledger {
-            payroll_events::publish(
-                env,
-                (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
-                (record.expiration_ledger, env.ledger().sequence()),
-            );
-            return Err(AuditError::KeyExpired);
-        }
-
-        if let Some(parent) = record.parent_auditor.clone() {
-            let parent_record: ViewKeyRecord = env
-                .storage()
-                .persistent()
-                .get(&DataKey::AuditorKey(parent.clone()))
-                .ok_or(AuditError::DelegationRevoked)?;
-
-            if env.ledger().sequence() > parent_record.expiration_ledger {
-                return Err(AuditError::DelegationRevoked);
-            }
-            if !Self::scope_is_within(parent_record.max_scope, record.scope) {
-                return Err(AuditError::DelegationExceedsParentScope);
-            }
-            if record.expiration_ledger > parent_record.max_expiration_ledger
-                || record.expiration_ledger > parent_record.expiration_ledger
-            {
-                return Err(AuditError::DelegationExceedsParentExpiry);
-            }
-        }
+        let parent = load_parent_record(env, &record)?;
+        require_active_grant(env, &auditor, &record, parent.as_ref())?;
 
         Ok(record)
     }
@@ -1237,16 +1200,6 @@ impl AuditModule {
             .remove(&DataKey::DelegatedAuditors(auditor.clone()));
     }
 
-    fn scope_is_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
-        let rank = |scope: AuditScope| match scope {
-            AuditScope::FullCompany => 4,
-            AuditScope::TimeRange => 3,
-            AuditScope::EmployeeList => 2,
-            AuditScope::AggregateOnly => 1,
-        };
-        rank(child_scope) <= rank(parent_scope)
-    }
-
     fn record_audit_log(env: &Env, auditor: &Address, scope: AuditScope, matched: bool) {
         let company_id = Symbol::new(env, "default");
         let counter: u32 = env
@@ -1349,6 +1302,87 @@ impl AuditModule {
 mod tests;
 
 // ────────────────────────────────────────────────────────────────────────────
+// Shared grant-expiry validation (Issue #970)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Scope containment shared by the public helper and the grant validator.
+/// A nested scope may never exceed its parent.
+fn scope_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
+    let rank = |scope: AuditScope| match scope {
+        AuditScope::FullCompany => 4,
+        AuditScope::TimeRange => 3,
+        AuditScope::EmployeeList => 2,
+        AuditScope::AggregateOnly => 1,
+    };
+    rank(child_scope) <= rank(parent_scope)
+}
+
+/// Pure check over records the caller already loaded. It performs no storage
+/// reads and emits no events, so read-only queries stay side-effect free.
+fn check_grant_active(
+    env: &Env,
+    record: &ViewKeyRecord,
+    parent: Option<&ViewKeyRecord>,
+) -> Result<(), AuditError> {
+    let now = env.ledger().sequence();
+    if now > record.expiration_ledger {
+        return Err(AuditError::KeyExpired);
+    }
+    if let Some(parent) = parent {
+        if now > parent.expiration_ledger {
+            return Err(AuditError::DelegationRevoked);
+        }
+        if !scope_within(parent.max_scope, record.scope) {
+            return Err(AuditError::DelegationExceedsParentScope);
+        }
+        if record.expiration_ledger > parent.max_expiration_ledger
+            || record.expiration_ledger > parent.expiration_ledger
+        {
+            return Err(AuditError::DelegationExceedsParentExpiry);
+        }
+    }
+    Ok(())
+}
+
+/// Same rule as `check_grant_active`, plus the privacy-safe expiry event for
+/// rejected auditor access.
+fn require_active_grant(
+    env: &Env,
+    auditor: &Address,
+    record: &ViewKeyRecord,
+    parent: Option<&ViewKeyRecord>,
+) -> Result<(), AuditError> {
+    match check_grant_active(env, record, parent) {
+        Ok(()) => Ok(()),
+        Err(AuditError::KeyExpired) => {
+            payroll_events::publish(
+                env,
+                (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
+                (record.expiration_ledger, env.ledger().sequence()),
+            );
+            Err(AuditError::KeyExpired)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Load a delegated grant's parent. Uses the record the caller already has,
+/// so the common non-delegated case performs no additional read.
+fn load_parent_record(
+    env: &Env,
+    record: &ViewKeyRecord,
+) -> Result<Option<ViewKeyRecord>, AuditError> {
+    match &record.parent_auditor {
+        Some(parent) => env
+            .storage()
+            .persistent()
+            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(parent.clone()))
+            .map(Some)
+            .ok_or(AuditError::DelegationRevoked),
+        None => Ok(None),
+    }
+}
+
 // Issue #513: Audit Grant Scope Query Endpoint
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -1375,12 +1409,17 @@ pub fn query_grant_scope(env: Env, auditor: Address) -> Result<ViewKeyRecord, Au
 
 /// Check if a grant is currently active (exists and not expired).
 pub fn is_grant_active(env: Env, auditor: Address) -> bool {
-    match env
+    let record: ViewKeyRecord = match env
         .storage()
         .persistent()
-        .get::<_, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
+        .get(&DataKey::AuditorKey(auditor))
     {
-        Some(record) => env.ledger().sequence() <= record.expiration_ledger,
-        None => false,
-    }
+        Some(record) => record,
+        None => return false,
+    };
+    let parent = match load_parent_record(&env, &record) {
+        Ok(parent) => parent,
+        Err(_) => return false,
+    };
+    check_grant_active(&env, &record, parent.as_ref()).is_ok()
 }

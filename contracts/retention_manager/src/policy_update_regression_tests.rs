@@ -73,10 +73,9 @@ fn each_record_type_gets_its_documented_default_window() {
 #[test]
 fn eligible_at_exactly_eligible_after_and_not_one_second_before() {
     let (env, _id, _admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &100u64);
     client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
 
-    advance(&env, 99);
+    advance(&env, FINALIZED_RETENTION_SECS - 1);
     assert!(!eligible(&client, 1, RecordType::FinalizedBatch));
     advance(&env, 1);
     assert!(eligible(&client, 1, RecordType::FinalizedBatch));
@@ -85,10 +84,9 @@ fn eligible_at_exactly_eligible_after_and_not_one_second_before() {
 #[test]
 fn prune_at_the_boundary_succeeds_and_one_second_before_is_refused() {
     let (env, _id, _admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::CancelledBatch, &50u64);
     client.register_record(&COMPANY, &1u64, &RecordType::CancelledBatch);
 
-    advance(&env, 49);
+    advance(&env, CANCELLED_RETENTION_SECS - 1);
     assert_eq!(
         client
             .try_prune_record(&COMPANY, &1u64, &RecordType::CancelledBatch)
@@ -111,12 +109,20 @@ fn prune_at_the_boundary_succeeds_and_one_second_before_is_refused() {
 #[test]
 fn lengthening_the_window_does_not_extend_an_existing_record() {
     let (env, _id, _admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &10u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 10),
+    );
     let before = client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
 
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1_000_000u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1_000_000),
+    );
 
-    advance(&env, 10);
+    advance(&env, FINALIZED_RETENTION_SECS + 10);
     assert!(eligible(&client, 1, RecordType::FinalizedBatch));
     assert_eq!(
         client
@@ -131,30 +137,52 @@ fn lengthening_the_window_does_not_extend_an_existing_record() {
 fn a_later_update_replaces_an_earlier_one_for_new_records_only() {
     let (env, _id, _admin, client) = setup();
     let now = env.ledger().timestamp();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &10u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 10),
+    );
     let first = client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &20u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 20),
+    );
     let second = client.register_record(&COMPANY, &2u64, &RecordType::FinalizedBatch);
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &30u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 30),
+    );
     let third = client.register_record(&COMPANY, &3u64, &RecordType::FinalizedBatch);
 
-    assert_eq!(first.eligible_after, now + 10);
-    assert_eq!(second.eligible_after, now + 20);
-    assert_eq!(third.eligible_after, now + 30);
+    assert_eq!(first.eligible_after, now + FINALIZED_RETENTION_SECS + 10);
+    assert_eq!(second.eligible_after, now + FINALIZED_RETENTION_SECS + 20);
+    assert_eq!(third.eligible_after, now + FINALIZED_RETENTION_SECS + 30);
 }
 
 #[test]
-fn clearing_an_override_gives_new_records_the_default_and_keeps_old_ones() {
+fn a_clearing_attempt_is_rejected_and_later_updates_reach_only_new_records() {
     let (env, _id, _admin, client) = setup();
     let now = env.ledger().timestamp();
-    client.set_retention_override(&COMPANY, &RecordType::ChallengeRecord, &5u64);
+    let extended = CHALLENGE_RETENTION_SECS + 5;
+    client.set_retention_override(&COMPANY, &RecordType::ChallengeRecord, &extended);
     let old = client.register_record(&COMPANY, &1u64, &RecordType::ChallengeRecord);
-    client.set_retention_override(&COMPANY, &RecordType::ChallengeRecord, &0u64);
+
+    assert_eq!(
+        client.try_set_retention_override(&COMPANY, &RecordType::ChallengeRecord, &0u64),
+        Err(Ok(RetentionError::RetentionWindowShortened))
+    );
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::ChallengeRecord,
+        &(extended + 100),
+    );
     let new = client.register_record(&COMPANY, &2u64, &RecordType::ChallengeRecord);
 
-    assert_eq!(old.eligible_after, now + 5);
-    assert_eq!(new.eligible_after, now + CHALLENGE_RETENTION_SECS);
-    advance(&env, 5);
+    assert_eq!(old.eligible_after, now + extended);
+    assert_eq!(new.eligible_after, now + extended + 100);
+    advance(&env, extended + 1);
     assert!(eligible(&client, 1, RecordType::ChallengeRecord));
     assert!(!eligible(&client, 2, RecordType::ChallengeRecord));
 }
@@ -175,7 +203,11 @@ fn clearing_an_override_that_was_never_set_changes_nothing() {
 fn an_override_for_one_record_type_leaves_the_other_types_on_defaults() {
     let (env, _id, _admin, client) = setup();
     let now = env.ledger().timestamp();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1),
+    );
 
     assert_eq!(
         client
@@ -201,22 +233,27 @@ fn an_override_for_one_record_type_leaves_the_other_types_on_defaults() {
 fn an_override_can_be_set_for_a_company_with_no_records() {
     let (_env, _id, _admin, client) = setup();
 
-    client.set_retention_override(&999u64, &RecordType::ChallengeRecord, &42u64);
+    let extended = CHALLENGE_RETENTION_SECS + 42;
+    client.set_retention_override(&999u64, &RecordType::ChallengeRecord, &extended);
 
     let record = client.register_record(&999u64, &1u64, &RecordType::ChallengeRecord);
-    assert_eq!(record.eligible_after - record.registered_at, 42);
+    assert_eq!(record.eligible_after - record.registered_at, extended);
 }
 
 // ── A policy update never weakens a protection ──────────────────────────────────────────────────
 
 #[test]
-fn a_shorter_window_does_not_lift_an_audit_block() {
+fn a_policy_update_does_not_lift_an_audit_block() {
     let (env, _id, _admin, client) = setup();
     client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
     client.set_audit_block(&COMPANY, &1u64, &RecordType::FinalizedBatch, &true);
 
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1u64);
-    advance(&env, FINALIZED_RETENTION_SECS + 1);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1),
+    );
+    advance(&env, FINALIZED_RETENTION_SECS + 2);
 
     assert!(!eligible(&client, 1, RecordType::FinalizedBatch));
     assert_eq!(
@@ -229,13 +266,17 @@ fn a_shorter_window_does_not_lift_an_audit_block() {
 }
 
 #[test]
-fn a_shorter_window_does_not_lift_a_challenge_block() {
+fn a_policy_update_does_not_lift_a_challenge_block() {
     let (env, _id, _admin, client) = setup();
     client.register_record(&COMPANY, &1u64, &RecordType::ChallengeRecord);
     client.set_challenge_block(&COMPANY, &1u64, &RecordType::ChallengeRecord, &true);
 
-    client.set_retention_override(&COMPANY, &RecordType::ChallengeRecord, &1u64);
-    advance(&env, CHALLENGE_RETENTION_SECS + 1);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::ChallengeRecord,
+        &(CHALLENGE_RETENTION_SECS + 1),
+    );
+    advance(&env, CHALLENGE_RETENTION_SECS + 2);
 
     assert_eq!(
         client
@@ -249,11 +290,15 @@ fn a_shorter_window_does_not_lift_a_challenge_block() {
 #[test]
 fn both_blocks_must_clear_before_a_record_can_be_pruned() {
     let (env, _id, _admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1),
+    );
     client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
     client.set_audit_block(&COMPANY, &1u64, &RecordType::FinalizedBatch, &true);
     client.set_challenge_block(&COMPANY, &1u64, &RecordType::FinalizedBatch, &true);
-    advance(&env, 5);
+    advance(&env, FINALIZED_RETENTION_SECS + 2);
 
     client.set_audit_block(&COMPANY, &1u64, &RecordType::FinalizedBatch, &false);
     assert!(
@@ -292,12 +337,20 @@ fn registering_again_cannot_clear_a_block() {
 #[test]
 fn registering_again_cannot_un_prune_a_tombstone_even_with_a_new_policy() {
     let (env, _id, _admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1),
+    );
     client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
-    advance(&env, 1);
+    advance(&env, FINALIZED_RETENTION_SECS + 2);
     client.prune_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
 
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1_000u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1_000),
+    );
     let _ = client.try_register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
 
     assert!(
@@ -324,10 +377,19 @@ fn the_same_record_id_under_another_type_or_company_registers_independently() {
 #[test]
 fn a_pruned_record_does_not_make_a_sibling_eligible_or_pruned() {
     let (env, _id, _admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1),
+    );
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::CancelledBatch,
+        &(FINALIZED_RETENTION_SECS + 1_000),
+    );
     client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
     client.register_record(&COMPANY, &2u64, &RecordType::CancelledBatch);
-    advance(&env, 1);
+    advance(&env, FINALIZED_RETENTION_SECS + 2);
     client.prune_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
 
     assert!(
@@ -366,7 +428,11 @@ fn the_purger_cannot_change_the_retention_policy() {
 fn a_rejected_policy_update_leaves_the_current_policy_in_force() {
     let (env, contract_id, _admin, client) = setup();
     let now = env.ledger().timestamp();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &500u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 500),
+    );
 
     let attacker = Address::generate(&env);
     env.mock_auths(&[MockAuth {
@@ -382,14 +448,18 @@ fn a_rejected_policy_update_leaves_the_current_policy_in_force() {
 
     env.mock_all_auths();
     let record = client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
-    assert_eq!(record.eligible_after, now + 500);
+    assert_eq!(record.eligible_after, now + FINALIZED_RETENTION_SECS + 500);
 }
 
 #[test]
 fn a_paused_contract_refuses_a_policy_update_and_keeps_the_old_policy() {
     let (env, _id, admin, client) = setup();
     let now = env.ledger().timestamp();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &500u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 500),
+    );
     let pm = paused(&env, &admin, &client);
 
     assert!(client
@@ -398,15 +468,19 @@ fn a_paused_contract_refuses_a_policy_update_and_keeps_the_old_policy() {
 
     pm.unpause();
     let record = client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
-    assert_eq!(record.eligible_after, now + 500);
+    assert_eq!(record.eligible_after, now + FINALIZED_RETENTION_SECS + 500);
 }
 
 #[test]
 fn a_paused_contract_refuses_to_register_and_to_prune() {
     let (env, _id, admin, client) = setup();
-    client.set_retention_override(&COMPANY, &RecordType::FinalizedBatch, &1u64);
+    client.set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(FINALIZED_RETENTION_SECS + 1),
+    );
     client.register_record(&COMPANY, &1u64, &RecordType::FinalizedBatch);
-    advance(&env, 1);
+    advance(&env, FINALIZED_RETENTION_SECS + 2);
     let _pm = paused(&env, &admin, &client);
 
     assert!(client

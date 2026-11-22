@@ -84,11 +84,17 @@ fn test_refresh_inside_retention_renews_key_and_blocks_pruning() {
         AuditError::GrantNotYetPrunable
     );
 
-    // An admin may renew the grant during the grace window; the key rotates
-    // and the grant becomes live again, so pruning must now be rejected for a
-    // different, actionable reason.
+    // An expired grant cannot be revived in place: refresh_view_key is
+    // rejected with KeyExpired. A fresh generate_view_key is the explicit
+    // revival path (#969, #970).
     let new_expiration = env.ledger().sequence() + 200;
-    let new_key = client.refresh_view_key(&admin, &auditor, &new_expiration);
+    assert_eq!(
+        contract_error(client.try_refresh_view_key(&admin, &auditor, &new_expiration)),
+        AuditError::KeyExpired
+    );
+    assert!(!client.verify_access(&auditor));
+
+    let new_key = client.generate_view_key(&auditor, &new_expiration);
     assert_ne!(new_key, old_key);
     assert_eq!(client.get_expiration(&auditor), new_expiration);
     assert_eq!(
