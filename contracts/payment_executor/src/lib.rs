@@ -220,16 +220,18 @@ impl PaymentExecutor {
     }
 
     fn require_not_paused(env: &Env) {
-        if env.storage().persistent().has(&DataKey::PauseManager) {
-            let pm_addr: Address = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PauseManager)
-                .unwrap();
-            let pm_client = PauseManagerClient::new(env, &pm_addr);
-            if pm_client.is_paused() {
-                panic!("Payroll is paused");
-            }
+        if !env.storage().persistent().has(&DataKey::PauseManager) {
+            return;
+        }
+        let pm_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseManager)
+            .unwrap();
+        let pm_client = PauseManagerClient::new(env, &pm_addr);
+        let status = pm_client.get_pause_status();
+        if status.payroll_paused || status.treasury_paused || status.audit_paused || status.admin_paused {
+            panic!("Payroll operations are paused");
         }
     }
 
