@@ -85,10 +85,14 @@ with `set_treasury_balance_buffer`; see
   out of it after a run is prepared, the lock can exceed the balance again. The
   check only governs what payroll itself reserves; `get_safe_treasury_summary`
   and `check_funding_source_readiness` show the current position.
-- Only `prepare_payroll_run` reserves funds. The direct execution entrypoints
+- Only `prepare_payroll_run` reserves funds. Every direct execution entrypoint
   (`batch_process_payroll`, `batch_process_with_expiry`,
-  `batch_process_payroll_bounded`) still do not consult locked funds, but each
-  payout checks that the configured buffer remains in the treasury.
+  `batch_process_payroll_bounded`) now checks that its payout leaves both the
+  aggregate pending-run reservations and the configured buffer in the
+  treasury. This prevents an unrelated execution from consuming funds promised
+  to a pending run. If the live balance has fallen below those protected
+  amounts, execution is rejected until the treasury is replenished or pending
+  runs are cancelled.
 
 ## Privacy
 
