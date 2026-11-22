@@ -851,14 +851,17 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_override_restores_default_window() {
+    fn test_zero_override_is_a_noop_without_an_existing_override() {
         let (env, contract_id, _) = setup();
         let client = RetentionManagerContractClient::new(&env, &contract_id);
         let company_id = 22u64;
         let record_id = 1u64;
 
-        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &1u64);
         client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &0u64);
+        assert_eq!(
+            client.try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &1u64),
+            Err(Ok(RetentionError::RetentionWindowShortened))
+        );
         client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
 
         env.ledger().with_mut(|l| l.timestamp += 2);
@@ -873,13 +876,27 @@ mod tests {
     fn test_override_is_scoped_to_company_and_record_type() {
         let (env, contract_id, _) = setup();
         let client = RetentionManagerContractClient::new(&env, &contract_id);
-        client.set_retention_override(&23u64, &RecordType::FinalizedBatch, &1u64);
+        client.set_retention_override(
+            &23u64,
+            &RecordType::FinalizedBatch,
+            &(FINALIZED_RETENTION_SECS + 1),
+        );
+        client.set_retention_override(
+            &24u64,
+            &RecordType::FinalizedBatch,
+            &(FINALIZED_RETENTION_SECS + 1_000),
+        );
+        client.set_retention_override(
+            &23u64,
+            &RecordType::CancelledBatch,
+            &(FINALIZED_RETENTION_SECS + 2_000),
+        );
 
         client.register_record(&23u64, &1u64, &RecordType::FinalizedBatch);
         client.register_record(&24u64, &2u64, &RecordType::FinalizedBatch);
         client.register_record(&23u64, &3u64, &RecordType::CancelledBatch);
 
-        env.ledger().with_mut(|l| l.timestamp += 2);
+        env.ledger().with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
         assert!(client.is_eligible_for_pruning(&23u64, &1u64, &RecordType::FinalizedBatch));
         assert!(!client.is_eligible_for_pruning(&24u64, &2u64, &RecordType::FinalizedBatch));
         assert!(!client.is_eligible_for_pruning(&23u64, &3u64, &RecordType::CancelledBatch));
@@ -924,11 +941,22 @@ mod tests {
         let company_id = 26u64;
         let record_id = 5u64;
 
-        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
-        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &1u64);
+        let before = client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.set_retention_override(
+            &company_id,
+            &RecordType::FinalizedBatch,
+            &(FINALIZED_RETENTION_SECS + 1),
+        );
 
-        env.ledger().with_mut(|l| l.timestamp += 2);
-        assert!(!client.is_eligible_for_pruning(
+        assert_eq!(
+            client
+                .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+                .unwrap()
+                .eligible_after,
+            before.eligible_after
+        );
+        env.ledger().with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
+        assert!(client.is_eligible_for_pruning(
             &company_id,
             &record_id,
             &RecordType::FinalizedBatch
