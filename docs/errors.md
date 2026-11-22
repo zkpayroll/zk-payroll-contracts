@@ -112,6 +112,23 @@ report it rather than displaying it to end users.
 | `payroll.amend_run_draft`, `amend_draft_with_rollback`, `init_draft_approval` | `"Draft approval snapshot is locked: ..."` | The draft's approved content is snapshot-locked (#648). | Retryable after release | Call `release_draft_approval_snapshot` (which resets approvals), amend, then re-approve. |
 | `payroll.check_run_references`, `check_draft_references` | `PayrollReferenceError` 6490–6500 | A run or draft reference is dangling or contradictory (#649). | Non-retryable; investigate | See [Payroll Reference Integrity Validation](./payroll-reference-integrity.md). |
 
+## Administrative Pause State
+
+| Contract / entrypoint | Error case | Likely cause | Retry? | Recommended recovery |
+|-----------------------|------------|--------------|--------|----------------------|
+| `pause_manager.check_pause_action` | `PauseError::NotInitialized (1)` | No operator has been configured. | No | Initialize the manager before changing pause state. |
+| `pause_manager.check_pause_action` | `PauseError::AlreadyInitialized (2)` | An operator already exists. | No | Use the existing operator; reinitialization is not supported. |
+| `pause_manager.check_pause_action` | `PauseError::UnauthorizedOperator (3)` | The signer is not the operator authorized for this action. | No | Ask the current operator to sign; do not retry with another key. |
+| `pause_manager.check_pause_action` | `PauseError::PendingRotationExists (4)` | A rotation proposal is already pending. | No | Accept or cancel the pending rotation before proposing another. |
+| `pause_manager.check_pause_action` | `PauseError::NoPendingRotation (5)` | There is no proposal to accept or cancel. | No | Propose a rotation first. |
+| `pause_manager.check_pause_action` | `PauseError::InvalidRotationTarget (6)` | The proposed operator is the current operator. | No | Choose a different operator address. |
+
+The preflight query is read-only and permissionless. Its messages are stable,
+actionable, and contain no payroll data. The state-changing pause entrypoints
+retain their existing panic behavior for backward compatibility. See the
+[pause-manager error taxonomy](./error-taxonomy.md#contract-local-pause-manager-errors-1-6)
+for code stability guarantees.
+
 ## Treasury and Token Checks
 
 | Contract / entrypoint | Error case | Likely cause | Retry? | Recommended recovery |
@@ -129,6 +146,14 @@ report it rather than displaying it to end users.
 | `audit_module` | `AuditError::KeyNotFound (1)` | Auditor has no granted view key. | Non-retryable until granted | Ask an admin to grant a view key. |
 | `audit_module` | `AuditError::WrongAuditor (2)` / `InvalidViewKey (7)` | The caller or supplied key material does not match the grant. | Non-retryable until corrected | Re-authenticate the auditor and load the correct key material. |
 | `audit_module` | `AuditError::KeyExpired (3)` | The view key expired by ledger sequence. | Retryable after renewal | Request a fresh grant; do not retry the old key. |
+| `audit_module.check_grant_expiry`, `audit_module.prune_expired_view_key` | `AuditError::GrantNotExpired (22)` | Grant is still valid at or before its expiration ledger. | Non-retryable until expiry | Do not resubmit; wait or renew with `refresh_view_key`. |
+| `audit_module.check_grant_expiry`, `audit_module.prune_expired_view_key` | `AuditError::GrantNotYetPrunable (23)` | Grant expired but the retention window has not elapsed. | Retryable after the retention window | Wait until `expiration_ledger + retention_ledgers`, or renew the grant. |
+| `audit_module` | `AuditError::NotKeyGranter (4)` | Caller is not the administrator that granted the key. | Non-retryable until signer changes | Ask the original grantor to sign. |
+
+See [Auditor Grant Expiry Invariants](./audit-grant-expiry-invariants.md) for the
+full state model, boundary semantics (expiration is inclusive, retention is
+inclusive at its far edge), and the guarantee that a rejected prune never
+changes grant state.
 | `audit_module` | `AuditError::InsufficientScope (5)` | Auditor scope does not cover the requested report or employee. | Non-retryable until scope changes | Request broader scope or narrow the query. |
 | `audit_module` | `AuditError::CommitmentMismatch (6)` | Claimed salary/blinding pair does not match stored commitment. | Non-retryable for same proof data | Regenerate the disclosure package from source payroll data. |
 | `audit_module.verify_audit_export_integrity` | `AuditError::IntegrityMarkerMissing (18)` | The supplied `AuditMetadataSummary` has an all-zero integrity marker, so its contents cannot be bound. | Non-retryable until re-exported | Re-run `export_audit_summary` and verify the fresh summary; do not trust summaries received without a marker. See [Audit Export Integrity](./audit-export-integrity.md). |

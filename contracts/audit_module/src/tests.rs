@@ -1440,7 +1440,7 @@ fn test_prune_expired_view_key_before_grace_period_fails() {
     // pruning must be rejected so the record remains available.
     env.ledger().set_sequence_number(expiration + retention - 1);
     let result = client.try_prune_expired_view_key(&admin, &auditor, &retention);
-    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyExpired);
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::GrantNotYetPrunable);
 
     // The record must still be readable — pruning did not happen.
     assert!(client.try_get_view_key(&auditor).is_ok());
@@ -1482,7 +1482,7 @@ fn test_prune_expired_view_key_before_expiry_fails() {
     // even with a zero retention window.
     env.ledger().set_sequence_number(expiration);
     let result = client.try_prune_expired_view_key(&admin, &auditor, &0);
-    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyExpired);
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::GrantNotExpired);
     assert!(client.try_get_view_key(&auditor).is_ok());
 }
 

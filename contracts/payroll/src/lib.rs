@@ -750,6 +750,61 @@ pub enum StaleApprovalCheckError {
     NoApproval = 8203,
 }
 
+/// Stable, privacy-safe errors for payroll run identifier checks (#991).
+///
+/// Codes are append-only. Every variant is unit-only: no amount, employee
+/// address, commitment, or caller-supplied identifier is echoed back to the
+/// client. The existing panicking entrypoints are unchanged; these codes are
+/// surfaced only by the additive checked helpers and `try_get_payroll_run`.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum PayrollRunIdError {
+    /// `u64::MAX` is reserved and can never be allocated as a run ID.
+    ReservedRunId = 8301,
+    /// The run counter cannot allocate another ID; `u64::MAX` is reserved.
+    RunCounterExhausted = 8302,
+    /// No payroll run is stored under this ID.
+    RunNotFound = 8303,
+    /// The caller is not the admin authorized to read an archived run.
+    UnauthorizedArchivedRun = 8304,
+    /// Contract addresses have not been initialized.
+    NotInitialized = 8305,
+}
+
+/// Stable, privacy-safe errors for approval invalidation (#986).
+///
+/// Codes are append-only and payload-free. They are returned by
+/// `try_amend_draft_with_rollback`, which performs all validation before any
+/// storage write, so a rejected call cannot leave partial state behind.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ApprovalInvalidationError {
+    /// Contract addresses have not been initialized.
+    NotInitialized = 8401,
+    /// The caller is not the configured contract admin.
+    Unauthorized = 8402,
+    /// Payroll is currently paused.
+    Paused = 8403,
+    /// The new total amount must be strictly positive.
+    InvalidTotalAmount = 8404,
+    /// A locked draft snapshot must be released before revising the draft.
+    SnapshotLocked = 8405,
+    /// No approval tracker is initialized for this draft.
+    ApprovalNotInitialized = 8406,
+    /// The new protected fields equal the current revision; nothing to invalidate.
+    NoRevisionChange = 8407,
+}
+
+/// Validated, read-only inputs for a draft amendment. Built by
+/// `preflight_amend_draft_with_rollback` before any storage write.
+struct AmendmentPreflight {
+    approval: signing::MultiStageApproval,
+    new_hash: BytesN<32>,
+    hash_changed: bool,
+}
+
 // ── Issue #342: dispute freeze/thaw controls ─────────────────────────────────
 
 /// Lifecycle status of a payroll dispute.
@@ -1969,6 +2024,18 @@ impl Payroll {
         Self::initialize_storage_version(&e);
     }
 
+    /// Non-panicking pause probe shared by the panicking and checked paths.
+    fn is_paused(e: &Env) -> bool {
+        match e
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::PauseManager)
+        {
+            Some(pm_addr) => PauseManagerClient::new(e, &pm_addr).is_paused(),
+            None => false,
+        }
+    }
+
     fn require_not_paused(e: &Env) {
         if !e.storage().persistent().has(&DataKey::PauseManager) {
             return;
@@ -1983,6 +2050,8 @@ impl Payroll {
         // Backward-compatible: global pause or any category pause blocks payroll.
         if status.payroll_paused || status.treasury_paused || status.audit_paused || status.admin_paused {
             panic!("Payroll operations are paused");
+        if Self::is_paused(e) {
+            panic!("Payroll is paused");
         }
     }
 
@@ -2257,7 +2326,7 @@ impl Payroll {
     }
 
     fn validate_run_id(run_id: u64) {
-        if run_id == u64::MAX {
+        if validate_run_id_checked(run_id).is_err() {
             panic!("Invalid payroll run ID");
         }
     }
@@ -3248,16 +3317,10 @@ impl Payroll {
     }
 
     fn derive_run_id(e: &Env) -> u64 {
-        let counter: u64 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::RunCounter)
-            .unwrap_or(0);
-
-        let run_id = counter + 1;
-        e.storage().persistent().set(&DataKey::RunCounter, &run_id);
-
-        run_id
+        match next_run_id_checked(e) {
+            Ok(run_id) => run_id,
+            Err(_) => panic!("Payroll run counter exhausted"),
+        }
     }
 
     fn is_allowed_payroll_state_transition_internal(
@@ -4135,6 +4198,42 @@ impl Payroll {
             .persistent()
             .get(&DataKey::PayrollRun(run_id))
             .expect("Run not found")
+    }
+
+    /// Checked counterpart to `get_payroll_run` (#991).
+    ///
+    /// Returns stable, payload-free `PayrollRunIdError` codes instead of
+    /// panicking. For archived runs the caller must be the configured admin;
+    /// that is checked explicitly so a wrong caller receives
+    /// `UnauthorizedArchivedRun` rather than a generic host auth failure.
+    pub fn get_payroll_run_checked(
+        e: Env,
+        caller: Address,
+        run_id: u64,
+    ) -> Result<PayrollRun, PayrollRunIdError> {
+        validate_run_id_checked(run_id)?;
+
+        let archived = e.storage().persistent().has(&DataKey::ArchivedRun(run_id))
+            || e
+                .storage()
+                .persistent()
+                .has(&DataKey::ArchiveMarker(run_id));
+        if archived {
+            let addrs: ContractAddresses = e
+                .storage()
+                .persistent()
+                .get(&DataKey::Addresses)
+                .ok_or(PayrollRunIdError::NotInitialized)?;
+            if caller != addrs.admin {
+                return Err(PayrollRunIdError::UnauthorizedArchivedRun);
+            }
+            caller.require_auth();
+        }
+
+        e.storage()
+            .persistent()
+            .get(&DataKey::PayrollRun(run_id))
+            .ok_or(PayrollRunIdError::RunNotFound)
     }
 
     /// Return the latest accounting reconciliation marker for a run, if one
@@ -10053,6 +10152,11 @@ impl Payroll {
 
     /// Initialise the multi-stage approval tracker for a draft revision.
     ///
+    /// This entry point and [`Self::submit_draft_approval`] enforce approval
+    /// invalidation invariants A1 to A4 in `APPROVAL_INVALIDATION_INVARIANTS.md`:
+    /// one protected hash per revision, rejection of stale hashes, one approval
+    /// per signer, and a locked revision that accepts no further approvals.
+    ///
     /// Only the admin may call. The tracker is bound to the **protected
     /// content hash** of the revision — total amount, employee count,
     /// obligation root, and metadata hash — so any later revision of those
@@ -10101,6 +10205,10 @@ impl Payroll {
     }
 
     /// Record an approval signature against a draft's protected revision.
+    ///
+    /// See invariants A1 to A4 in `APPROVAL_INVALIDATION_INVARIANTS.md`. Rejection
+    /// carries only a generic reason, never the stale hash, signer data, or
+    /// payroll values.
     ///
     /// The supplied `protected_content_hash` must match the revision the
     /// tracker is bound to; a stale hash is rejected so an approval collected
@@ -10157,6 +10265,102 @@ impl Payroll {
             .get(&ApprovalKey::DraftApproval(draft_id))
     }
 
+    /// Validate every precondition for a draft amendment before any write (#986).
+    /// This helper is pure with respect to storage: it reads state but never
+    /// mutates it, so a rejection cannot leave a partially updated tracker.
+    fn preflight_amend_draft_with_rollback(
+        e: &Env,
+        admin: &Address,
+        draft_id: u64,
+        new_total_amount: i128,
+        new_employee_count: u32,
+        new_obligation_root: &BytesN<32>,
+        new_metadata_hash: &BytesN<32>,
+    ) -> Result<AmendmentPreflight, ApprovalInvalidationError> {
+        if Self::is_paused(e) {
+            return Err(ApprovalInvalidationError::Paused);
+        }
+        let addrs: ContractAddresses = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .ok_or(ApprovalInvalidationError::NotInitialized)?;
+        if admin != &addrs.admin {
+            return Err(ApprovalInvalidationError::Unauthorized);
+        }
+        if new_total_amount <= 0 {
+            return Err(ApprovalInvalidationError::InvalidTotalAmount);
+        }
+        // Issue #648: a locked snapshot must be released before revising.
+        if draft_approval_snapshot::is_locked(e, draft_id) {
+            return Err(ApprovalInvalidationError::SnapshotLocked);
+        }
+        let approval: signing::MultiStageApproval = e
+            .storage()
+            .persistent()
+            .get(&ApprovalKey::DraftApproval(draft_id))
+            .ok_or(ApprovalInvalidationError::ApprovalNotInitialized)?;
+        let new_hash = signing::compute_protected_content_hash(
+            e,
+            new_total_amount,
+            new_employee_count,
+            new_obligation_root,
+            new_metadata_hash,
+        );
+        let hash_changed = new_hash != approval.protected_content_hash;
+        Ok(AmendmentPreflight {
+            approval,
+            new_hash,
+            hash_changed,
+        })
+    }
+
+    /// Apply a validated amendment with at most one storage write.
+    fn apply_amendment(
+        e: &Env,
+        draft_id: u64,
+        preflight: AmendmentPreflight,
+    ) -> signing::MultiStageApproval {
+        if !preflight.hash_changed {
+            // The legacy API treats an unchanged revision as a no-op.
+            return preflight.approval;
+        }
+        let mut approval = preflight.approval;
+        approval.protected_content_hash = preflight.new_hash;
+        approval.current_approvals = 0;
+        approval.current_stage = 0;
+        approval.is_locked = false;
+        approval.signers = Vec::new(e);
+        e.storage()
+            .persistent()
+            .set(&ApprovalKey::DraftApproval(draft_id), &approval);
+        payroll_events::publish(
+            e,
+            (
+                symbol_short!("payroll"),
+                Symbol::new(e, "approvals_rolled_back"),
+            ),
+            (draft_id,),
+        );
+        approval
+    }
+
+    /// Map a typed failure back to the legacy panic message so the original
+    /// panicking API keeps its observable behavior for existing callers.
+    fn amendment_panic_message(error: ApprovalInvalidationError) -> &'static str {
+        match error {
+            ApprovalInvalidationError::Paused => "Payroll is paused",
+            ApprovalInvalidationError::NotInitialized => "Not initialized",
+            ApprovalInvalidationError::Unauthorized => "Unauthorized",
+            ApprovalInvalidationError::InvalidTotalAmount => "total_amount must be positive",
+            ApprovalInvalidationError::SnapshotLocked => {
+                "Draft approval snapshot is locked: release it with release_draft_approval_snapshot (which resets approvals) before changing the draft"
+            }
+            ApprovalInvalidationError::ApprovalNotInitialized => "Draft approval not initialized",
+            ApprovalInvalidationError::NoRevisionChange => "No protected revision change",
+        }
+    }
+
     /// Revise a draft's protected fields and roll back collected approvals.
     ///
     /// Only the admin may call. When the new protected fields produce a
@@ -10173,54 +10377,49 @@ impl Payroll {
         new_obligation_root: BytesN<32>,
         new_metadata_hash: BytesN<32>,
     ) -> signing::MultiStageApproval {
-        Self::require_not_paused(&e);
-        Self::require_admin(&e, &admin);
-        admin.require_auth();
-
-        if new_total_amount <= 0 {
-            panic!("total_amount must be positive");
-        }
-
-        // Issue #648: a locked snapshot must be released before revising.
-        draft_approval_snapshot::require_snapshot_unlocked(&e, draft_id);
-
-        let mut approval: signing::MultiStageApproval = e
-            .storage()
-            .persistent()
-            .get(&ApprovalKey::DraftApproval(draft_id))
-            .expect("Draft approval not initialized");
-
-        let new_hash = signing::compute_protected_content_hash(
+        let preflight = Self::preflight_amend_draft_with_rollback(
             &e,
+            &admin,
+            draft_id,
             new_total_amount,
             new_employee_count,
             &new_obligation_root,
             &new_metadata_hash,
-        );
+        )
+        .unwrap_or_else(|err| panic!("{}", Self::amendment_panic_message(err)));
+        admin.require_auth();
+        Self::apply_amendment(&e, draft_id, preflight)
+    }
 
-        if new_hash != approval.protected_content_hash {
-            // The protected revision changed: protect the approved revision by
-            // invalidating every approval collected for the old one.
-            approval.protected_content_hash = new_hash;
-            approval.current_approvals = 0;
-            approval.current_stage = 0;
-            approval.is_locked = false;
-            approval.signers = Vec::new(&e);
-            e.storage()
-                .persistent()
-                .set(&ApprovalKey::DraftApproval(draft_id), &approval);
-
-            payroll_events::publish(
-                &e,
-                (
-                    symbol_short!("payroll"),
-                    Symbol::new(&e, "approvals_rolled_back"),
-                ),
-                (draft_id,),
-            );
+    /// Checked counterpart to `amend_draft_with_rollback` (#986).
+    ///
+    /// Returns stable, payload-free `ApprovalInvalidationError` codes instead
+    /// of panicking. Unlike the legacy API, an unchanged protected revision is
+    /// reported as `NoRevisionChange`: there is nothing to invalidate, so the
+    /// caller should not receive a success that looks like a rollback.
+    pub fn amend_draft_rollback_checked(
+        e: Env,
+        admin: Address,
+        draft_id: u64,
+        new_total_amount: i128,
+        new_employee_count: u32,
+        new_obligation_root: BytesN<32>,
+        new_metadata_hash: BytesN<32>,
+    ) -> Result<signing::MultiStageApproval, ApprovalInvalidationError> {
+        let preflight = Self::preflight_amend_draft_with_rollback(
+            &e,
+            &admin,
+            draft_id,
+            new_total_amount,
+            new_employee_count,
+            &new_obligation_root,
+            &new_metadata_hash,
+        )?;
+        if !preflight.hash_changed {
+            return Err(ApprovalInvalidationError::NoRevisionChange);
         }
-
-        approval
+        admin.require_auth();
+        Ok(Self::apply_amendment(&e, draft_id, preflight))
     }
 
     /// Read contract dependency addresses configured during initialization.
@@ -12104,6 +12303,43 @@ impl Payroll {
             .get(&key)
             .expect("Payroll upload checkpoint not found")
     }
+}
+
+// ── Safe run-identifier helpers (#991) ──────────────────────────────────────
+
+/// Check a run ID without panicking. `u64::MAX` is reserved as a sentinel and
+/// is never a valid run ID. The error is unit-only and privacy-safe.
+pub fn validate_run_id_checked(run_id: u64) -> Result<(), PayrollRunIdError> {
+    if run_id == u64::MAX {
+        Err(PayrollRunIdError::ReservedRunId)
+    } else {
+        Ok(())
+    }
+}
+
+/// Boolean convenience wrapper for off-chain callers that only need validity.
+pub fn is_valid_run_id(run_id: u64) -> bool {
+    validate_run_id_checked(run_id).is_ok()
+}
+
+/// Allocate the next run ID without panicking. A counter at `u64::MAX` cannot
+/// yield another valid ID because that value is reserved. The counter is
+/// advanced only on success, so a rejected allocation has no side effects.
+pub fn next_run_id_checked(e: &Env) -> Result<u64, PayrollRunIdError> {
+    let counter: u64 = e
+        .storage()
+        .persistent()
+        .get(&DataKey::RunCounter)
+        .unwrap_or(0);
+    // `u64::MAX` is reserved, so the last allocatable ID is `u64::MAX - 1`.
+    if counter >= u64::MAX - 1 {
+        return Err(PayrollRunIdError::RunCounterExhausted);
+    }
+    let run_id = counter + 1;
+    e.storage()
+        .persistent()
+        .set(&DataKey::RunCounter, &run_id);
+    Ok(run_id)
 }
 
 #[cfg(test)]
@@ -16896,5 +17132,65 @@ mod tests {
             assert_eq!(Address::try_from_val(&env, &fields[1]).unwrap(), admin);
         }
         assert!(found, "expected a run_cancelled event");
+    }
+
+    // ── Safe run-identifier helpers (#991) ───────────────────────────────────
+
+    #[test]
+    fn test_validate_run_id_checked_boundaries() {
+        assert_eq!(validate_run_id_checked(0), Ok(()));
+        assert_eq!(validate_run_id_checked(1), Ok(()));
+        assert_eq!(validate_run_id_checked(u64::MAX - 1), Ok(()));
+        assert_eq!(
+            validate_run_id_checked(u64::MAX),
+            Err(PayrollRunIdError::ReservedRunId)
+        );
+        assert!(is_valid_run_id(0));
+        assert!(!is_valid_run_id(u64::MAX));
+    }
+
+    #[test]
+    fn test_next_run_id_checked_allocates_and_advances() {
+        let env = Env::default();
+        let contract_id = env.register(Payroll, ());
+        env.as_contract(&contract_id, || {
+            assert_eq!(next_run_id_checked(&env), Ok(1));
+            assert_eq!(next_run_id_checked(&env), Ok(2));
+            assert_eq!(
+                env.storage()
+                    .persistent()
+                    .get::<DataKey, u64>(&DataKey::RunCounter),
+                Some(2)
+            );
+        });
+    }
+
+    #[test]
+    fn test_next_run_id_checked_rejects_exhausted_counter_without_write() {
+        let env = Env::default();
+        let contract_id = env.register(Payroll, ());
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::RunCounter, &(u64::MAX - 1));
+            assert_eq!(
+                next_run_id_checked(&env),
+                Err(PayrollRunIdError::RunCounterExhausted)
+            );
+            assert_eq!(
+                env.storage()
+                    .persistent()
+                    .get::<DataKey, u64>(&DataKey::RunCounter),
+                Some(u64::MAX - 1)
+            );
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::RunCounter, &u64::MAX);
+            assert_eq!(
+                next_run_id_checked(&env),
+                Err(PayrollRunIdError::RunCounterExhausted)
+            );
+        });
     }
 }
