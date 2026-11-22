@@ -102,6 +102,10 @@ pub enum PaymentError {
     BatchTooLarge = 18,
     /// The payroll period is already open (cannot reopen an open period) (issue #484).
     PeriodAlreadyOpen = 19,
+    /// The payout recipient cannot be resolved to a payable employee: it has
+    /// no active salary commitment, or it is the company treasury or this
+    /// contract (issue #889). Never includes the address or amount.
+    RecipientUnresolved = 20,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -854,9 +858,13 @@ impl PaymentExecutor {
         // Read the employee commitment from the dedicated commitment contract
         // and company metadata from payroll_registry.
         let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
-        let commitment = commitment_client.get_commitment(&employee).commitment;
         let registry = PayrollRegistryClient::new(&env, &addresses.registry);
         let company: CompanyInfo = registry.get_company(&company_id);
+
+        // Issue #889: refuse to finalize a payout whose recipient does not
+        // resolve, before any proof check, transfer, or state write.
+        Self::require_resolved_recipient(&env, &commitment_client, &company, &employee)?;
+        let commitment = commitment_client.get_commitment(&employee).commitment;
 
         // Ensure only HR admin for this company can trigger payroll and treasury authorizes payment.
         if company.revoked {
@@ -976,6 +984,24 @@ impl PaymentExecutor {
         let _ = nullifier;
 
         Ok(record)
+    }
+
+    /// A recipient resolves when it holds an active (non-revoked) salary
+    /// commitment and is neither the paying treasury nor this contract, so
+    /// funds can never be sent back to their source or stranded (#889).
+    fn require_resolved_recipient(
+        env: &Env,
+        commitments: &SalaryCommitmentContractClient,
+        company: &CompanyInfo,
+        recipient: &Address,
+    ) -> Result<(), PaymentError> {
+        if *recipient == company.treasury || *recipient == env.current_contract_address() {
+            return Err(PaymentError::RecipientUnresolved);
+        }
+        if !commitments.is_commitment_active(recipient) {
+            return Err(PaymentError::RecipientUnresolved);
+        }
+        Ok(())
     }
 
     /// Execute batch payroll for multiple employees
