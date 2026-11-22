@@ -7,7 +7,7 @@
 #![cfg(test)]
 
 use ::token::{Token, TokenClient};
-use payroll::{Payroll, PayrollClient, SettlementWindowStatus};
+use payroll::{Payroll, PayrollClient, PayrollPeriodBoundaryError, SettlementWindowStatus};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
@@ -663,4 +663,102 @@ fn test_mid_grace_period_cancellation_succeeds() {
     let reason = Symbol::new(&env, "mid_grace_cancel");
     payroll.cancel_payroll_run(&admin, &run_id, &reason);
     assert!(payroll.get_pending_run(&run_id).is_none());
+}
+
+#[test]
+fn preflight_returns_typed_errors_on_both_sides_of_each_boundary() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    let unconfigured_period = Symbol::new(&env, "unconfigured");
+
+    set_timestamp(&env, EXEC_START);
+    assert_eq!(
+        payroll.try_check_window_boundaries(&unconfigured_period),
+        Ok(Ok(()))
+    );
+
+    open_period_with_window(&payroll, &admin, &period);
+
+    for (now, expected) in [
+        (
+            EXEC_START - 1,
+            PayrollPeriodBoundaryError::ExecutionNotYetOpen,
+        ),
+        (EXEC_END + 1, PayrollPeriodBoundaryError::ExecutionClosed),
+        (CLOSE_AT + 1, PayrollPeriodBoundaryError::ExecutionClosed),
+    ] {
+        set_timestamp(&env, now);
+        assert_eq!(
+            payroll.try_check_window_boundaries(&period),
+            Err(Ok(expected))
+        );
+    }
+}
+
+#[test]
+fn preflight_allows_both_execution_endpoints() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, _employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    for now in [EXEC_START, EXEC_END] {
+        set_timestamp(&env, now);
+        assert_eq!(payroll.try_check_window_boundaries(&period), Ok(Ok(())));
+    }
+}
+
+#[test]
+fn boundary_errors_are_stable_across_execution_entrypoints() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START - 1);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    assert_eq!(
+        payroll.try_prepare_payroll_run(
+            &proofs,
+            &amounts,
+            &employees,
+            &10_000,
+            &test_nonce(&env, 23),
+            &None,
+        ),
+        Err(Ok(PayrollPeriodBoundaryError::ExecutionNotYetOpen.into()))
+    );
+
+    set_timestamp(&env, EXEC_END + 1);
+    assert_eq!(
+        payroll.try_batch_process_payroll_bounded(
+            &proofs,
+            &amounts,
+            &employees,
+            &10_000,
+            &test_nonce(&env, 24),
+            &None,
+            &1u32,
+        ),
+        Err(Ok(PayrollPeriodBoundaryError::ExecutionClosed.into()))
+    );
+
+    set_timestamp(&env, EXEC_START);
+    let run_id = payroll.prepare_payroll_run(
+        &proofs,
+        &amounts,
+        &employees,
+        &10_000,
+        &test_nonce(&env, 25),
+        &None,
+    );
+    set_timestamp(&env, CLOSE_AT - 1);
+    assert_eq!(
+        payroll.try_expire_pending_run(&admin, &run_id),
+        Err(Ok(
+            PayrollPeriodBoundaryError::CloseBoundaryNotReached.into()
+        ))
+    );
+    assert!(payroll.get_pending_run(&run_id).is_some());
 }

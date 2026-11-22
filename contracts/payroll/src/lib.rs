@@ -3,8 +3,8 @@
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token as soroban_token,
-    Address, Bytes, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short,
+    token as soroban_token, Address, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 use pause_manager::PauseManagerClient;
@@ -20,6 +20,12 @@ use config_audit::{config_keys, no_value_ref, record_config_change, stored_ref, 
 
 pub mod failure_reasons;
 use failure_reasons::{DryRunArgs, PayrollDryRunReport, PayrollFailureReason};
+
+pub mod period_boundaries;
+pub use period_boundaries::{
+    classify_window, close_boundary_reached, execution_error, ranges_overlap, validate_window_order,
+    PayrollPeriodBoundaryError, PeriodBoundaryPhase,
+};
 
 /// Privacy-safe error context filtering for build/contract errors.
 pub mod error_context_filter;
@@ -5880,10 +5886,16 @@ impl Payroll {
             .get(&DataKey::SettlementWindow(period))
         {
             Some(window) => window,
-            None => return true,
+            None => return false,
         };
         let now = e.ledger().timestamp();
-        Self::classify_settlement_window(&window, now) != SettlementWindowStatus::Executable
+        execution_error(classify_window(
+            window.execution_start,
+            window.execution_end,
+            window.close_at,
+            now,
+        ))
+        .is_some()
     }
 
     // ── Issue #475: Bounded batch processing for employee payments ────────────
@@ -5909,6 +5921,10 @@ impl Payroll {
         approvals::require_no_threshold_for_direct_execution(&e);
 
         Self::validate_storage_version_for_operation(&e, "batch_process_payroll_bounded");
+
+        // Issue #940: every execution entrypoint must respect the configured
+        // settlement window, including resumed bounded batches.
+        Self::enforce_settlement_window_for_current_period(&e);
 
         if batch_size == 0 {
             panic!("Batch size must be greater than zero");
@@ -8534,9 +8550,9 @@ impl Payroll {
 
     // ── Issue #316: settlement window enforcement ─────────────────────────────
 
-    /// Reject a proposed inclusive calendar range that intersects another
+    /// Whether a proposed inclusive calendar range intersects another
     /// configured period's range. Reconfiguration of the same label is allowed.
-    fn assert_no_settlement_window_overlap(e: &Env, period: &Symbol, open_at: u64, close_at: u64) {
+    fn settlement_window_overlaps(e: &Env, period: &Symbol, open_at: u64, close_at: u64) -> bool {
         let periods: Vec<Symbol> = e
             .storage()
             .persistent()
@@ -8554,14 +8570,18 @@ impl Payroll {
                 .persistent()
                 .get(&DataKey::SettlementWindow(existing_period));
             if let Some(existing_window) = existing_window {
-                if open_at <= existing_window.close_at && existing_window.open_at <= close_at {
-                    panic!(
-                        "Settlement window overlaps another payroll period; choose a non-overlapping calendar range (error code {})",
-                        PaymentError::SettlementWindowOverlap as u32
-                    );
+                if ranges_overlap(
+                    open_at,
+                    close_at,
+                    existing_window.open_at,
+                    existing_window.close_at,
+                ) {
+                    return true;
                 }
             }
         }
+
+        false
     }
 
     /// Set (or replace) the settlement window for a payroll period. Only the
@@ -8598,17 +8618,14 @@ impl Payroll {
         // Issue #248: reject edits to a period whose configuration is frozen.
         Self::assert_period_config_editable(&e, &period);
 
-        if !(open_at <= execution_start
-            && execution_start <= execution_end
-            && execution_end <= close_at)
+        if let Err(error) = validate_window_order(open_at, execution_start, execution_end, close_at)
         {
-            panic!(
-                "Invalid settlement window: timestamps must satisfy open_at <= execution_start <= execution_end <= close_at (error code {})",
-                PaymentError::InvalidSettlementWindowConfig as u32
-            );
+            panic_with_error!(&e, error);
         }
 
-        Self::assert_no_settlement_window_overlap(&e, &period, open_at, close_at);
+        if Self::settlement_window_overlaps(&e, &period, open_at, close_at) {
+            panic_with_error!(&e, PayrollPeriodBoundaryError::WindowOverlap);
+        }
 
         let window = SettlementWindow {
             open_at,
@@ -8661,14 +8678,20 @@ impl Payroll {
 
     /// Classify a settlement window's timing status relative to `now`.
     fn classify_settlement_window(window: &SettlementWindow, now: u64) -> SettlementWindowStatus {
-        if now < window.execution_start {
-            SettlementWindowStatus::PreOpen
-        } else if now <= window.execution_end {
-            SettlementWindowStatus::Executable
-        } else if now <= window.close_at {
-            SettlementWindowStatus::Grace
-        } else {
-            SettlementWindowStatus::Closed
+        Self::settlement_status_from_phase(classify_window(
+            window.execution_start,
+            window.execution_end,
+            window.close_at,
+            now,
+        ))
+    }
+
+    fn settlement_status_from_phase(phase: PeriodBoundaryPhase) -> SettlementWindowStatus {
+        match phase {
+            PeriodBoundaryPhase::PreOpen => SettlementWindowStatus::PreOpen,
+            PeriodBoundaryPhase::Executable => SettlementWindowStatus::Executable,
+            PeriodBoundaryPhase::Grace => SettlementWindowStatus::Grace,
+            PeriodBoundaryPhase::Closed => SettlementWindowStatus::Closed,
         }
     }
 
@@ -8683,6 +8706,31 @@ impl Payroll {
             &window,
             e.ledger().timestamp(),
         ))
+    }
+
+    /// Read-only preflight for the current period's execution boundary.
+    ///
+    /// Returns a stable, payload-free error when execution would be rejected,
+    /// or `Ok(())` when no window is configured or execution is currently
+    /// allowed. No storage is written and no private payroll data is exposed.
+    pub fn check_window_boundaries(
+        e: Env,
+        period: Symbol,
+    ) -> Result<(), PayrollPeriodBoundaryError> {
+        let window: Option<SettlementWindow> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWindow(period));
+        match window {
+            Some(window) => execution_error(classify_window(
+                window.execution_start,
+                window.execution_end,
+                window.close_at,
+                e.ledger().timestamp(),
+            ))
+            .map_or(Ok(()), Err),
+            None => Ok(()),
+        }
     }
 
     // ── Issue #248: payroll period configuration freeze guard ───────────────
@@ -8910,10 +8958,7 @@ impl Payroll {
     /// Panic when a period's configuration is frozen and must not be edited.
     fn assert_period_config_editable(e: &Env, period: &Symbol) {
         if Payroll::is_period_config_frozen(e.clone(), period.clone()) {
-            panic!(
-                "Payroll period configuration is frozen: settlement window cannot be edited (error code {})",
-                PaymentError::InvalidSettlementWindowConfig as u32
-            );
+            panic_with_error!(&e, PayrollPeriodBoundaryError::PeriodConfigFrozen);
         }
     }
 
@@ -8936,18 +8981,16 @@ impl Payroll {
         };
 
         let now = e.ledger().timestamp();
-        let status = Self::classify_settlement_window(&window, now);
-        if status != SettlementWindowStatus::Executable {
+        let phase = classify_window(
+            window.execution_start,
+            window.execution_end,
+            window.close_at,
+            now,
+        );
+        if let Some(error) = execution_error(phase) {
+            let status = Self::settlement_status_from_phase(phase);
             payroll_events::emit_settlement_window_rejected(e, period, status as u32, now);
-            let error_code = if status == SettlementWindowStatus::PreOpen {
-                PaymentError::SettlementWindowNotYetOpen as u32
-            } else {
-                PaymentError::SettlementWindowClosed as u32
-            };
-            panic!(
-                "Settlement window is not open for execution right now (error code {})",
-                error_code
-            );
+            panic_with_error!(e, error);
         }
 
         Some(period)
@@ -9001,11 +9044,8 @@ impl Payroll {
             .expect("No settlement window configured for this run's period");
 
         let now = e.ledger().timestamp();
-        if now < window.close_at {
-            panic!(
-                "Settlement window has not reached its close timestamp yet (error code {})",
-                PaymentError::SettlementWindowClosed as u32
-            );
+        if !close_boundary_reached(window.close_at, now) {
+            panic_with_error!(&e, PayrollPeriodBoundaryError::CloseBoundaryNotReached);
         }
 
         Self::subtract_locked_funds(&e, addrs.token.clone(), pending_run.total_amount);
