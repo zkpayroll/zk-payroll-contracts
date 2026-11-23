@@ -1121,6 +1121,9 @@ impl SalaryCommitmentContract {
 }
 
 #[cfg(test)]
+mod commitment_equality_tests;
+
+#[cfg(test)]
 mod beneficiary_change_tests;
 #[cfg(test)]
 mod beneficiary_enforcement_tests;
