@@ -6,7 +6,9 @@ This document is the authoritative reference for all invariants that the
 `access_control` module enforces during employer role transitions.  Every
 invariant listed here is tested in
 [`contracts/access_control/tests/employer_role_adversarial.rs`](tests/employer_role_adversarial.rs)
-and is tracked by the stable error codes in
+and the role-change regression suite in
+[`contracts/access_control/tests/employer_role_regression.rs`](tests/employer_role_regression.rs).
+It is tracked by the stable error codes in
 [`EmployerRoleError`](src/lib.rs#EmployerRoleError) (codes 800–807).
 
 ---

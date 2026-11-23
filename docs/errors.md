@@ -139,6 +139,8 @@ for code stability guarantees.
 | Emergency request flows | Pending request already exists / no pending request | Duplicate, stale, or out-of-order emergency action. | Retryable after refresh | Refresh treasury request state before showing approve/cancel controls. |
 | `payroll.set_liquidity_reserve_thresholds`, `get_liquidity_reserve_status`, `record_liquidity_reserve_check` | `LiquidityReserveError` 6520–6525 | Invalid reserve levels, wrong signer, a foreign asset, or the token did not answer a balance query (#650). | Depends on code | See [Treasury Liquidity Reserve Monitoring](./treasury-liquidity-reserve-monitoring.md). |
 | Asset allow-list check | `"Asset not allowed"` | Payment asset is not configured for payroll. | Non-retryable until configuration changes | Select an allowed asset or ask an admin to update deployment/configuration. |
+| `treasury_isolation.reserve`, `credit`, `release_reserve`, `execute_debit` | `TreasuryIsolationError` 1–9 with privacy-safe `code()` / `message()` helpers | Missing registration, asset mismatch, insufficient balance/reservation, unauthorized caller, issuer collision, or non-positive amount. | Depends on code | Follow the recovery in [Treasury Reservation Invariants](./treasury-reservation-invariants.md#safe-error-mapping). |
+| `payroll.prepare_payroll_run` | `"Insufficient available treasury balance"` | The run total exceeds the balance left after pending-run locks and the retained buffer. | Retryable | Fund the treasury, resize the run, cancel a pending run, or lower the buffer. See [Treasury Reservation Checks](./treasury-reservation-checks.md). |
 
 ## Audit Access
 

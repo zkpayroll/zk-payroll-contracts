@@ -29,6 +29,9 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 // ---------------------------------------------------------------------------
 
 /// Typed errors returned by the treasury isolation contract.
+///
+/// Codes are stable once released. Messages are actionable and intentionally
+/// omit employee, salary, commitment, and proof data.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -41,9 +44,9 @@ pub enum TreasuryIsolationError {
     AssetAlreadyRegistered = 3,
     /// Execution was attempted with an asset that differs from the committed asset.
     AssetMismatch = 4,
-    /// The reserved amount exceeds the registered balance.
+    /// The requested reservation or debit exceeds available or total balance.
     InsufficientBalance = 5,
-    /// Attempted to release more than is currently reserved.
+    /// Attempted to release or debit more than is currently reserved.
     InsufficientReserve = 6,
     /// The caller is not authorised to perform this operation.
     Unauthorized = 7,
@@ -52,6 +55,59 @@ pub enum TreasuryIsolationError {
     IssuerMismatch = 8,
     /// The amount supplied is not positive.
     InvalidAmount = 9,
+}
+
+impl TreasuryIsolationError {
+    /// Stable machine-readable code for logs and SDK mapping.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NotInitialized => "treasury_not_initialized",
+            Self::AssetNotRegistered => "treasury_asset_not_registered",
+            Self::AssetAlreadyRegistered => "treasury_asset_already_registered",
+            Self::AssetMismatch => "treasury_asset_mismatch",
+            Self::InsufficientBalance => "treasury_insufficient_balance",
+            Self::InsufficientReserve => "treasury_insufficient_reserve",
+            Self::Unauthorized => "treasury_unauthorized",
+            Self::IssuerMismatch => "treasury_issuer_mismatch",
+            Self::InvalidAmount => "treasury_invalid_amount",
+        }
+    }
+
+    /// Actionable, privacy-safe message for operators and clients.
+    ///
+    /// Messages name only the failing invariant and recovery action; they never
+    /// include employee, salary, commitment, or proof data.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotInitialized => {
+                "Treasury isolation contract is not initialized. Initialize it with an admin before use."
+            }
+            Self::AssetNotRegistered => {
+                "Treasury asset is not registered for this company. Register the asset before reserving, crediting, or releasing funds."
+            }
+            Self::AssetAlreadyRegistered => {
+                "Treasury asset is already registered for this company. Use the existing asset record."
+            }
+            Self::AssetMismatch => {
+                "Payroll asset does not match the treasury asset. Use the same asset for payroll and execution."
+            }
+            Self::InsufficientBalance => {
+                "Insufficient treasury balance for the requested reservation or debit. Fund the treasury or reduce the amount."
+            }
+            Self::InsufficientReserve => {
+                "Insufficient reserved treasury balance for the requested release or debit. Check the current reservation before retrying."
+            }
+            Self::Unauthorized => {
+                "Caller is not authorized for this treasury operation. Use the admin or an explicitly authorized reserve operator."
+            }
+            Self::IssuerMismatch => {
+                "An asset with the same issuer is already registered under a different token contract. Use the canonical asset registration for this company."
+            }
+            Self::InvalidAmount => {
+                "Treasury amount must be positive. Provide an amount greater than zero."
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,12 +316,16 @@ impl TreasuryIsolationContract {
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
         Self::validate_balance_state(&bal)?;
-        let available = bal.balance - bal.reserved;
-        if available < amount {
+        let available = bal.balance.saturating_sub(bal.reserved);
+        if amount > available {
             return Err(TreasuryIsolationError::InsufficientBalance);
         }
 
-        bal.reserved += amount;
+        bal.reserved = bal
+            .reserved
+            .checked_add(amount)
+            .ok_or(TreasuryIsolationError::InsufficientBalance)?;
+        Self::validate_balance_state(&bal)?;
         Self::save_balance(&env, company_id, &bal);
 
         payroll_events::emit_treasury_reserved(&env, company_id, asset, amount);
@@ -341,11 +401,12 @@ impl TreasuryIsolationContract {
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
         Self::validate_balance_state(&bal)?;
-        if bal.reserved < amount {
+        if amount > bal.reserved {
             return Err(TreasuryIsolationError::InsufficientReserve);
         }
 
         bal.reserved -= amount;
+        Self::validate_balance_state(&bal)?;
         Self::save_balance(&env, company_id, &bal);
 
         payroll_events::emit_treasury_reserve_released(&env, company_id, asset, amount);
@@ -378,15 +439,16 @@ impl TreasuryIsolationContract {
 
         let mut bal = Self::load_balance(&env, company_id, &treasury_asset)?;
         Self::validate_balance_state(&bal)?;
-        if bal.balance < amount {
+        if amount > bal.balance {
             return Err(TreasuryIsolationError::InsufficientBalance);
         }
-        if bal.reserved < amount {
+        if amount > bal.reserved {
             return Err(TreasuryIsolationError::InsufficientReserve);
         }
 
         bal.balance -= amount;
         bal.reserved -= amount;
+        Self::validate_balance_state(&bal)?;
         Self::save_balance(&env, company_id, &bal);
 
         payroll_events::emit_treasury_debited(&env, company_id, treasury_asset, amount);
@@ -410,6 +472,9 @@ impl TreasuryIsolationContract {
         asset: Address,
         required_amount: i128,
     ) -> bool {
+        if required_amount <= 0 {
+            return false;
+        }
         let bal_key = DataKey::Balance(company_id, asset);
         match env
             .storage()
@@ -417,7 +482,7 @@ impl TreasuryIsolationContract {
             .get::<DataKey, AssetBalance>(&bal_key)
         {
             Some(bal) => match Self::validate_balance_state(&bal) {
-                Ok(_) => (bal.balance - bal.reserved) >= required_amount,
+                Ok(_) => bal.balance.saturating_sub(bal.reserved) >= required_amount,
                 Err(_) => false,
             },
             None => false,
@@ -849,7 +914,12 @@ mod tests {
         let (env, contract_id, _) = setup();
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         let asset = Address::generate(&env);
-        client.register_asset(&10u64, &asset, &Address::generate(&env), &symbol_short!("USDC"));
+        client.register_asset(
+            &10u64,
+            &asset,
+            &Address::generate(&env),
+            &symbol_short!("USDC"),
+        );
         client.credit(&10u64, &asset, &1_000i128);
 
         let bal = client.reserve(&10u64, &asset, &1_000i128);
@@ -878,7 +948,12 @@ mod tests {
         let (env, contract_id, _) = setup();
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         let asset = Address::generate(&env);
-        client.register_asset(&12u64, &asset, &Address::generate(&env), &symbol_short!("USDC"));
+        client.register_asset(
+            &12u64,
+            &asset,
+            &Address::generate(&env),
+            &symbol_short!("USDC"),
+        );
         client.credit(&12u64, &asset, &1_000i128);
 
         // Boundary: the asset exists, but not for company 13.

@@ -63,6 +63,10 @@ same nonce with a smaller batch once the treasury is funded.
 | `"Treasury token unavailable: cannot confirm the balance to reserve against"` | The token contract did not answer a balance query. Retry; if it persists, check the configured asset. |
 | `"Reservation amount must be positive"` | Defensive; `prepare_payroll_run` already rejects non-positive amounts first. |
 
+For the per-company, per-asset ledger (`treasury_isolation`), typed errors
+expose privacy-safe `code()` and `message()` helpers; see
+[Treasury Reservation Invariants](./treasury-reservation-invariants.md).
+
 ## Code
 
 The decision is pure and lives in `contracts/payroll/src/treasury_reservation.rs`:
