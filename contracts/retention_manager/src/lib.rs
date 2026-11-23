@@ -23,6 +23,9 @@
 //! - A record with an active audit grant or open challenge cannot be pruned.
 //! - Once pruned/archived, a retention record becomes immutable; block-mutation
 //!   attempts fail with `ArchivedRecord`.
+//! - A record whose settlement is still pending cannot be pruned, even after
+//!   its retention window has elapsed. Clearing the hold restores normal
+//!   pruning eligibility.
 //! - Pruning emits a `RetentionPruned` event for off-chain archive systems.
 //! - Pruning is authorized (admin-only); the system does not auto-prune.
 
@@ -67,6 +70,8 @@ pub enum RetentionError {
     RetentionWindowShortened = 7,
     /// The record has been archived/pruned and cannot be mutated (#825).
     ArchivedRecord = 8,
+    /// Settlement for this record is still pending; pruning is not allowed (#901).
+    SettlementPending = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +116,15 @@ pub struct RetentionRecord {
     pub challenge_block: bool,
     /// True when this record has been pruned (tombstone entry retained briefly).
     pub pruned: bool,
+    /// `Some(true)` while settlement for this record is still pending. A pending
+    /// settlement protects the record from pruning because removing it could
+    /// destroy the only evidence needed to finish reconciliation.
+    ///
+    /// `Option<bool>` keeps the struct append-safe: records written by an
+    /// earlier contract version decode with `None`, which means "no hold", so
+    /// they stay prunable under the normal window. Appended at the end of the
+    /// struct so existing storage keys stay valid.
+    pub settlement_pending: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +239,7 @@ impl RetentionManagerContract {
             audit_block: false,
             challenge_block: false,
             pruned: false,
+            settlement_pending: None,
         };
 
         env.storage().persistent().set(
@@ -326,6 +341,45 @@ impl RetentionManagerContract {
         Ok(entry)
     }
 
+    /// Set or clear the settlement-pending hold on a retention record.
+    ///
+    /// While `pending = true` the record is protected from pruning even if the
+    /// retention window has elapsed and no audit or challenge block is set.
+    /// This prevents a purge from destroying records that settlement or
+    /// reconciliation still depends on. Only the admin may change this flag,
+    /// and an archived record rejects the mutation.
+    pub fn set_settlement_pending(
+        env: Env,
+        company_id: u64,
+        record_id: u64,
+        record_type: RecordType,
+        pending: bool,
+    ) -> Result<RetentionRecord, RetentionError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        let key = Self::record_key(company_id, record_id, &record_type);
+        let mut entry: RetentionRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(RetentionError::RecordNotFound)?;
+        Self::require_not_archived(&entry)?;
+
+        entry.settlement_pending = Some(pending);
+        env.storage().persistent().set(&key, &entry);
+
+        payroll_events::emit_retention_block_changed(
+            &env,
+            company_id,
+            record_id,
+            Symbol::new(&env, "settlement"),
+            pending,
+        );
+
+        Ok(entry)
+    }
+
     // -----------------------------------------------------------------------
     // Pruning
     // -----------------------------------------------------------------------
@@ -338,6 +392,7 @@ impl RetentionManagerContract {
     ///   3. `now >= eligible_after` (retention window elapsed).
     ///   4. `audit_block == false`.
     ///   5. `challenge_block == false`.
+    ///   6. `settlement_pending != Some(true)`.
     ///
     /// On success, the record is marked as pruned (tombstoned) and a
     /// `RetentionPruned` event is emitted for off-chain archive systems.
@@ -374,6 +429,9 @@ impl RetentionManagerContract {
         }
         if entry.challenge_block {
             return Err(RetentionError::ActiveChallengeBlock);
+        }
+        if entry.settlement_pending == Some(true) {
+            return Err(RetentionError::SettlementPending);
         }
 
         entry.pruned = true;
@@ -484,6 +542,7 @@ impl RetentionManagerContract {
                 !entry.pruned
                     && !entry.audit_block
                     && !entry.challenge_block
+                    && entry.settlement_pending != Some(true)
                     && env.ledger().timestamp() >= entry.eligible_after
             }
             None => false,
@@ -1066,5 +1125,140 @@ mod tests {
             .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
             .unwrap();
         assert!(record.pruned);
+    }
+
+    // ── Settlement-pending hold (#901) ─────────────────────────────────────
+
+    #[test]
+    fn test_prune_rejected_while_settlement_pending() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 31u64;
+        let record_id = 70u64;
+
+        let record = client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        assert_eq!(record.settlement_pending, None);
+
+        let held = client.set_settlement_pending(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &true,
+        );
+        assert_eq!(held.settlement_pending, Some(true));
+
+        // Window elapsed, no audit or challenge block: settlement alone must block.
+        env.ledger().with_mut(|l| {
+            l.timestamp = l.timestamp + FINALIZED_RETENTION_SECS + 1;
+        });
+
+        assert!(!client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+        let result = client.try_prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::SettlementPending
+        );
+
+        // The record is still intact and unpruned.
+        let stored = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(!stored.pruned);
+    }
+
+    #[test]
+    fn test_prune_succeeds_after_settlement_completes() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 32u64;
+        let record_id = 71u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.set_settlement_pending(&company_id, &record_id, &RecordType::FinalizedBatch, &true);
+
+        env.ledger().with_mut(|l| {
+            l.timestamp = l.timestamp + FINALIZED_RETENTION_SECS + 1;
+        });
+
+        // Settlement completes and the hold is cleared.
+        client.set_settlement_pending(&company_id, &record_id, &RecordType::FinalizedBatch, &false);
+
+        assert!(client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let stored = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(stored.pruned);
+    }
+
+    #[test]
+    fn test_settlement_pending_blocks_at_window_boundary() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 33u64;
+        let record_id = 72u64;
+
+        let record = client.register_record(&company_id, &record_id, &RecordType::CancelledBatch);
+        client.set_settlement_pending(&company_id, &record_id, &RecordType::CancelledBatch, &true);
+
+        // Exactly at `eligible_after`: the window is satisfied but settlement is not.
+        env.ledger()
+            .with_mut(|l| l.timestamp = record.eligible_after);
+
+        let result = client.try_prune_record(&company_id, &record_id, &RecordType::CancelledBatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::SettlementPending
+        );
+
+        // One second later the hold still applies.
+        env.ledger()
+            .with_mut(|l| l.timestamp = record.eligible_after + 1);
+        let still_blocked =
+            client.try_prune_record(&company_id, &record_id, &RecordType::CancelledBatch);
+        assert_eq!(
+            still_blocked.unwrap_err().unwrap(),
+            RetentionError::SettlementPending
+        );
+    }
+
+    #[test]
+    fn test_set_settlement_pending_unknown_record_rejected() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+
+        let result =
+            client.try_set_settlement_pending(&404u64, &404u64, &RecordType::FinalizedBatch, &true);
+        assert_eq!(result.unwrap_err().unwrap(), RetentionError::RecordNotFound);
+    }
+
+    #[test]
+    fn test_archived_record_rejects_settlement_mutation() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 34u64;
+        let record_id = 73u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let result = client.try_set_settlement_pending(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &true,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), RetentionError::ArchivedRecord);
     }
 }

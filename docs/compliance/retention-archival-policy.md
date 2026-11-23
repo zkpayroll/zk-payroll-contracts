@@ -84,6 +84,27 @@ The following records are queryable but MAY be archived after regulatory hold pe
 | Reconciliation Updates | 3-7 years | After regulatory hold | 1+ years | As per jurisdiction |
 | Pending Runs | Duration of run | N/A | N/A | Auto-cleanup on finalization |
 
+### Settlement-Pending Hold
+
+A record whose settlement is still pending MUST NOT be purged, even after its
+retention window has elapsed. The retention manager tracks this with a
+per-record `settlement_pending` hold, managed by the admin via
+`set_settlement_pending`. While the hold is set:
+
+- `prune_record` returns `SettlementPending` and leaves the record intact.
+- `is_eligible_for_pruning` returns `false`.
+
+Once settlement completes and the hold is cleared, normal retention rules apply
+again. The hold stores only a boolean flag — never salary amounts, employee
+addresses, or commitment values.
+
+Upgrade note: `RetentionRecord` gained a `settlement_pending: Option<bool>`
+field appended at the end of the struct. This follows the append-safe rule in
+[`docs/upgrades.md`](../upgrades.md): records written by an earlier contract
+version decode with `None`, which reads as "no hold", so they remain prunable
+under the normal window and need no re-registration or migration. New records
+start as `None`; the admin setter writes `Some(true)` / `Some(false)`.
+
 ## Storage Implications
 
 ### On-Chain Storage
