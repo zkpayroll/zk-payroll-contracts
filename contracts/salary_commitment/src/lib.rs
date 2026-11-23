@@ -1,7 +1,9 @@
 #![no_std]
 
 use pause_manager::PauseManagerClient;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Salary Commitment Version Invariants
@@ -112,6 +114,21 @@ pub struct PendingRotation {
     pub new_holder: Address,
     pub proposed_by: Address,
     pub proposed_at: u64,
+}
+
+/// Typed errors for changes to an employee's reference-id binding.
+///
+/// None of them carries the id, the employee or any commitment value: the caller already holds
+/// those, and an error that echoed them would put them in logs and transaction results.
+#[contracterror]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BeneficiaryError {
+    /// The reference id is already held by a different employee.
+    ReferenceIdTaken = 1,
+    /// The employee's commitment is locked (approved or settled payroll), so the employee cannot
+    /// be moved to a different reference id. Unlock first, or leave the id as it is.
+    ReferenceIdLocked = 2,
 }
 
 /// Storage keys
@@ -686,11 +703,16 @@ impl SalaryCommitmentContract {
     /// Only the HR admin may call. Reference IDs must be unique (no collisions).
     /// Applies employee identifier normalization rules (#544).
     /// Non-sensitive IDs only (e.g., "EMP12345", not salary or bank account).
+    ///
+    /// # Errors
+    /// - `BeneficiaryError::ReferenceIdTaken` if another employee holds the id.
+    /// - `BeneficiaryError::ReferenceIdLocked` if the employee already has a different id and
+    ///   their commitment is locked.
     pub fn set_employee_reference_id(
         env: Env,
         employee: Address,
         reference_id: soroban_sdk::String,
-    ) {
+    ) -> Result<(), BeneficiaryError> {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
@@ -705,7 +727,7 @@ impl SalaryCommitmentContract {
             .get::<DataKey, Address>(&index_key)
         {
             if existing_employee != employee {
-                panic!("Reference ID already assigned to another employee");
+                return Err(BeneficiaryError::ReferenceIdTaken);
             }
         }
 
@@ -717,6 +739,15 @@ impl SalaryCommitmentContract {
             .get::<DataKey, soroban_sdk::String>(&employee_key)
         {
             if old_ref_id != normalized_id {
+                // Moving a locked employee to another id would re-attribute an approved or
+                // settled payroll entry after the fact. Restating the same id is still allowed.
+                if env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::CommitmentLock(employee.clone()))
+                {
+                    return Err(BeneficiaryError::ReferenceIdLocked);
+                }
                 // Remove old reverse mapping
                 env.storage()
                     .persistent()
@@ -731,6 +762,7 @@ impl SalaryCommitmentContract {
         env.storage().persistent().set(&index_key, &employee);
 
         payroll_events::emit_reference_id_set(&env, employee, normalized_id);
+        Ok(())
     }
 
     /// Get the external reference ID for an employee (if set).
@@ -1090,6 +1122,8 @@ impl SalaryCommitmentContract {
 
 #[cfg(test)]
 mod beneficiary_change_tests;
+#[cfg(test)]
+mod beneficiary_enforcement_tests;
 
 #[cfg(test)]
 mod version_regression_tests;
@@ -1911,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Reference ID already assigned to another employee")]
+    #[should_panic(expected = "Error(Contract, #1)")]
     fn test_set_duplicate_reference_id_panics() {
         let (env, contract_id, _admin) = setup_with_admin();
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);

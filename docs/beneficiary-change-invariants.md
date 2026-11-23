@@ -59,6 +59,28 @@ Only one proposal can be pending. A cancelled proposal cannot be accepted, and a
 cannot be accepted twice. A handover changes who has authority and nothing else: commitments,
 history, locks and reference ids are unchanged.
 
+### B7. A locked employee keeps their reference id
+
+While an employee's commitment is locked (an approved or settled run holds it), moving them to a
+different reference id is refused with `BeneficiaryError::ReferenceIdLocked`. Moving would
+re-attribute that run after the fact. Restating the current id, in any spelling that normalises to
+it, is allowed, and so is giving a locked employee their first id. Unlocking lifts the refusal;
+locking again re-arms it. If the wanted id is held by someone else, the answer is
+`ReferenceIdTaken`, whatever the lock state.
+
+### Errors
+
+`set_employee_reference_id` returns `Result<(), BeneficiaryError>`:
+
+| Code | Name | Meaning |
+|---|---|---|
+| 1 | `ReferenceIdTaken` | Another employee holds the id. |
+| 2 | `ReferenceIdLocked` | The employee is locked and already has a different id. |
+
+Neither error carries the id, the employee or a commitment value. A malformed id (empty, too long,
+not printable ASCII) is still a panic with the message documented on
+`normalize_employee_identifier`, because the payroll contract shares that check.
+
 ## Known gaps
 
 - `rotate_commitment` sets `created_at` to the rotation time, while `update_commitment` keeps the

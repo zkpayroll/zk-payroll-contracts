@@ -72,6 +72,10 @@ pub enum RetentionError {
     ArchivedRecord = 8,
     /// Settlement for this record is still pending; pruning is not allowed (#901).
     SettlementPending = 9,
+    /// Payroll is paused, so the retention policy cannot be changed right now.
+    Paused = 10,
+    /// The contract has no admin yet, so there is nobody to authorise a policy change.
+    NotInitialized = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +476,8 @@ impl RetentionManagerContract {
         record_type: RecordType,
         window_secs: u64,
     ) -> Result<(), RetentionError> {
-        Self::require_not_paused(&env);
-        Self::require_admin(&env);
+        Self::ensure_not_paused(&env)?;
+        Self::ensure_admin(&env)?;
 
         let key = DataKey::RetentionOverride(company_id, record_type as u32);
         let current = Self::retention_window_for(&env, company_id, &record_type);
@@ -562,6 +566,32 @@ impl RetentionManagerContract {
         admin.require_auth();
     }
 
+    /// Typed twin of `require_not_paused` for entrypoints that return `Result`.
+    fn ensure_not_paused(env: &Env) -> Result<(), RetentionError> {
+        if let Some(addr) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::PauseManager)
+        {
+            if PauseManagerClient::new(env, &addr).is_paused() {
+                return Err(RetentionError::Paused);
+            }
+        }
+        Ok(())
+    }
+
+    /// Typed twin of `require_admin`: a missing admin is an error, not a panic. The admin's own
+    /// authorisation is still enforced by the host.
+    fn ensure_admin(env: &Env) -> Result<(), RetentionError> {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(RetentionError::NotInitialized)?;
+        admin.require_auth();
+        Ok(())
+    }
+
     fn require_purger(env: &Env) {
         Self::get_purger(env.clone()).require_auth();
     }
@@ -620,6 +650,8 @@ impl RetentionManagerContract {
 // Tests — Issue #321
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod policy_error_tests;
 #[cfg(test)]
 mod policy_update_regression_tests;
 
