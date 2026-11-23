@@ -55,6 +55,9 @@ pub fn is_run_archival_eligible(
     // Check 3: No active disputes (if dispute tracking is enabled)
     // This check is deferred to the payroll contract layer since
     // dispute state is maintained separately and requires contract access.
+    // Auditor access after archival is governed by the audit module; this
+    // eligibility check only gates archival of the run record itself and does
+    // not grant or alter any auditor visibility into private payroll data.
     
     // Check 4: Retention period check
     // An executed run must carry an execution timestamp; otherwise we cannot
@@ -272,6 +275,32 @@ mod tests {
         let current_timestamp = 1000u64 + MIN_RETENTION_SECONDS - 1;
         assert_eq!(
             is_run_archival_eligible(&env, &run, current_timestamp),
+            ArchivalEligibility::RetentionPeriodNotMet
+        );
+    }
+
+    #[test]
+    fn test_archived_run_boundary_does_not_grant_auditor_access() {
+        // Boundary: a run exactly at the retention window is eligible for archival,
+        // but eligibility alone must never be interpreted as auditor access grant.
+        let env = Env::default();
+        let run = PayrollRunRecord {
+            run_id: 6u64,
+            is_executed: true,
+            executed_at: Some(1000u64),
+            reconciliation_status: crate::ReconciliationStatus::Reconciled,
+            total_amount: 1_000_000i128,
+            draft_hash: Default::default(),
+            metadata_hash: Default::default(),
+        };
+        let at_boundary = 1000u64 + MIN_RETENTION_SECONDS;
+        assert_eq!(
+            is_run_archival_eligible(&env, &run, at_boundary),
+            ArchivalEligibility::Eligible
+        );
+        // Just before the boundary, archival (and thus any archived-state access path) is refused.
+        assert_eq!(
+            is_run_archival_eligible(&env, &run, at_boundary - 1),
             ArchivalEligibility::RetentionPeriodNotMet
         );
     }

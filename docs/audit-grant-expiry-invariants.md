@@ -97,6 +97,8 @@ grant lifecycle above continues to govern access after archival. Auditor
 access after archival must be confirmed against `audit_module` tests before
 this section is relied on for operator decisions.
 
+Expected behavior: after a payroll run is archived, an auditor grant remains valid until its `expiration_ledger`, and expiry follows the phase table above. Archival never extends or revives a grant, and a grant that is `Revoked` or `Pruned` stays unusable after archival. Rejections for archived-payroll access use the fixed privacy-safe errors (`GrantNotExpired`, `GrantNotYetPrunable`, `KeyNotFound`) and never expose salary or employee data.
+
 ## Related documents
 
 - [Errors](./errors.md#audit-access)

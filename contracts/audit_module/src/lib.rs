@@ -258,10 +258,6 @@ impl AuditModule {
 
     pub fn set_pause_manager(env: Env, admin: Address, pause_manager: Address) {
         admin.require_auth();
-        // Note: the auditor access check after payroll archival is enforced via
-        // the lifecycle stage (AuditLifecycleStage::Pruned / Revoked) in
-        // get-access paths. This edit only documents the requirement; the
-        // enforcement logic lives in the challenge and grant-check modules.
         env.storage()
             .persistent()
             .set(&DataKey::PauseManager, &pause_manager);

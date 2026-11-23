@@ -189,6 +189,18 @@ fn test_archived_payroll_auditor_access_is_rejected() {
     // Boundary: a fresh key generated after archival must be the only path back in.
     client.generate_view_key(&auditor, &(seq + 2_000));
     assert!(client.verify_access(&auditor));
+
+    // Boundary: the re-issued key must still be rejected for aggregate-only scope.
+    let dummy_after = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client
+        .try_verify_commitment_with_key(
+            &auditor,
+            &dummy_after,
+            &0_i128,
+            &dummy_after,
+            &AuditScope::AggregateOnly
+        )
+        .is_err());
 }
 
 #[test]
@@ -202,6 +214,9 @@ fn test_revoke_wrong_admin_fails() {
 
     let interloper = soroban_sdk::Address::generate(&env);
     assert!(client.try_revoke_view_key(&interloper, &auditor).is_err());
+
+    // The rejected revocation must leave the auditor's access intact.
+    assert!(client.verify_access(&auditor));
 }
 
 // ---------------------------------------------------------------------------
