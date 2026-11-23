@@ -257,6 +257,8 @@ pub use recurring_schedule::{
 };
 
 const MAX_BATCH: u32 = 50;
+/// Minimum seconds between draft edits before emitting a concurrent-edit warning (#790).
+const DRAFT_CONCURRENT_EDIT_WARNING_WINDOW_SECS: u64 = 300;
 
 #[contract]
 pub struct Payroll;
@@ -6294,10 +6296,28 @@ impl Payroll {
         // total consume the same budget. Enforced before any state is written.
         let delta = (new_total_amount - draft.total_amount).abs();
         Self::require_correction_authorized(&e, &draft.period_label, delta, new_employee_count);
+        let previous_updated_at = draft.updated_at;
+        let current_updated_at = e.ledger().timestamp();
+        // Issue #790: surface a privacy-safe warning when edits happen close
+        // together. This signals possible concurrent payroll draft edits to
+        // off-chain coordinators without blocking legitimate corrections.
+        if draft.amendment_count > 0
+            && current_updated_at.saturating_sub(previous_updated_at)
+                <= DRAFT_CONCURRENT_EDIT_WARNING_WINDOW_SECS
+        {
+            payroll_events::emit_draft_edit_conflict_warning(
+                &e,
+                draft_id,
+                draft.period_label.clone(),
+                previous_updated_at,
+                current_updated_at,
+            );
+        }
+
         draft.total_amount = new_total_amount;
         draft.employee_count = new_employee_count;
         draft.amendment_count += 1;
-        draft.updated_at = e.ledger().timestamp();
+        draft.updated_at = current_updated_at;
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
