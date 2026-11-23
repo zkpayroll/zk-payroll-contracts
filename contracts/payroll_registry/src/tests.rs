@@ -1536,3 +1536,134 @@ fn latest_approved_payroll_revision_rejects_stale_revision() {
         7
     );
 }
+
+// ── Issue #898: employer role transfer during an open payroll period ────────
+
+#[test]
+fn test_employer_role_transfer_during_open_payroll_period_handoff() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let initial_admin = Address::generate(&env);
+    let successor_admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let emp1 = Address::generate(&env);
+    let emp2 = Address::generate(&env);
+    let commitment1 = BytesN::from_array(&env, &[0x11u8; 32]);
+    let commitment2 = BytesN::from_array(&env, &[0x22u8; 32]);
+
+    // 1. Open payroll period state under initial employer/admin
+    let company_id = client.register_company(&initial_admin, &treasury);
+    client.add_employee(&company_id, &emp1, &commitment1);
+    client.add_employee(&company_id, &emp2, &commitment2);
+    client.set_initial_approval_threshold(&company_id, &initial_admin, &2);
+    client.record_approved_payroll_revision(&company_id, &initial_admin, &1);
+
+    assert_eq!(
+        client.get_admin_config_version(&company_id).unwrap().version,
+        1
+    );
+
+    // 2. Propose and accept employer role transfer while period is open
+    client.propose_admin_rotation(&company_id, &initial_admin, &successor_admin);
+    assert!(client.get_pending_admin_rotation(&company_id).is_some());
+
+    client.accept_admin_rotation(&company_id, &successor_admin);
+    assert!(client.get_pending_admin_rotation(&company_id).is_none());
+
+    // 3. Verify company ownership and versioned config transitioned cleanly
+    let company = client.get_company(&company_id);
+    assert_eq!(company.admin, successor_admin);
+    assert_eq!(company.treasury, treasury);
+
+    let config_version = client.get_admin_config_version(&company_id).unwrap();
+    assert_eq!(config_version.version, 2);
+    assert_eq!(config_version.updated_by, successor_admin);
+
+    // 4. Verify active employee commitments and eligibility in the open period are preserved
+    assert!(client.is_eligible(&company_id, &emp1));
+    assert!(client.is_eligible(&company_id, &emp2));
+    assert_eq!(client.get_commitment(&company_id, &emp1), commitment1);
+    assert_eq!(client.get_commitment(&company_id, &emp2), commitment2);
+
+    // 5. Successor employer can advance the open payroll period revision
+    client.record_approved_payroll_revision(&company_id, &successor_admin, &2);
+    let latest_rev = client.get_latest_approved_revision(&company_id).unwrap();
+    assert_eq!(latest_rev.revision, 2);
+    assert_eq!(latest_rev.approved_by, successor_admin);
+}
+
+#[test]
+fn test_employer_role_transfer_former_admin_rejected_during_open_period() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let initial_admin = Address::generate(&env);
+    let successor_admin = Address::generate(&env);
+    let third_admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let emp = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[0x33u8; 32]);
+
+    let company_id = client.register_company(&initial_admin, &treasury);
+    client.add_employee(&company_id, &emp, &commitment);
+    client.record_approved_payroll_revision(&company_id, &initial_admin, &1);
+
+    client.propose_admin_rotation(&company_id, &initial_admin, &successor_admin);
+    client.accept_admin_rotation(&company_id, &successor_admin);
+
+    // Former employer/admin must be rejected from recording further payroll revisions
+    // or proposing another rotation during the open period.
+    assert!(client
+        .try_record_approved_payroll_revision(&company_id, &initial_admin, &2)
+        .is_err());
+    assert!(client
+        .try_propose_admin_rotation(&company_id, &initial_admin, &third_admin)
+        .is_err());
+    assert!(client
+        .try_revoke_company_admin(&company_id, &initial_admin)
+        .is_err());
+
+    // Open period revision remains at 1 until the new employer records revision 2
+    assert_eq!(
+        client.get_latest_approved_revision(&company_id).unwrap().revision,
+        1
+    );
+}
+
+#[test]
+fn test_employer_role_transfer_successor_resolves_open_period_payout_review() {
+    let (env, contract_id) = setup();
+    let client = PayrollRegistryClient::new(&env, &contract_id);
+    let initial_admin = Address::generate(&env);
+    let successor_admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let emp = Address::generate(&env);
+    let new_destination = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[0x44u8; 32]);
+
+    let company_id = client.register_company(&initial_admin, &treasury);
+    client.add_employee(&company_id, &emp, &commitment);
+    client.record_approved_payroll_revision(&company_id, &initial_admin, &1);
+
+    // Employee submits a payout destination change during the open payroll period
+    client.propose_payout_dest_change(&company_id, &emp, &new_destination);
+
+    // Employer role transfers mid-period before the destination change is reviewed
+    client.propose_admin_rotation(&company_id, &initial_admin, &successor_admin);
+    client.accept_admin_rotation(&company_id, &successor_admin);
+
+    // Former admin can no longer review the pending request
+    assert!(client
+        .try_review_payout_dest_change(&company_id, &emp, &initial_admin, &true)
+        .is_err());
+
+    // Successor admin approves the pending payout destination review
+    client.review_payout_dest_change(&company_id, &emp, &successor_admin, &true);
+
+    assert_eq!(
+        client.get_payout_destination(&company_id, &emp),
+        new_destination
+    );
+    let review = client.get_payout_dest_review(&company_id, &emp).unwrap();
+    assert_eq!(review.status, DestinationReviewStatus::Approved);
+    assert_eq!(review.resolved_by, Some(successor_admin));
+}
