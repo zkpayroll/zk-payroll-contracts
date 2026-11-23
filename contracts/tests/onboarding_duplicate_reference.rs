@@ -105,7 +105,7 @@ fn setup_employer_onboarding<'a>(env: &'a Env) -> EmployerOnboardingFixture<'a> 
 // ---------------------------------------------------------------------------
 
 #[test]
-#[should_panic(expected = "Reference ID already assigned to another employee")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_onboarding_rejects_duplicate_reference_for_same_employer() {
     let env = Env::default();
     let fixture = setup_employer_onboarding(&env);
