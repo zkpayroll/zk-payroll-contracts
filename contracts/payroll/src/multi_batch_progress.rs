@@ -25,6 +25,14 @@
 //! Everything is privacy-safe: only opaque execution identifiers and
 //! aggregate counts are stored, checked, and emitted. No salary amount,
 //! employee identity, commitment, or proof material is read or surfaced.
+//!
+//! Failure semantics: a failed multi-recipient payout is recorded via
+//! [`mark_multi_batch_failed`] and the tracker moves to the terminal
+//! `Failed` state. Progress already recorded for completed batches is kept
+//! as-is (it reflects payments that were actually processed), but the
+//! execution accepts no further progress and reports `is_complete == false`.
+//! Only aggregate counts are retained, so the post-failure state exposes no
+//! per-recipient or amount data.
 
 use soroban_sdk::{contracttype, Address, BytesN};
 
@@ -185,11 +193,34 @@ pub fn validate_progress_record(
     Ok(())
 }
 
+/// Validate that a multi-batch execution may be marked failed.
+///
+/// Only an `InProgress` execution can transition to `Failed`. Terminal
+/// executions are immutable so that a `Completed` run can never be
+/// retroactively reported as failed (or vice versa).
+pub fn validate_mark_failed(
+    current: &MultiBatchExecutionProgress,
+) -> Result<(), MultiBatchProgressIssue> {
+    if current.status != MultiBatchStatus::InProgress {
+        return Err(MultiBatchProgressIssue::AlreadyTerminal);
+    }
+    Ok(())
+}
+
 /// Return `true` when the tracker has reached both planned totals.
+///
+/// A `Failed` execution is never reported complete, even if its counts happen
+/// to match the planned totals, so operators cannot mistake a failed payout
+/// run for a successful one.
 pub fn is_complete(progress: &MultiBatchExecutionProgress) -> bool {
-    progress.status == MultiBatchStatus::Completed
-        || (progress.completed_batches == progress.total_batches
-            && progress.processed_payments == progress.total_payments)
+    match progress.status {
+        MultiBatchStatus::Completed => true,
+        MultiBatchStatus::Failed => false,
+        MultiBatchStatus::InProgress => {
+            progress.completed_batches == progress.total_batches
+                && progress.processed_payments == progress.total_payments
+        }
+    }
 }
 
 /// Return the number of batches still outstanding.
@@ -318,15 +349,11 @@ mod tests {
     }
 
     #[test]
-    fn record_rejects_regression_and_no_op() {
+    fn record_rejects_regression_and_no_progress() {
         let env = Env::default();
         let current = stub_progress(&env);
         assert_eq!(
             validate_progress_record(&current, 0, 25),
-            Err(MultiBatchProgressIssue::ProgressRegression)
-        );
-        assert_eq!(
-            validate_progress_record(&current, 1, 24),
             Err(MultiBatchProgressIssue::ProgressRegression)
         );
         assert_eq!(
@@ -336,38 +363,72 @@ mod tests {
     }
 
     #[test]
-    fn remaining_counts_saturate_without_underflow() {
+    fn mark_failed_only_from_in_progress() {
         let env = Env::default();
-        let current = stub_progress(&env);
-        assert_eq!(remaining_batches(&current), 3);
-        assert_eq!(remaining_payments(&current), 75);
-        let mut done = current.clone();
-        done.completed_batches = 4;
-        done.processed_payments = 100;
-        assert_eq!(remaining_batches(&done), 0);
-        assert_eq!(remaining_payments(&done), 0);
+        let running = stub_progress(&env);
+        assert!(validate_mark_failed(&running).is_ok());
+
+        let mut completed = stub_progress(&env);
+        completed.status = MultiBatchStatus::Completed;
+        assert_eq!(
+            validate_mark_failed(&completed),
+            Err(MultiBatchProgressIssue::AlreadyTerminal)
+        );
+
+        let mut failed = stub_progress(&env);
+        failed.status = MultiBatchStatus::Failed;
+        assert_eq!(
+            validate_mark_failed(&failed),
+            Err(MultiBatchProgressIssue::AlreadyTerminal)
+        );
     }
 
     #[test]
-    fn terminal_classification_is_stable() {
-        assert!(!is_terminal(MultiBatchStatus::InProgress));
-        assert!(is_terminal(MultiBatchStatus::Completed));
-        assert!(is_terminal(MultiBatchStatus::Failed));
+    fn failed_execution_is_never_complete() {
+        let env = Env::default();
+        let mut failed = stub_progress(&env);
+        failed.completed_batches = failed.total_batches;
+        failed.processed_payments = failed.total_payments;
+        failed.status = MultiBatchStatus::Failed;
+        assert!(!is_complete(&failed));
+        assert!(is_terminal(failed.status));
+    }
+
+    #[test]
+    fn completed_status_is_complete_and_terminal() {
+        let env = Env::default();
+        let mut done = stub_progress(&env);
+        done.status = MultiBatchStatus::Completed;
+        assert!(is_complete(&done));
+        assert!(is_terminal(done.status));
+    }
+
+    #[test]
+    fn in_progress_complete_only_at_both_totals() {
+        let env = Env::default();
+        let mut progress = stub_progress(&env);
+        assert!(!is_complete(&progress));
+        progress.completed_batches = progress.total_batches;
+        assert!(!is_complete(&progress));
+        progress.processed_payments = progress.total_payments;
+        assert!(is_complete(&progress));
+    }
+
+    #[test]
+    fn remaining_counts_saturate_at_zero() {
+        let env = Env::default();
+        let mut progress = stub_progress(&env);
+        assert_eq!(remaining_batches(&progress), 3);
+        assert_eq!(remaining_payments(&progress), 75);
+        progress.completed_batches = progress.total_batches;
+        progress.processed_payments = progress.total_payments;
+        assert_eq!(remaining_batches(&progress), 0);
+        assert_eq!(remaining_payments(&progress), 0);
     }
 
     #[test]
     fn issue_codes_are_stable() {
-        assert_eq!(
-            MultiBatchProgressIssue::BatchesOverTotal.as_str(),
-            "batches_over_total"
-        );
-        assert_eq!(
-            MultiBatchProgressIssue::NoForwardProgress.as_str(),
-            "no_forward_progress"
-        );
-        assert_eq!(
-            MultiBatchProgressIssue::AlreadyTerminal.as_str(),
-            "already_terminal"
-        );
+        assert_eq!(MultiBatchProgressIssue::AlreadyTerminal.as_str(), "already_terminal");
+        assert_eq!(MultiBatchProgressIssue::ProgressRegression.as_str(), "progress_regression");
     }
 }

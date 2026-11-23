@@ -626,6 +626,39 @@ fn test_partial_batch_rejects_zero_amount() {
 #[test]
 #[should_panic(expected = "Amount must be positive")]
 fn test_partial_batch_rejects_negative_amount() {
+#[test]
+fn test_failed_payout_does_not_mutate_balances_or_advance_checkpoint() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    let (proofs, mut amounts, employees) = create_employees(&ctx, 3);
+    // Make the second recipient's payout invalid so the batch fails mid-way.
+    amounts.set(1, -1_000i128);
+    let nonce = test_nonce(&env, 41);
+
+    let res = ctx.payroll.try_batch_process_payroll_bounded(
+        &proofs, &amounts, &employees, &3_000i128, &nonce, &None, &3u32,
+    );
+    assert!(res.is_err());
+
+    // No recipient should have been credited after the failed batch.
+    for i in 0..3 {
+        assert_eq!(ctx.token.balance(&employees.get(i as u32).unwrap()), 0);
+    }
+
+    // The batch must remain resumable: a corrected retry pays everyone once.
+    amounts.set(1, 1_000i128);
+    ctx.payroll.batch_process_payroll_bounded(
+        &proofs, &amounts, &employees, &3_000i128, &nonce, &None, &3u32,
+    );
+    for i in 0..3 {
+        assert_eq!(ctx.token.balance(&employees.get(i as u32).unwrap()), 1_000);
+    }
+}
+
+#[test]
+#[should_panic(expected = "Amount must be positive")]
+fn test_partial_batch_rejects_negative_amount_inner() {
     let env = Env::default();
     let ctx = setup(&env);
 
