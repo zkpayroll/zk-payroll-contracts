@@ -21,6 +21,8 @@
 //! ## Safety guards
 //!
 //! - A record with an active audit grant or open challenge cannot be pruned.
+//! - Once pruned/archived, a retention record becomes immutable; block-mutation
+//!   attempts fail with `ArchivedRecord`.
 //! - Pruning emits a `RetentionPruned` event for off-chain archive systems.
 //! - Pruning is authorized (admin-only); the system does not auto-prune.
 
@@ -63,6 +65,8 @@ pub enum RetentionError {
     UnknownRecordType = 6,
     /// A retention override update would shorten the effective window (#975).
     RetentionWindowShortened = 7,
+    /// The record has been archived/pruned and cannot be mutated (#825).
+    ArchivedRecord = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +251,13 @@ impl RetentionManagerContract {
     ///
     /// When `blocked = true` the record is protected from pruning even if the
     /// retention window has elapsed. Only the admin may change this flag.
+    fn require_not_archived(entry: &RetentionRecord) -> Result<(), RetentionError> {
+        if entry.pruned {
+            return Err(RetentionError::ArchivedRecord);
+        }
+        Ok(())
+    }
+
     pub fn set_audit_block(
         env: Env,
         company_id: u64,
@@ -263,6 +274,7 @@ impl RetentionManagerContract {
             .persistent()
             .get(&key)
             .ok_or(RetentionError::RecordNotFound)?;
+        Self::require_not_archived(&entry)?;
 
         entry.audit_block = blocked;
         env.storage().persistent().set(&key, &entry);
@@ -298,6 +310,7 @@ impl RetentionManagerContract {
             .persistent()
             .get(&key)
             .ok_or(RetentionError::RecordNotFound)?;
+        Self::require_not_archived(&entry)?;
 
         entry.challenge_block = blocked;
         env.storage().persistent().set(&key, &entry);
@@ -750,11 +763,7 @@ mod tests {
 
         // Restating the current window or shortening it is rejected.
         assert_eq!(
-            client.try_set_retention_override(
-                &company_id,
-                &RecordType::FinalizedBatch,
-                &extended
-            ),
+            client.try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &extended),
             Err(Ok(RetentionError::RetentionWindowShortened))
         );
         assert_eq!(
@@ -899,7 +908,8 @@ mod tests {
         client.register_record(&24u64, &2u64, &RecordType::FinalizedBatch);
         client.register_record(&23u64, &3u64, &RecordType::CancelledBatch);
 
-        env.ledger().with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
         assert!(client.is_eligible_for_pruning(&23u64, &1u64, &RecordType::FinalizedBatch));
         assert!(!client.is_eligible_for_pruning(&24u64, &2u64, &RecordType::FinalizedBatch));
         assert!(!client.is_eligible_for_pruning(&23u64, &3u64, &RecordType::CancelledBatch));
@@ -958,11 +968,103 @@ mod tests {
                 .eligible_after,
             before.eligible_after
         );
-        env.ledger().with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
         assert!(client.is_eligible_for_pruning(
             &company_id,
             &record_id,
             &RecordType::FinalizedBatch
         ));
+    }
+
+    #[test]
+    fn test_archived_record_cannot_be_mutated() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 28u64;
+        let record_id = 1u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let record = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(record.pruned);
+
+        let audit =
+            client.try_set_audit_block(&company_id, &record_id, &RecordType::FinalizedBatch, &true);
+        assert_eq!(audit.unwrap_err().unwrap(), RetentionError::ArchivedRecord);
+
+        let challenge = client.try_set_challenge_block(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &true,
+        );
+        assert_eq!(
+            challenge.unwrap_err().unwrap(),
+            RetentionError::ArchivedRecord
+        );
+
+        let unchanged = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(unchanged.pruned);
+        assert!(!unchanged.audit_block);
+        assert!(!unchanged.challenge_block);
+    }
+
+    #[test]
+    fn test_archived_record_rejects_unblock_mutation() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 29u64;
+        let record_id = 1u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let audit = client.try_set_audit_block(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &false,
+        );
+        assert_eq!(audit.unwrap_err().unwrap(), RetentionError::ArchivedRecord);
+
+        let challenge = client.try_set_challenge_block(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &false,
+        );
+        assert_eq!(
+            challenge.unwrap_err().unwrap(),
+            RetentionError::ArchivedRecord
+        );
+    }
+
+    #[test]
+    fn test_prune_archived_record_is_idempotent() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 30u64;
+        let record_id = 1u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let record = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(record.pruned);
     }
 }
