@@ -127,6 +127,12 @@ Treasury errors relate to fund availability and asset management.
 | 405 | InsufficientUnreservedBalance | Reserved funds too high | Yes | Wait or release reservations |
 | 406 | InvalidAssetConfiguration | Asset config invalid | No | Update configuration |
 
+The payroll contract also exposes contract-local, payload-free reservation
+errors in the 8600–8699 range. These codes are stable and map to fixed messages
+that never carry salary, employee, commitment or proof data. See
+[Treasury Reservation Invariants](./treasury-reservation-invariants.md#6-error-code-registry)
+for the full registry and recovery actions.
+
 **SDK Guidance**: `InsufficientTreasuryBalance` (400) is retryable after funding.
 Most other treasury errors require administrative action or configuration change.
 

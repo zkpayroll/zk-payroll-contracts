@@ -3,6 +3,10 @@
 `prepare_payroll_run` refuses to reserve more treasury funds than the balance
 left after pending-run locks and the configured retained-balance buffer.
 
+The complete rule set, stable error codes and privacy contract are recorded in
+[Treasury Reservation Invariants](./treasury-reservation-invariants.md) (#946,
+#947, #948).
+
 ## Why
 
 Preparing a run locks its total (`LockedPayrollFunds`) so that an emergency
