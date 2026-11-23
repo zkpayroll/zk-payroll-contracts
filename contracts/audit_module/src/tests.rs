@@ -158,6 +158,52 @@ fn test_revoke_removes_key() {
 }
 
 #[test]
+fn test_archived_payroll_auditor_access_is_rejected() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+    assert!(client.verify_access(&auditor));
+
+    // Archive the payroll: revoke the auditor's key so no further access is granted.
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    // Success/rejection: access must be denied after archival.
+    assert!(!client.verify_access(&auditor));
+
+    // Rejection: commitment verification with the revoked key must fail.
+    let dummy = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client
+        .try_verify_commitment_with_key(
+            &auditor,
+            &dummy,
+            &0_i128,
+            &dummy,
+            &AuditScope::EmployeeList
+        )
+        .is_err());
+
+    // Boundary: a fresh key generated after archival must be the only path back in.
+    client.generate_view_key(&auditor, &(seq + 2_000));
+    assert!(client.verify_access(&auditor));
+
+    // Boundary: the re-issued key must still be rejected for aggregate-only scope.
+    let dummy_after = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client
+        .try_verify_commitment_with_key(
+            &auditor,
+            &dummy_after,
+            &0_i128,
+            &dummy_after,
+            &AuditScope::AggregateOnly
+        )
+        .is_err());
+}
+
+#[test]
 fn test_revoke_wrong_admin_fails() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
@@ -168,6 +214,9 @@ fn test_revoke_wrong_admin_fails() {
 
     let interloper = soroban_sdk::Address::generate(&env);
     assert!(client.try_revoke_view_key(&interloper, &auditor).is_err());
+
+    // The rejected revocation must leave the auditor's access intact.
+    assert!(client.verify_access(&auditor));
 }
 
 // ---------------------------------------------------------------------------
