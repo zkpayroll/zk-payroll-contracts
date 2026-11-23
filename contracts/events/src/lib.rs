@@ -321,6 +321,26 @@ pub fn emit_correction_rejected(e: &Env, draft_id: u64, period: Symbol, reason: 
     );
 }
 
+/// Emitted when a payroll draft edit is attempted while another pending draft
+/// edit window is active for the same draft (#790).
+///
+/// Privacy-safe: carries only the opaque draft id, the period label and the
+/// ledger timestamp of the previous edit. No payroll amounts, employee
+/// counts, addresses, or commitments are included.
+pub fn emit_draft_edit_conflict_warning(
+    e: &Env,
+    draft_id: u64,
+    period: Symbol,
+    previous_updated_at: u64,
+    current_updated_at: u64,
+) {
+    publish(
+        e,
+        (payroll_topic(), Symbol::new(e, "draft_edit_warning")),
+        (draft_id, period, previous_updated_at, current_updated_at),
+    );
+}
+
 /// Emitted when a payroll run is fully executed and recorded on-chain.
 pub fn emit_run_executed(e: &Env, run_id: u64, total_spend: i128) {
     publish(
