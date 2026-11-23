@@ -241,6 +241,27 @@ mod tests {
         );
     }
     #[test]
+    fn mixed_failed_and_confirmed_payouts_report_failed_state() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| li.timestamp = 100);
+        let ok = payout(&env, 1);
+        let bad = payout(&env, 2);
+        let mut failed = confirmation(&env, bad.clone());
+        failed.status = PayoutConfirmationStatus::Failed;
+        failed.confirmed_at = 0;
+        let report = reconcile_payout_confirmations(
+            &env,
+            1,
+            &vec![&env, ok.clone(), bad],
+            &vec![&env, confirmation(&env, ok), failed],
+        )
+        .unwrap();
+        assert_eq!(
+            (report.confirmed_count, report.failed_count, report.pending_count, report.status),
+            (1, 1, 0, ReconciliationStatus::Failed)
+        );
+    }
+    #[test]
     fn rejects_duplicates_unknown_payouts_and_cross_run_receipts() {
         let env = Env::default();
         env.ledger().with_mut(|li| li.timestamp = 100);
