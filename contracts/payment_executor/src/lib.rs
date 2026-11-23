@@ -1272,6 +1272,9 @@ impl PaymentExecutor {
 }
 
 #[cfg(test)]
+mod token_pause_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ::pause_manager::{PauseManager, PauseManagerClient};

@@ -52,6 +52,7 @@ These are non-retryable with the same proof data.
 | 104 | InvalidPublicInputs | Proof public inputs malformed | No | Rebuild proof schema |
 | 105 | VerifyingKeyMismatch | Verifying key does not match proof | No | Verify proof schema version |
 | 106 | InvalidNullifier | Nullifier is malformed or invalid | No | Regenerate with valid nullifier |
+| 107 | UnsupportedProofFormat | Proof is well formed but its format or schema version is not supported | No | Regenerate the proof in a supported format or schema version |
 
 **SDK Guidance**: Proof generation is deterministic given source payroll data. If a
 proof fails verification, regenerate from source rather than retrying the same proof.

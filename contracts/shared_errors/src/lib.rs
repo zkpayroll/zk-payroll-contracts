@@ -73,6 +73,11 @@ pub enum ProofError {
     VerifyingKeyMismatch = 105,
     /// An invalid or malformed nullifier was provided in the proof.
     InvalidNullifier = 106,
+    /// The proof is well formed but uses a proof format or schema version this
+    /// deployment does not support. Distinct from `InvalidProofFormat` (100,
+    /// malformed bytes): use a supported format or version. Carries no payload,
+    /// so it cannot expose salary or employee data.
+    UnsupportedProofFormat = 107,
 }
 
 /// Audit Access and Scope Errors (200-299)
