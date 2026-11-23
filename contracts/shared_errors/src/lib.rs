@@ -73,6 +73,8 @@ pub enum ProofError {
     VerifyingKeyMismatch = 105,
     /// An invalid or malformed nullifier was provided in the proof.
     InvalidNullifier = 106,
+    /// The proof uses an unsupported proof system, version, or encoding format.
+    UnsupportedProofFormat = 107,
 }
 
 /// Audit Access and Scope Errors (200-299)
@@ -287,9 +289,31 @@ impl AuditError {
     }
 }
 
+/// Minimum supported proof format version.
+pub const MIN_SUPPORTED_PROOF_FORMAT_VERSION: u32 = 1;
+/// Maximum supported proof format version.
+pub const MAX_SUPPORTED_PROOF_FORMAT_VERSION: u32 = 2;
+
 impl ProofError {
-    pub fn code(self) -> u32 {
+    pub const fn code(self) -> u32 {
         self as u32
+    }
+
+    /// Returns `true` when the error represents an unsupported proof format/scheme/version
+    /// rather than malformed proof bytes (`InvalidProofFormat`) or failed verification.
+    pub const fn is_unsupported_format(self) -> bool {
+        matches!(self, ProofError::UnsupportedProofFormat)
+    }
+
+    /// Validates that a proof format version is within the supported range.
+    pub const fn validate_proof_format_version(version: u32) -> Result<u32, ProofError> {
+        if version < MIN_SUPPORTED_PROOF_FORMAT_VERSION
+            || version > MAX_SUPPORTED_PROOF_FORMAT_VERSION
+        {
+            Err(ProofError::UnsupportedProofFormat)
+        } else {
+            Ok(version)
+        }
     }
 }
 
@@ -302,5 +326,41 @@ impl AuthError {
 impl ReplayError {
     pub fn code(self) -> u32 {
         self as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unsupported_proof_format_has_stable_error_code() {
+        assert_eq!(ProofError::InvalidProofFormat.code(), 100);
+        assert_eq!(ProofError::UnsupportedProofFormat.code(), 107);
+        assert_ne!(
+            ProofError::UnsupportedProofFormat.code(),
+            ProofError::InvalidProofFormat.code()
+        );
+    }
+
+    #[test]
+    fn test_is_unsupported_format_distinguishes_from_malformed_bytes() {
+        assert!(ProofError::UnsupportedProofFormat.is_unsupported_format());
+        assert!(!ProofError::InvalidProofFormat.is_unsupported_format());
+        assert!(!ProofError::ProofVerificationFailed.is_unsupported_format());
+    }
+
+    #[test]
+    fn test_validate_proof_format_version_accepts_supported_and_rejects_unsupported() {
+        assert_eq!(ProofError::validate_proof_format_version(1), Ok(1));
+        assert_eq!(ProofError::validate_proof_format_version(2), Ok(2));
+        assert_eq!(
+            ProofError::validate_proof_format_version(0),
+            Err(ProofError::UnsupportedProofFormat)
+        );
+        assert_eq!(
+            ProofError::validate_proof_format_version(3),
+            Err(ProofError::UnsupportedProofFormat)
+        );
     }
 }
