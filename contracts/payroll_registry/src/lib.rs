@@ -2016,3 +2016,6 @@ impl PayrollRegistryTrait for PayrollRegistry {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod rotation_event_tests;

@@ -652,6 +652,9 @@ impl SettlementWindowContract {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod execution_start_boundary_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
