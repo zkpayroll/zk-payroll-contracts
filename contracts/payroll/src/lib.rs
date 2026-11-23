@@ -143,8 +143,8 @@ pub use payroll_variance::{
 /// Treasury balance reservation checks (#699).
 pub mod treasury_reservation;
 pub use treasury_reservation::{
-    check_reservation, check_reservation_with_buffer, reservable_balance, unreserved_balance,
-    ReservationIssue, ReservationOutcome,
+    check_reservation, check_reservation_with_buffer, checked_reservation, reservable_balance,
+    unreserved_balance, ReservationIssue, ReservationOutcome, TreasuryReservationError,
 };
 
 /// Fee reserve validation (#255).
@@ -1917,12 +1917,18 @@ impl Payroll {
             amount,
         ) {
             Ok(_) => {}
-            Err(ReservationIssue::NonPositiveAmount) => {
-                panic!("Reservation amount must be positive")
-            }
-            Err(ReservationIssue::InsufficientUnreserved { available }) => panic!(
-                "Insufficient available treasury balance: run needs {} but only {} is reservable after the {} buffer ({} of {} is locked for pending payroll); fund the treasury, reduce the buffer, or cancel a pending run",
-                amount, available, buffer, reserved, total_balance
+            Err(issue @ ReservationIssue::NonPositiveAmount) => panic!(
+                "Reservation amount must be positive [safe error {}]",
+                issue.safe_error() as u32
+            ),
+            Err(issue @ ReservationIssue::InsufficientUnreserved { available }) => panic!(
+                "Insufficient available treasury balance: run needs {} but only {} is reservable after the {} buffer ({} of {} is locked for pending payroll); fund the treasury, reduce the buffer, or cancel a pending run [safe error {}]",
+                amount,
+                available,
+                buffer,
+                reserved,
+                total_balance,
+                issue.safe_error() as u32
             ),
         }
     }
@@ -10934,6 +10940,46 @@ impl Payroll {
             required_amount,
             available_balance: Some(available_balance),
         }
+    }
+
+    /// Preflight a treasury reservation with payload-free typed errors (#946).
+    ///
+    /// Uses the same decision as `prepare_payroll_run` without writing state.
+    /// The error is a stable code that maps to [`TreasuryReservationError::message`],
+    /// so an SDK never has to parse a panic string or receive payroll data.
+    pub fn validate_treasury_reservation(
+        e: Env,
+        asset: Address,
+        amount: i128,
+    ) -> Result<(), TreasuryReservationError> {
+        let Some(addrs) = e
+            .storage()
+            .persistent()
+            .get::<_, ContractAddresses>(&DataKey::Addresses)
+        else {
+            return Err(TreasuryReservationError::NotInitialized);
+        };
+
+        if asset != addrs.token {
+            return Err(TreasuryReservationError::CrossAssetMismatch);
+        }
+        if !Self::is_asset_allowed(e.clone(), asset.clone()) {
+            return Err(TreasuryReservationError::AssetNotAllowed);
+        }
+
+        let total_balance = match soroban_token::Client::new(&e, &asset).try_balance(&addrs.treasury)
+        {
+            Ok(Ok(balance)) => balance,
+            _ => return Err(TreasuryReservationError::TreasuryUnavailable),
+        };
+        let reserved = Self::get_locked_funds(e.clone(), asset);
+        if reserved < 0 {
+            return Err(TreasuryReservationError::InvalidReservationState);
+        }
+        let buffer = Self::get_treasury_balance_buffer(e);
+
+        treasury_reservation::checked_reservation(total_balance, reserved, buffer, amount)
+            .map(|_| ())
     }
 
     /// Helper to evaluate readiness of an arbitrary (treasury, token) funding source (#787).
