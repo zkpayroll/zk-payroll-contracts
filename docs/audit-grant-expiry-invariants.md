@@ -90,6 +90,13 @@ wrap around and make a live grant appear prunable.
 - Treat `NotKeyGranter` as a configuration problem, not a transient failure.
   The correct grantor address is the only valid signer.
 
+## Payroll archival interaction
+
+Archiving a payroll run does not, by itself, alter any auditor grant. The
+grant lifecycle above continues to govern access after archival. Auditor
+access after archival must be confirmed against `audit_module` tests before
+this section is relied on for operator decisions.
+
 ## Related documents
 
 - [Errors](./errors.md#audit-access)

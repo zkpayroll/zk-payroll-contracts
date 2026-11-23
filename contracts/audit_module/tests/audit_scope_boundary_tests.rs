@@ -114,10 +114,7 @@ mod audit_scope_boundary_tests {
     /// which documents that `proof_verifier` mirrors this exact rule): a
     /// grant is valid while `ledger.sequence() <= expiration_ledger` and is
     /// expired starting at `expiration_ledger + 1`. Expiry is therefore
-    /// *inclusive* of the expiration ledger itself, not exclusive — the
-    /// original comment on this stub described the opposite (fails "at"
-    /// 1000), which does not match the implementation in
-    /// `contracts/audit_module/src/lib.rs::verify_access`.
+    /// *inclusive* of the expiration ledger itself, not exclusive.
     #[test]
     fn test_auditor_grant_expiration_blocks_access() {
         let env = Env::default();
