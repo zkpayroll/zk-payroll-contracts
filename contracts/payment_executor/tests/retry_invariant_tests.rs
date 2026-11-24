@@ -551,3 +551,526 @@ fn test_total_monotonicity_failed_retry_does_not_decrease() {
     // Total must not have changed.
     assert_eq!(executor.get_total_paid(&company_id), total_after_success);
 }
+
+// ===========================================================================
+// Payout Batch Retry Regression Tests
+// ===========================================================================
+
+/// R-4 + R-1: After a partial batch failure, retrying only the remaining
+/// unpaid employees with the same settlement receipt succeeds without
+/// double-paying the already-paid employee.
+#[test]
+fn test_partial_batch_failure_retry_remaining_with_same_receipt() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, token, company_id, _admin, treasury) =
+        setup_system(&env);
+
+    let (emp1, _) = register_employee(&env, &registry, &commitment_client, company_id, 70);
+    let (emp2, _) = register_employee(&env, &registry, &commitment_client, company_id, 71);
+    let (emp3, _) = register_employee(&env, &registry, &commitment_client, company_id, 72);
+
+    let (pa1, pb1, pc1, null1) = make_proof(&env, 70);
+    let (pa2, pb2, pc2, null2) = make_proof(&env, 71);
+    let (pa3, pb3, pc3, null3) = make_proof(&env, 72);
+
+    let mut employees = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    let mut proofs_a = Vec::new(&env);
+    let mut proofs_b = Vec::new(&env);
+    let mut proofs_c = Vec::new(&env);
+    let mut nullifiers = Vec::new(&env);
+
+    employees.push_back(emp1.clone());
+    amounts.push_back(1000i128);
+    proofs_a.push_back(pa1);
+    proofs_b.push_back(pb1);
+    proofs_c.push_back(pc1);
+    nullifiers.push_back(null1);
+
+    employees.push_back(emp2.clone());
+    amounts.push_back(500_000i128); // exceeds remaining treasury balance
+    proofs_a.push_back(pa2.clone());
+    proofs_b.push_back(pb2.clone());
+    proofs_c.push_back(pc2.clone());
+    nullifiers.push_back(null2.clone());
+
+    employees.push_back(emp3.clone());
+    amounts.push_back(1000i128);
+    proofs_a.push_back(pa3.clone());
+    proofs_b.push_back(pb3.clone());
+    proofs_c.push_back(pc3.clone());
+    nullifiers.push_back(null3.clone());
+
+    let receipt = BytesN::from_array(&env, &[0xCCu8; 32]);
+
+    // Leave only 1000 in treasury so emp1 succeeds and emp2 fails.
+    token.transfer(&treasury, &Address::generate(&env), &499_000);
+
+    let first_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert!(first_attempt.is_err(), "batch should fail at emp2");
+    assert!(executor.is_paid(&emp1, &1), "emp1 should remain paid");
+    assert!(!executor.is_paid(&emp2, &1), "emp2 should remain unpaid");
+    assert!(!executor.is_paid(&emp3, &1), "emp3 should remain unpaid");
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+    assert!(
+        !executor.is_settlement_receipt_used(&receipt),
+        "receipt must remain unconsumed after partial failure"
+    );
+
+    // Top up treasury and retry only the unpaid employees with the same receipt.
+    token.mint(&treasury, &10_000);
+
+    let mut retry_employees = Vec::new(&env);
+    let mut retry_amounts = Vec::new(&env);
+    let mut retry_proofs_a = Vec::new(&env);
+    let mut retry_proofs_b = Vec::new(&env);
+    let mut retry_proofs_c = Vec::new(&env);
+    let mut retry_nullifiers = Vec::new(&env);
+
+    retry_employees.push_back(emp2.clone());
+    retry_amounts.push_back(2000i128);
+    retry_proofs_a.push_back(pa2);
+    retry_proofs_b.push_back(pb2);
+    retry_proofs_c.push_back(pc2);
+    retry_nullifiers.push_back(null2);
+
+    retry_employees.push_back(emp3.clone());
+    retry_amounts.push_back(1000i128);
+    retry_proofs_a.push_back(pa3);
+    retry_proofs_b.push_back(pb3);
+    retry_proofs_c.push_back(pc3);
+    retry_nullifiers.push_back(null3);
+
+    let retry_result = executor.execute_batch_with_receipt(
+        &company_id,
+        &retry_employees,
+        &retry_amounts,
+        &retry_proofs_a,
+        &retry_proofs_b,
+        &retry_proofs_c,
+        &retry_nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(retry_result.len(), 2);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+    assert!(executor.is_paid(&emp1, &1));
+    assert!(executor.is_paid(&emp2, &1));
+    assert!(executor.is_paid(&emp3, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 4000);
+}
+
+/// R-4 + R-3: Mistakenly retrying the full batch (including an already-paid
+/// employee with a fresh proof) fails with AlreadyPaid and leaves the receipt
+/// unconsumed and totals unchanged.
+#[test]
+fn test_retry_full_batch_after_partial_failure_rejects_already_paid() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, token, company_id, _admin, treasury) =
+        setup_system(&env);
+
+    let (emp1, _) = register_employee(&env, &registry, &commitment_client, company_id, 73);
+    let (emp2, _) = register_employee(&env, &registry, &commitment_client, company_id, 74);
+
+    let (pa1, pb1, pc1, null1) = make_proof(&env, 73);
+    let (pa2, pb2, pc2, null2) = make_proof(&env, 74);
+
+    let mut employees = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    let mut proofs_a = Vec::new(&env);
+    let mut proofs_b = Vec::new(&env);
+    let mut proofs_c = Vec::new(&env);
+    let mut nullifiers = Vec::new(&env);
+
+    employees.push_back(emp1.clone());
+    amounts.push_back(1000i128);
+    proofs_a.push_back(pa1);
+    proofs_b.push_back(pb1);
+    proofs_c.push_back(pc1);
+    nullifiers.push_back(null1);
+
+    employees.push_back(emp2.clone());
+    amounts.push_back(500_000i128);
+    proofs_a.push_back(pa2.clone());
+    proofs_b.push_back(pb2.clone());
+    proofs_c.push_back(pc2.clone());
+    nullifiers.push_back(null2.clone());
+
+    let receipt = BytesN::from_array(&env, &[0xCDu8; 32]);
+
+    token.transfer(&treasury, &Address::generate(&env), &499_000);
+
+    let first_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert!(first_attempt.is_err());
+    assert!(executor.is_paid(&emp1, &1));
+    assert!(!executor.is_paid(&emp2, &1));
+
+    // Top up treasury, but mistakenly include emp1 again with a fresh proof.
+    token.mint(&treasury, &500_000);
+    let (pa1_new, pb1_new, pc1_new, null1_new) = make_proof(&env, 75);
+
+    let mut retry_proofs_a = Vec::new(&env);
+    let mut retry_proofs_b = Vec::new(&env);
+    let mut retry_proofs_c = Vec::new(&env);
+    let mut retry_nullifiers = Vec::new(&env);
+
+    retry_proofs_a.push_back(pa1_new);
+    retry_proofs_b.push_back(pb1_new);
+    retry_proofs_c.push_back(pc1_new);
+    retry_nullifiers.push_back(null1_new);
+
+    retry_proofs_a.push_back(pa2);
+    retry_proofs_b.push_back(pb2);
+    retry_proofs_c.push_back(pc2);
+    retry_nullifiers.push_back(null2);
+
+    let retry_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &retry_proofs_a,
+        &retry_proofs_b,
+        &retry_proofs_c,
+        &retry_nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(
+        retry_attempt.unwrap_err().unwrap(),
+        PaymentError::AlreadyPaid,
+        "retrying an already-paid employee in the same period must fail with AlreadyPaid"
+    );
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+    assert!(!executor.is_paid(&emp2, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+}
+
+// ===========================================================================
+// R-5: Closed Period Barrier on Batch Retry
+// ===========================================================================
+
+/// Retrying a batch against a closed period returns PeriodClosed without
+/// consuming the receipt or mutating state, allowing retry in a new period.
+#[test]
+fn test_closed_period_rejects_batch_retry_and_preserves_receipt() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let (emp, _) = register_employee(&env, &registry, &commitment_client, company_id, 80);
+    let (pa, pb, pc, null) = make_proof(&env, 80);
+    let receipt = BytesN::from_array(&env, &[0xCEu8; 32]);
+
+    let mut employees = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    let mut proofs_a = Vec::new(&env);
+    let mut proofs_b = Vec::new(&env);
+    let mut proofs_c = Vec::new(&env);
+    let mut nullifiers = Vec::new(&env);
+
+    employees.push_back(emp.clone());
+    amounts.push_back(2500i128);
+    proofs_a.push_back(pa);
+    proofs_b.push_back(pb);
+    proofs_c.push_back(pc);
+    nullifiers.push_back(null);
+
+    // Close period 1 before the batch executes.
+    executor.close_period(&company_id, &1);
+
+    let closed_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(
+        closed_attempt.unwrap_err().unwrap(),
+        PaymentError::PeriodClosed,
+        "batch targeting a closed period must be rejected with PeriodClosed"
+    );
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+    assert!(!executor.is_paid(&emp, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 0);
+
+    // Open period 2 and retry with the same receipt.
+    executor.create_period(&company_id);
+    let retry_result = executor.execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &2,
+        &receipt,
+    );
+    assert_eq!(retry_result.len(), 1);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+    assert!(executor.is_paid(&emp, &2));
+    assert_eq!(executor.get_total_paid(&company_id), 2500);
+}
+
+// ===========================================================================
+// R-6: Pre-Validation Failures Preserve Receipt for Retry
+// ===========================================================================
+
+/// Empty batch fails with EmptyBatch before consuming the receipt, allowing
+/// retry with a populated batch and the same receipt.
+#[test]
+fn test_empty_batch_preserves_receipt_for_retry() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let receipt = BytesN::from_array(&env, &[0xCFu8; 32]);
+
+    let empty_employees = Vec::new(&env);
+    let empty_amounts = Vec::new(&env);
+    let empty_proofs_a = Vec::new(&env);
+    let empty_proofs_b = Vec::new(&env);
+    let empty_proofs_c = Vec::new(&env);
+    let empty_nullifiers = Vec::new(&env);
+
+    let empty_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &empty_employees,
+        &empty_amounts,
+        &empty_proofs_a,
+        &empty_proofs_b,
+        &empty_proofs_c,
+        &empty_nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(
+        empty_attempt.unwrap_err().unwrap(),
+        PaymentError::EmptyBatch
+    );
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+    assert_eq!(executor.get_total_paid(&company_id), 0);
+
+    // Retry with a valid batch and the same receipt.
+    let (emp, _) = register_employee(&env, &registry, &commitment_client, company_id, 81);
+    let (pa, pb, pc, null) = make_proof(&env, 81);
+
+    let mut employees = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    let mut proofs_a = Vec::new(&env);
+    let mut proofs_b = Vec::new(&env);
+    let mut proofs_c = Vec::new(&env);
+    let mut nullifiers = Vec::new(&env);
+
+    employees.push_back(emp.clone());
+    amounts.push_back(1500i128);
+    proofs_a.push_back(pa);
+    proofs_b.push_back(pb);
+    proofs_c.push_back(pc);
+    nullifiers.push_back(null);
+
+    let retry_result = executor.execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(retry_result.len(), 1);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+    assert!(executor.is_paid(&emp, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 1500);
+}
+
+/// Oversized batch fails with BatchTooLarge before mutating state or consuming
+/// the receipt, allowing retry with a within-limit batch and the same receipt.
+#[test]
+fn test_oversized_batch_preserves_receipt_for_retry() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    executor.set_max_batch_size(&company_id, &1u32);
+
+    let (emp1, _) = register_employee(&env, &registry, &commitment_client, company_id, 82);
+    let (emp2, _) = register_employee(&env, &registry, &commitment_client, company_id, 83);
+
+    let (pa1, pb1, pc1, null1) = make_proof(&env, 82);
+    let (pa2, pb2, pc2, null2) = make_proof(&env, 83);
+    let receipt = BytesN::from_array(&env, &[0xD0u8; 32]);
+
+    let mut employees = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    let mut proofs_a = Vec::new(&env);
+    let mut proofs_b = Vec::new(&env);
+    let mut proofs_c = Vec::new(&env);
+    let mut nullifiers = Vec::new(&env);
+
+    employees.push_back(emp1.clone());
+    amounts.push_back(1000i128);
+    proofs_a.push_back(pa1.clone());
+    proofs_b.push_back(pb1.clone());
+    proofs_c.push_back(pc1.clone());
+    nullifiers.push_back(null1.clone());
+
+    employees.push_back(emp2.clone());
+    amounts.push_back(1000i128);
+    proofs_a.push_back(pa2);
+    proofs_b.push_back(pb2);
+    proofs_c.push_back(pc2);
+    nullifiers.push_back(null2);
+
+    let oversized_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(
+        oversized_attempt.unwrap_err().unwrap(),
+        PaymentError::BatchTooLarge
+    );
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+    assert!(!executor.is_paid(&emp1, &1));
+    assert!(!executor.is_paid(&emp2, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 0);
+
+    // Retry with a single-employee batch within the configured limit.
+    let mut retry_employees = Vec::new(&env);
+    let mut retry_amounts = Vec::new(&env);
+    let mut retry_proofs_a = Vec::new(&env);
+    let mut retry_proofs_b = Vec::new(&env);
+    let mut retry_proofs_c = Vec::new(&env);
+    let mut retry_nullifiers = Vec::new(&env);
+
+    retry_employees.push_back(emp1.clone());
+    retry_amounts.push_back(1000i128);
+    retry_proofs_a.push_back(pa1);
+    retry_proofs_b.push_back(pb1);
+    retry_proofs_c.push_back(pc1);
+    retry_nullifiers.push_back(null1);
+
+    let retry_result = executor.execute_batch_with_receipt(
+        &company_id,
+        &retry_employees,
+        &retry_amounts,
+        &retry_proofs_a,
+        &retry_proofs_b,
+        &retry_proofs_c,
+        &retry_nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(retry_result.len(), 1);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+    assert!(executor.is_paid(&emp1, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+}
+
+/// R-2 + R-1: A batch containing a reused nullifier fails with ProofAlreadyUsed
+/// and leaves the receipt unconsumed so retrying with a fresh proof succeeds.
+#[test]
+fn test_batch_reused_nullifier_preserves_receipt_for_fresh_retry() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, _token, company_id, _admin, _treasury) =
+        setup_system(&env);
+
+    let (emp1, _) = register_employee(&env, &registry, &commitment_client, company_id, 84);
+    let (emp2, _) = register_employee(&env, &registry, &commitment_client, company_id, 85);
+
+    let (pa1, pb1, pc1, null1) = make_proof(&env, 84);
+    let (pa2, pb2, pc2, null2) = make_proof(&env, 85);
+    let receipt = BytesN::from_array(&env, &[0xD1u8; 32]);
+
+    // Pay emp1 individually, consuming null1.
+    executor.execute_payment(&company_id, &emp1, &1000, &pa1, &pb1, &pc1, &null1, &1);
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+
+    // Attempt batch for emp2 reusing null1.
+    let mut employees = Vec::new(&env);
+    let mut amounts = Vec::new(&env);
+    let mut proofs_a = Vec::new(&env);
+    let mut proofs_b = Vec::new(&env);
+    let mut proofs_c = Vec::new(&env);
+    let mut stale_nullifiers = Vec::new(&env);
+
+    employees.push_back(emp2.clone());
+    amounts.push_back(2000i128);
+    proofs_a.push_back(pa2.clone());
+    proofs_b.push_back(pb2.clone());
+    proofs_c.push_back(pc2.clone());
+    stale_nullifiers.push_back(null1);
+
+    let stale_attempt = executor.try_execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &stale_nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(
+        stale_attempt.unwrap_err().unwrap(),
+        PaymentError::ProofAlreadyUsed
+    );
+    assert!(!executor.is_settlement_receipt_used(&receipt));
+    assert!(!executor.is_paid(&emp2, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 1000);
+
+    // Retry with a fresh nullifier and the same receipt.
+    let mut fresh_nullifiers = Vec::new(&env);
+    fresh_nullifiers.push_back(null2);
+
+    let retry_result = executor.execute_batch_with_receipt(
+        &company_id,
+        &employees,
+        &amounts,
+        &proofs_a,
+        &proofs_b,
+        &proofs_c,
+        &fresh_nullifiers,
+        &1,
+        &receipt,
+    );
+    assert_eq!(retry_result.len(), 1);
+    assert!(executor.is_settlement_receipt_used(&receipt));
+    assert!(executor.is_paid(&emp2, &1));
+    assert_eq!(executor.get_total_paid(&company_id), 3000);
+}
