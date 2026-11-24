@@ -86,7 +86,9 @@ fn setup_system<'a>(
         &0i128,
     );
 
-    (executor, registry, commitment, token, company_id, treasury, employee)
+    (
+        executor, registry, commitment, token, company_id, treasury, employee,
+    )
 }
 
 fn payment_inputs(env: &Env, seed: u8) -> (BytesN<64>, BytesN<128>, BytesN<64>, BytesN<32>) {
@@ -149,10 +151,7 @@ fn test_all_zero_receipt_is_single_use_and_replay_is_rejected() {
         &receipt,
     );
 
-    assert_eq!(
-        replay,
-        Err(Ok(PaymentError::SettlementReceiptAlreadyUsed))
-    );
+    assert_eq!(replay, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
     assert_eq!(token.balance(&treasury), treasury_before);
     assert_eq!(executor.get_total_paid(&company_id), total_before);
     assert!(!executor.is_paid(&employee, &2));
@@ -187,10 +186,7 @@ fn test_duplicate_receipt_replay_is_noop_for_state_and_funds() {
         &receipt,
     );
 
-    assert_eq!(
-        replay,
-        Err(Ok(PaymentError::SettlementReceiptAlreadyUsed))
-    );
+    assert_eq!(replay, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
     assert!(executor.is_settlement_receipt_used(&receipt));
     assert_eq!(token.balance(&treasury), treasury_before);
     assert_eq!(token.balance(&employee), employee_before);
@@ -224,22 +220,10 @@ fn test_receipt_reuse_across_companies_is_rejected() {
     executor.set_withholding_config(&company_b, &0u32, &0u32, &tax_b, &tax_b, &0i128, &0i128);
 
     let (e2, a2, pa2, pb2, pc2, n2) = one_employee_batch(&env, &employee_b, 300, 42);
-    let replay = executor.try_execute_batch_with_receipt(
-        &company_b,
-        &e2,
-        &a2,
-        &pa2,
-        &pb2,
-        &pc2,
-        &n2,
-        &1,
-        &receipt,
-    );
+    let replay = executor
+        .try_execute_batch_with_receipt(&company_b, &e2, &a2, &pa2, &pb2, &pc2, &n2, &1, &receipt);
 
-    assert_eq!(
-        replay,
-        Err(Ok(PaymentError::SettlementReceiptAlreadyUsed))
-    );
+    assert_eq!(replay, Err(Ok(PaymentError::SettlementReceiptAlreadyUsed)));
     assert_eq!(executor.get_total_paid(&company_b), 0);
     assert!(!executor.is_paid(&employee_b, &1));
 }

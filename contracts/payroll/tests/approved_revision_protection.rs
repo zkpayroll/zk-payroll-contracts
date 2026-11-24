@@ -34,11 +34,11 @@ fn setup() -> Ctx {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let client = PayrollClient::new(&env, &payroll_id);
     client.initialize(
         &admin,
-        &env.register_contract(None, Token),
+        &env.register(Token, ()),
         &Address::generate(&env),
         &Address::generate(&env),
         &Address::generate(&env),

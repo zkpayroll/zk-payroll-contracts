@@ -242,6 +242,10 @@ impl TreasuryIsolationContract {
     ///
     /// `available = balance - reserved` must be ≥ `amount`.
     /// Asset-scoped: a USDC reserve cannot draw on an XLM balance.
+    ///
+    /// Issue #885: an asset the company never registered is rejected with
+    /// `AssetNotRegistered` before any other check, so an unknown asset code
+    /// can never create or touch a reservation.
     pub fn reserve(
         env: Env,
         company_id: u64,
@@ -251,6 +255,7 @@ impl TreasuryIsolationContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
+        Self::require_registered_asset(&env, company_id, &asset)?;
         Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
@@ -485,6 +490,23 @@ impl TreasuryIsolationContract {
         }
     }
 
+    /// Reject assets without a registration record for this company (#885).
+    fn require_registered_asset(
+        env: &Env,
+        company_id: u64,
+        asset: &Address,
+    ) -> Result<(), TreasuryIsolationError> {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::RegisteredAsset(company_id, asset.clone()))
+        {
+            Ok(())
+        } else {
+            Err(TreasuryIsolationError::AssetNotRegistered)
+        }
+    }
+
     fn load_balance(
         env: &Env,
         company_id: u64,
@@ -508,6 +530,9 @@ impl TreasuryIsolationContract {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod failed_transfer_isolation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
@@ -516,7 +541,7 @@ mod tests {
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, TreasuryIsolationContract);
+        let contract_id = env.register(TreasuryIsolationContract, ());
         let admin = Address::generate(&env);
         let client = TreasuryIsolationContractClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -818,5 +843,53 @@ mod tests {
         // Admin can still release reserve
         let after_admin = client.release_reserve(&company_id, &asset, &500i128, &admin);
         assert_eq!(after_admin.reserved, 3000);
+    }
+
+    // ── Issue #885: reservations against unknown assets ──────────────────────
+
+    #[test]
+    fn test_reserve_registered_asset_succeeds() {
+        let (env, contract_id, _) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        client.register_asset(&10u64, &asset, &Address::generate(&env), &symbol_short!("USDC"));
+        client.credit(&10u64, &asset, &1_000i128);
+
+        let bal = client.reserve(&10u64, &asset, &1_000i128);
+        assert_eq!(bal.reserved, 1_000);
+    }
+
+    #[test]
+    fn test_reserve_unknown_asset_rejected_without_state() {
+        let (env, contract_id, _) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let unknown = Address::generate(&env);
+
+        // Unknown asset is reported even when the amount is also invalid.
+        for amount in [500i128, 0i128] {
+            let result = client.try_reserve(&11u64, &unknown, &amount);
+            assert_eq!(
+                result.unwrap_err().unwrap(),
+                TreasuryIsolationError::AssetNotRegistered
+            );
+        }
+        assert!(client.get_balance(&11u64, &unknown).is_none());
+    }
+
+    #[test]
+    fn test_reserve_asset_registered_for_other_company_rejected() {
+        let (env, contract_id, _) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        client.register_asset(&12u64, &asset, &Address::generate(&env), &symbol_short!("USDC"));
+        client.credit(&12u64, &asset, &1_000i128);
+
+        // Boundary: the asset exists, but not for company 13.
+        let result = client.try_reserve(&13u64, &asset, &1i128);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::AssetNotRegistered
+        );
+        assert_eq!(client.get_balance(&12u64, &asset).unwrap().reserved, 0);
     }
 }

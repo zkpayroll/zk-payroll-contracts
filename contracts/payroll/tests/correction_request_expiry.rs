@@ -371,10 +371,7 @@ fn admin_can_escalate_a_late_pending_correction_once() {
     let events = env.events().all();
     let event_list = events.events();
     assert_eq!(event_list.len(), 1);
-    let body = match &event_list[0].body {
-        soroban_sdk::xdr::ContractEventBody::V0(body) => body,
-        _ => unreachable!("v0 event body"),
-    };
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &event_list[0].body;
     let event_name: Symbol = Symbol::try_from_val(&env, body.topics.get(1).unwrap()).unwrap();
     let vals = Vec::<Val>::try_from_val(&env, &body.data).unwrap();
     let emitted_draft_id: u64 = vals.get(0).unwrap().try_into_val(&env).unwrap();

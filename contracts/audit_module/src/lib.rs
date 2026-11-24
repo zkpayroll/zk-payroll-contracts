@@ -2,7 +2,7 @@
 
 use pause_manager::PauseManagerClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env,
     Symbol, Vec,
 };
 
@@ -66,6 +66,47 @@ pub enum AuditError {
     ConflictingGrant = 20,
     /// An issued delegated grant cannot be expanded; issue a new grant instead.
     GrantExpansionNotAllowed = 21,
+    /// The grant exists but its expiration ledger has not been reached yet.
+    GrantNotExpired = 22,
+    /// The grant expired but the retention grace period has not elapsed yet.
+    GrantNotYetPrunable = 23,
+    /// The requested expiration ledger is already in the past (#890).
+    ExpirationInPast = 24,
+}
+
+impl AuditError {
+    /// Returns a fixed, actionable message safe to display to clients.
+    ///
+    /// Messages never contain auditor identifiers, employee data, salary
+    /// amounts, or commitment material. Codes and messages are append-only.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::KeyNotFound => "No auditor grant exists; ask an admin to grant access.",
+            Self::WrongAuditor => "The caller does not match the auditor on this grant.",
+            Self::KeyExpired => "The auditor grant has expired; request a fresh grant.",
+            Self::NotKeyGranter => "Only the admin that granted this key may change it.",
+            Self::InsufficientScope => "The grant scope does not cover this query; narrow it or request broader scope.",
+            Self::CommitmentMismatch => "The disclosed values do not match the stored commitment.",
+            Self::InvalidViewKey => "The supplied view key does not belong to this auditor.",
+            Self::ExpirationNotExtended => "The new expiration must be later than the current one.",
+            Self::DelegationNotAllowed => "Delegation is disabled for this grant.",
+            Self::DelegationExceedsParentScope => "The delegated scope exceeds the parent grant scope.",
+            Self::DelegationExceedsParentExpiry => "The delegated expiry exceeds the parent grant expiry.",
+            Self::DelegationRevoked => "The parent grant is gone or revoked; request a new grant.",
+            Self::InvalidProofReference => "The proof reference is empty or invalid.",
+            Self::ChallengeNotFound => "The challenge ID does not exist.",
+            Self::ChallengeExpired => "The challenge deadline has passed; open a new challenge.",
+            Self::ChallengeAlreadyResolved => "This challenge already has a response.",
+            Self::InvalidChallenge => "The challenge is malformed or out of scope.",
+            Self::IntegrityMarkerMissing => "The export has no integrity marker; re-export and verify it.",
+            Self::InvalidEventSequence => "The audit event sequence does not follow the canonical lifecycle.",
+            Self::ConflictingGrant => "This delegate already holds a conflicting grant.",
+            Self::GrantExpansionNotAllowed => "A delegated grant cannot be expanded; issue a new grant.",
+            Self::GrantNotExpired => "The grant is still valid; no expiry action is needed.",
+            Self::GrantNotYetPrunable => "The grant expired but its retention grace period has not elapsed.",
+            Self::ExpirationInPast => "The expiration ledger is already in the past; choose a later ledger.",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +275,12 @@ impl AuditModule {
 
     pub fn generate_view_key(env: Env, auditor: Address, expiration_ledger: u32) -> BytesN<32> {
         Self::require_not_paused(&env);
+        // A grant is valid while `sequence <= expiration_ledger`, so the
+        // current ledger is the earliest expiration that is not dead on
+        // arrival (#890). Panics with a typed error to keep the ABI.
+        if let Err(e) = require_future_expiration(&env, expiration_ledger) {
+            panic_with_error!(&env, e);
+        }
         let admin = env.current_contract_address();
 
         let key_bytes = Self::derive_key_bytes(&env, &auditor, expiration_ledger);
@@ -263,40 +310,19 @@ impl AuditModule {
     }
 
     pub fn verify_access(env: Env, auditor: Address) -> bool {
-        match env
+        let record: ViewKeyRecord = match env
             .storage()
             .persistent()
-            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(auditor.clone()))
+            .get(&DataKey::AuditorKey(auditor))
         {
-            Some(record) => {
-                if env.ledger().sequence() > record.expiration_ledger {
-                    return false;
-                }
-                if let Some(parent) = record.parent_auditor.clone() {
-                    let parent_record: ViewKeyRecord = match env
-                        .storage()
-                        .persistent()
-                        .get(&DataKey::AuditorKey(parent.clone()))
-                    {
-                        Some(value) => value,
-                        None => return false,
-                    };
-                    if env.ledger().sequence() > parent_record.expiration_ledger {
-                        return false;
-                    }
-                    if !Self::scope_is_within(parent_record.max_scope, record.scope) {
-                        return false;
-                    }
-                    if record.expiration_ledger > parent_record.max_expiration_ledger
-                        || record.expiration_ledger > parent_record.expiration_ledger
-                    {
-                        return false;
-                    }
-                }
-                true
-            }
-            None => false,
-        }
+            Some(record) => record,
+            None => return false,
+        };
+        let parent = match load_parent_record(&env, &record) {
+            Ok(parent) => parent,
+            Err(_) => return false,
+        };
+        check_grant_active(&env, &record, parent.as_ref()).is_ok()
     }
 
     pub fn revoke_view_key(env: Env, admin: Address, auditor: Address) -> Result<(), AuditError> {
@@ -329,6 +355,11 @@ impl AuditModule {
 
     /// Remove an expired grant after an administrator-defined ledger grace
     /// period. The grantor remains the authority for its own grant.
+    ///
+    /// Returns `GrantNotExpired` while the key is still valid and
+    /// `GrantNotYetPrunable` during the retention window, matching
+    /// `check_grant_expiry`. `KeyExpired` is reserved for operations that
+    /// genuinely require a fresh grant (verification and delegation).
     pub fn prune_expired_view_key(
         env: Env,
         admin: Address,
@@ -345,10 +376,16 @@ impl AuditModule {
         if record.granted_by != admin {
             return Err(AuditError::NotKeyGranter);
         }
-        if env.ledger().sequence() <= record.expiration_ledger
-            || env.ledger().sequence() < record.expiration_ledger.saturating_add(retention_ledgers)
-        {
-            return Err(AuditError::KeyExpired);
+        // Distinguish "still valid" from "expired but retained". The old
+        // shared `KeyExpired` error was misleading on both paths: it told an
+        // operator to request a fresh grant while the current one was still
+        // active, and gave no hint that waiting out the grace period was the
+        // correct action. `check_grant_expiry` uses the same two conditions.
+        if env.ledger().sequence() <= record.expiration_ledger {
+            return Err(AuditError::GrantNotExpired);
+        }
+        if env.ledger().sequence() < record.expiration_ledger.saturating_add(retention_ledgers) {
+            return Err(AuditError::GrantNotYetPrunable);
         }
 
         Self::revoke_descendants(&env, &auditor);
@@ -473,6 +510,41 @@ impl AuditModule {
         Ok(record.expiration_ledger)
     }
 
+    /// Read-only expiry diagnostic for an auditor grant (issue #971).
+    ///
+    /// Returns `Ok(())` only when the grant has expired and is past its
+    /// retention grace period, i.e. when `prune_expired_view_key` is safe to
+    /// call. Otherwise returns a stable typed error with an actionable,
+    /// privacy-safe message:
+    ///
+    /// - `KeyNotFound` when no grant exists,
+    /// - `GrantNotExpired` while the key is still valid,
+    /// - `GrantNotYetPrunable` during the retention grace window.
+    ///
+    /// The query is permissionless, never mutates storage, and never emits an
+    /// event, so dashboards can explain expiry state before asking an admin to
+    /// prune. Authorization for the pruning call itself is unchanged.
+    pub fn check_grant_expiry(
+        env: Env,
+        auditor: Address,
+        retention_ledgers: u32,
+    ) -> Result<(), AuditError> {
+        let record: ViewKeyRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuditorKey(auditor))
+            .ok_or(AuditError::KeyNotFound)?;
+        let now = env.ledger().sequence();
+
+        if now <= record.expiration_ledger {
+            return Err(AuditError::GrantNotExpired);
+        }
+        if now < record.expiration_ledger.saturating_add(retention_ledgers) {
+            return Err(AuditError::GrantNotYetPrunable);
+        }
+        Ok(())
+    }
+
     /// Extend an existing auditor view key to a new `new_expiration_ledger`.
     ///
     /// Only the address recorded as `granted_by` on the key may refresh it.
@@ -504,6 +576,11 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
+        // An expired grant cannot be revived by extending it. Regrants must
+        // go through generate_view_key so the new scope is explicit (#970).
+        let parent = load_parent_record(&env, &record)?;
+        require_active_grant(&env, &auditor, &record, parent.as_ref())?;
+
         // Guard against accidentally shortening an active key.
         if new_expiration_ledger <= record.expiration_ledger {
             return Err(AuditError::ExpirationNotExtended);
@@ -530,7 +607,8 @@ impl AuditModule {
             &AuditLifecycleStage::Active,
         );
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "ViewKeyRefreshed"), admin, auditor),
             (new_expiration_ledger,),
         );
@@ -560,6 +638,11 @@ impl AuditModule {
         if record.granted_by != admin {
             return Err(AuditError::NotKeyGranter);
         }
+
+        // Expired grants are immutable. Changing their delegation policy
+        // would silently widen a grant that is no longer valid (#970).
+        let parent = load_parent_record(&env, &record)?;
+        require_active_grant(&env, &auditor, &record, parent.as_ref())?;
 
         record.allow_delegation = allow_delegation;
         record.max_scope = max_scope;
@@ -601,9 +684,10 @@ impl AuditModule {
         if !parent.allow_delegation {
             return Err(AuditError::DelegationNotAllowed);
         }
-        if !Self::scope_is_within(parent.max_scope, scope) {
+        if !scope_within(parent.max_scope, scope) {
             return Err(AuditError::DelegationExceedsParentScope);
         }
+        require_future_expiration(&env, expiration_ledger)?;
         if expiration_ledger > parent.max_expiration_ledger
             || expiration_ledger > parent.expiration_ledger
         {
@@ -673,15 +757,16 @@ impl AuditModule {
             return Err(AuditError::NotKeyGranter);
         }
 
-        if env.ledger().sequence() > record.expiration_ledger {
-            return Err(AuditError::KeyExpired);
-        }
-
         let parent: ViewKeyRecord = env
             .storage()
             .persistent()
             .get(&DataKey::AuditorKey(auditor.clone()))
             .ok_or(AuditError::DelegationRevoked)?;
+
+        // Use the shared rule so an expired delegate or an expired parent can
+        // never be revived by extending the grant (#970). The parent is
+        // required for a delegated grant, so it is passed explicitly here.
+        require_active_grant(&env, &delegate, &record, Some(&parent))?;
 
         if !parent.allow_delegation {
             return Err(AuditError::DelegationNotAllowed);
@@ -701,7 +786,7 @@ impl AuditModule {
         {
             return Err(AuditError::DelegationExceedsParentExpiry);
         }
-        if !Self::scope_is_within(parent.max_scope, record.scope) {
+        if !scope_within(parent.max_scope, record.scope) {
             return Err(AuditError::DelegationExceedsParentScope);
         }
 
@@ -801,34 +886,8 @@ impl AuditModule {
             .persistent()
             .get(&DataKey::AuditorKey(auditor.clone()))
             .ok_or(AuditError::KeyNotFound)?;
-
-        if env.ledger().sequence() > record.expiration_ledger {
-            env.events().publish(
-                (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
-                (record.expiration_ledger, env.ledger().sequence()),
-            );
-            return Err(AuditError::KeyExpired);
-        }
-
-        if let Some(parent) = record.parent_auditor.clone() {
-            let parent_record: ViewKeyRecord = env
-                .storage()
-                .persistent()
-                .get(&DataKey::AuditorKey(parent.clone()))
-                .ok_or(AuditError::DelegationRevoked)?;
-
-            if env.ledger().sequence() > parent_record.expiration_ledger {
-                return Err(AuditError::DelegationRevoked);
-            }
-            if !Self::scope_is_within(parent_record.max_scope, record.scope) {
-                return Err(AuditError::DelegationExceedsParentScope);
-            }
-            if record.expiration_ledger > parent_record.max_expiration_ledger
-                || record.expiration_ledger > parent_record.expiration_ledger
-            {
-                return Err(AuditError::DelegationExceedsParentExpiry);
-            }
-        }
+        let parent = load_parent_record(env, &record)?;
+        require_active_grant(env, &auditor, &record, parent.as_ref())?;
 
         Ok(record)
     }
@@ -1110,12 +1169,14 @@ impl AuditModule {
         Self::record_audit_log(&env, &auditor, scope, matched);
 
         if matched {
-            env.events().publish(
+            payroll_events::publish(
+                &env,
                 (Symbol::new(&env, "MetadataVerified"), auditor.clone()),
                 (stored_hash, scope),
             );
         } else {
-            env.events().publish(
+            payroll_events::publish(
+                &env,
                 (Symbol::new(&env, "MetadataMismatch"), auditor.clone()),
                 (stored_hash, expected_hash),
             );
@@ -1147,16 +1208,6 @@ impl AuditModule {
         env.storage()
             .persistent()
             .remove(&DataKey::DelegatedAuditors(auditor.clone()));
-    }
-
-    fn scope_is_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
-        let rank = |scope: AuditScope| match scope {
-            AuditScope::FullCompany => 4,
-            AuditScope::TimeRange => 3,
-            AuditScope::EmployeeList => 2,
-            AuditScope::AggregateOnly => 1,
-        };
-        rank(child_scope) <= rank(parent_scope)
     }
 
     fn record_audit_log(env: &Env, auditor: &Address, scope: AuditScope, matched: bool) {
@@ -1261,6 +1312,97 @@ impl AuditModule {
 mod tests;
 
 // ────────────────────────────────────────────────────────────────────────────
+// Shared grant-expiry validation (Issue #970)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Scope containment shared by the public helper and the grant validator.
+/// A nested scope may never exceed its parent.
+fn scope_within(parent_scope: AuditScope, child_scope: AuditScope) -> bool {
+    let rank = |scope: AuditScope| match scope {
+        AuditScope::FullCompany => 4,
+        AuditScope::TimeRange => 3,
+        AuditScope::EmployeeList => 2,
+        AuditScope::AggregateOnly => 1,
+    };
+    rank(child_scope) <= rank(parent_scope)
+}
+
+/// Rejects an expiration ledger that has already passed. The boundary is
+/// inclusive: `expiration_ledger == sequence` is valid for this ledger only,
+/// matching `check_grant_active` (#890).
+fn require_future_expiration(env: &Env, expiration_ledger: u32) -> Result<(), AuditError> {
+    if expiration_ledger < env.ledger().sequence() {
+        return Err(AuditError::ExpirationInPast);
+    }
+    Ok(())
+}
+
+/// Pure check over records the caller already loaded. It performs no storage
+/// reads and emits no events, so read-only queries stay side-effect free.
+fn check_grant_active(
+    env: &Env,
+    record: &ViewKeyRecord,
+    parent: Option<&ViewKeyRecord>,
+) -> Result<(), AuditError> {
+    let now = env.ledger().sequence();
+    if now > record.expiration_ledger {
+        return Err(AuditError::KeyExpired);
+    }
+    if let Some(parent) = parent {
+        if now > parent.expiration_ledger {
+            return Err(AuditError::DelegationRevoked);
+        }
+        if !scope_within(parent.max_scope, record.scope) {
+            return Err(AuditError::DelegationExceedsParentScope);
+        }
+        if record.expiration_ledger > parent.max_expiration_ledger
+            || record.expiration_ledger > parent.expiration_ledger
+        {
+            return Err(AuditError::DelegationExceedsParentExpiry);
+        }
+    }
+    Ok(())
+}
+
+/// Same rule as `check_grant_active`, plus the privacy-safe expiry event for
+/// rejected auditor access.
+fn require_active_grant(
+    env: &Env,
+    auditor: &Address,
+    record: &ViewKeyRecord,
+    parent: Option<&ViewKeyRecord>,
+) -> Result<(), AuditError> {
+    match check_grant_active(env, record, parent) {
+        Ok(()) => Ok(()),
+        Err(AuditError::KeyExpired) => {
+            payroll_events::publish(
+                env,
+                (Symbol::new(env, "AuditAccessExpired"), auditor.clone()),
+                (record.expiration_ledger, env.ledger().sequence()),
+            );
+            Err(AuditError::KeyExpired)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Load a delegated grant's parent. Uses the record the caller already has,
+/// so the common non-delegated case performs no additional read.
+fn load_parent_record(
+    env: &Env,
+    record: &ViewKeyRecord,
+) -> Result<Option<ViewKeyRecord>, AuditError> {
+    match &record.parent_auditor {
+        Some(parent) => env
+            .storage()
+            .persistent()
+            .get::<DataKey, ViewKeyRecord>(&DataKey::AuditorKey(parent.clone()))
+            .map(Some)
+            .ok_or(AuditError::DelegationRevoked),
+        None => Ok(None),
+    }
+}
+
 // Issue #513: Audit Grant Scope Query Endpoint
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -1287,12 +1429,17 @@ pub fn query_grant_scope(env: Env, auditor: Address) -> Result<ViewKeyRecord, Au
 
 /// Check if a grant is currently active (exists and not expired).
 pub fn is_grant_active(env: Env, auditor: Address) -> bool {
-    match env
+    let record: ViewKeyRecord = match env
         .storage()
         .persistent()
-        .get::<_, ViewKeyRecord>(&DataKey::AuditorKey(auditor))
+        .get(&DataKey::AuditorKey(auditor))
     {
-        Some(record) => env.ledger().sequence() <= record.expiration_ledger,
-        None => false,
-    }
+        Some(record) => record,
+        None => return false,
+    };
+    let parent = match load_parent_record(&env, &record) {
+        Ok(parent) => parent,
+        Err(_) => return false,
+    };
+    check_grant_active(&env, &record, parent.as_ref()).is_ok()
 }

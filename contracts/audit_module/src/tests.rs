@@ -18,7 +18,7 @@ fn event_count(env: &Env) -> u32 {
 fn setup() -> (Env, soroban_sdk::Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     (env, contract_id)
 }
 
@@ -158,6 +158,52 @@ fn test_revoke_removes_key() {
 }
 
 #[test]
+fn test_archived_payroll_auditor_access_is_rejected() {
+    let (env, contract_id) = setup();
+    let client = AuditModuleClient::new(&env, &contract_id);
+
+    let auditor = soroban_sdk::Address::generate(&env);
+    let seq = env.ledger().sequence();
+    client.generate_view_key(&auditor, &(seq + 1_000));
+    assert!(client.verify_access(&auditor));
+
+    // Archive the payroll: revoke the auditor's key so no further access is granted.
+    let admin = contract_id.clone();
+    client.revoke_view_key(&admin, &auditor);
+
+    // Success/rejection: access must be denied after archival.
+    assert!(!client.verify_access(&auditor));
+
+    // Rejection: commitment verification with the revoked key must fail.
+    let dummy = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client
+        .try_verify_commitment_with_key(
+            &auditor,
+            &dummy,
+            &0_i128,
+            &dummy,
+            &AuditScope::EmployeeList
+        )
+        .is_err());
+
+    // Boundary: a fresh key generated after archival must be the only path back in.
+    client.generate_view_key(&auditor, &(seq + 2_000));
+    assert!(client.verify_access(&auditor));
+
+    // Boundary: the re-issued key must still be rejected for aggregate-only scope.
+    let dummy_after = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client
+        .try_verify_commitment_with_key(
+            &auditor,
+            &dummy_after,
+            &0_i128,
+            &dummy_after,
+            &AuditScope::AggregateOnly
+        )
+        .is_err());
+}
+
+#[test]
 fn test_revoke_wrong_admin_fails() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
@@ -168,6 +214,9 @@ fn test_revoke_wrong_admin_fails() {
 
     let interloper = soroban_sdk::Address::generate(&env);
     assert!(client.try_revoke_view_key(&interloper, &auditor).is_err());
+
+    // The rejected revocation must leave the auditor's access intact.
+    assert!(client.verify_access(&auditor));
 }
 
 // ---------------------------------------------------------------------------
@@ -973,7 +1022,7 @@ fn test_generate_view_key_has_no_caller_authorization() {
     // Deliberately no mock_all_auths() and no mocked auths whatsoever — this
     // call succeeds even for a completely unauthenticated invocation.
     let env = Env::default();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     let self_appointed_auditor = soroban_sdk::Address::generate(&env);
@@ -1327,7 +1376,7 @@ fn test_authorize_auditor_after_expiry_commitment_verification_fails_and_rolls_b
 
     // NOTE — genuine finding, not a test artifact: `authorize_auditor`
     // (contracts/audit_module/src/lib.rs) calls
-    // `env.events().publish((Symbol::new(env, "AuditAccessExpired"), ...), ...)`
+    // `payroll_events::publish(&env, (Symbol::new(env, "AuditAccessExpired"), ...), ...)`
     // immediately before returning `Err(AuditError::KeyExpired)`. But Soroban
     // rolls back *all* effects of an invocation that returns a typed
     // `contracterror` — the same atomicity guarantee that reverts storage
@@ -1440,7 +1489,7 @@ fn test_prune_expired_view_key_before_grace_period_fails() {
     // pruning must be rejected so the record remains available.
     env.ledger().set_sequence_number(expiration + retention - 1);
     let result = client.try_prune_expired_view_key(&admin, &auditor, &retention);
-    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyExpired);
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::GrantNotYetPrunable);
 
     // The record must still be readable — pruning did not happen.
     assert!(client.try_get_view_key(&auditor).is_ok());
@@ -1482,10 +1531,9 @@ fn test_prune_expired_view_key_before_expiry_fails() {
     // even with a zero retention window.
     env.ledger().set_sequence_number(expiration);
     let result = client.try_prune_expired_view_key(&admin, &auditor, &0);
-    assert_eq!(result.unwrap_err().unwrap(), AuditError::KeyExpired);
+    assert_eq!(result.unwrap_err().unwrap(), AuditError::GrantNotExpired);
     assert!(client.try_get_view_key(&auditor).is_ok());
 }
-
 
 #[test]
 fn delegated_grant_cannot_expand_past_issuance_expiry() {
@@ -1512,7 +1560,7 @@ fn delegated_grant_cannot_expand_past_issuance_expiry() {
         AuditError::GrantExpansionNotAllowed
     );
     assert_eq!(
-        client.get_expiration(&delegate).unwrap(),
+        client.get_expiration(&delegate),
         seq + 500,
         "a rejected extension must preserve the issued expiry"
     );

@@ -54,7 +54,7 @@ fn deprecation_bumps_the_config_revision() {
 fn non_admin_cannot_deprecate() {
     let env = Env::default();
     let (client, token, _employee) = common::setup(&env);
-    let admin = client.get_addresses().admin;
+    let _admin = client.get_addresses().admin;
 
     // Authorize nobody: the admin's `require_auth` must fail.
     env.set_auths(&[]);

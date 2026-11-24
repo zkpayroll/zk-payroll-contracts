@@ -19,8 +19,8 @@
 //! ```
 
 #[cfg(test)]
-mod wallet_update_event_tests {
-    use crate::{ev_data_empty, ev_data_vals, ev_topics};
+mod tests {
+    use crate::{ev_data_vals, ev_topics};
     use payroll_registry::{PayrollRegistry, PayrollRegistryClient};
     use soroban_sdk::testutils::{Address as _, Events};
     macro_rules! ev_len {
@@ -45,10 +45,8 @@ mod wallet_update_event_tests {
     // A second valid Stellar account StrKey for multi-address tests.
     // Encodes 32 key bytes of 0x01:
     //   version 0x30 + [0x01; 32] + CRC16-XMODEM
-    const VALID_WALLET_ALL_ONES: &str = "GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H";
 
     // The Stellar zero address — valid format but blocked as a destination.
-    const ZERO_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
     /// Set up a fresh environment with a registered company and one employee.
     /// Returns `(env, client, company_id, employee_address, salary_commitment)`.
@@ -62,7 +60,7 @@ mod wallet_update_event_tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, PayrollRegistry);
+        let contract_id = env.register(PayrollRegistry, ());
         let client = PayrollRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

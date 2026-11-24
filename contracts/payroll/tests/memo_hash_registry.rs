@@ -1,17 +1,17 @@
-/// Confidential memo hash registry tests - issue #347.
-///
-/// # Coverage
-/// | Test | Scenario |
-/// |------|----------|
-/// | `test_register_and_get_memo_hash_success` | Full happy path: register, get |
-/// | `test_register_zero_hash_rejected` | `register_memo_hash` panics on the all-zero digest |
-/// | `test_register_empty_period_rejected` | `register_memo_hash` panics on an empty period symbol |
-/// | `test_register_duplicate_batch_rejected` | Re-registering a memo hash for the same (employer, period, batch_id) panics |
-/// | `test_register_by_non_admin_rejected` | Only the admin may register a memo hash |
-/// | `test_get_unregistered_memo_hash_rejected` | Querying an unregistered (employer, period, batch_id) fails |
-/// | `test_memo_hash_scoped_to_employer` | The same period and batch_id for a different employer is an independent slot |
-/// | `test_memo_hash_scoped_to_period` | The same employer and batch_id for a different period is an independent slot |
-/// | `test_memo_hash_scoped_to_batch_id` | The same employer and period with a different batch_id is an independent slot |
+//! Confidential memo hash registry tests - issue #347.
+//!
+//! # Coverage
+//! | Test | Scenario |
+//! |------|----------|
+//! | `test_register_and_get_memo_hash_success` | Full happy path: register, get |
+//! | `test_register_zero_hash_rejected` | `register_memo_hash` panics on the all-zero digest |
+//! | `test_register_empty_period_rejected` | `register_memo_hash` panics on an empty period symbol |
+//! | `test_register_duplicate_batch_rejected` | Re-registering a memo hash for the same (employer, period, batch_id) panics |
+//! | `test_register_by_non_admin_rejected` | Only the admin may register a memo hash |
+//! | `test_get_unregistered_memo_hash_rejected` | Querying an unregistered (employer, period, batch_id) fails |
+//! | `test_memo_hash_scoped_to_employer` | The same period and batch_id for a different employer is an independent slot |
+//! | `test_memo_hash_scoped_to_period` | The same employer and batch_id for a different period is an independent slot |
+//! | `test_memo_hash_scoped_to_batch_id` | The same employer and period with a different batch_id is an independent slot |
 use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
@@ -56,17 +56,17 @@ fn setup() -> Ctx {
     let treasury = Address::generate(&env);
     let treasury_owner = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier_id);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment_client.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
-    let payroll_id = env.register_contract(None, Payroll);
+    let token_id = env.register(Token, ());
+    let payroll_id = env.register(Payroll, ());
 
     let payroll_client = PayrollClient::new(&env, &payroll_id);
     payroll_client.initialize(

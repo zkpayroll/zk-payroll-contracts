@@ -29,15 +29,15 @@ fn mock_vk(env: &Env) -> VerificationKey {
 
 fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address) {
     env.mock_all_auths();
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     verifier_client.init_verifier_admin(&Address::generate(env));
     verifier_client.initialize_verifier(&mock_vk(env));
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     commitment_client.init_commitment_admin(&Address::generate(env));
-    let token_id = env.register_contract(None, Token);
-    let payroll_id = env.register_contract(None, Payroll);
+    let token_id = env.register(Token, ());
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
     let admin = Address::generate(env);
     payroll_client.initialize(
@@ -73,10 +73,7 @@ fn test_draft_updated_event_snapshot_includes_period_and_update_counts() {
                     == Some(Symbol::new(&env, "draft_updated")))
         })
         .expect("draft_updated event");
-    let body = match &event.body {
-        soroban_sdk::xdr::ContractEventBody::V0(body) => body,
-        _ => unreachable!("v0 event body"),
-    };
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
 
     let vals = Vec::<Val>::try_from_val(&env, &body.data).unwrap();
     let emitted_draft_id: u64 = vals.get(0).unwrap().try_into_val(&env).unwrap();

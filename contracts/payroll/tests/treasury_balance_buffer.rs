@@ -1,13 +1,15 @@
 #![cfg(test)]
 
 mod common;
+#[path = "support/active_employee.rs"]
+mod employee_fixture;
 
 use payroll::PayrollClient;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Vec};
 
 fn prepare(env: &Env, client: &PayrollClient, amount: i128, marker: u8) -> u64 {
-    let employee = Address::generate(env);
+    let employee = employee_fixture::active_employee(env, client);
     let proofs = Vec::from_array(env, [BytesN::from_array(env, &[1; 256])]);
     let amounts = Vec::from_array(env, [amount]);
     let employees = Vec::from_array(env, [employee]);
@@ -64,7 +66,7 @@ fn failed_reservation_can_be_retried_at_the_buffer_boundary() {
 
     let proofs = Vec::from_array(&env, [BytesN::from_array(&env, &[1; 256])]);
     let amounts = Vec::from_array(&env, [900_001_i128]);
-    let employees = Vec::from_array(&env, [Address::generate(&env)]);
+    let employees = Vec::from_array(&env, [employee_fixture::active_employee(&env, &client)]);
     let nonce = common::nonce(&env, 2);
     assert!(client
         .try_prepare_payroll_run(&proofs, &amounts, &employees, &900_001, &nonce, &None)
@@ -101,6 +103,38 @@ fn direct_payout_cannot_spend_the_retained_buffer() {
         &employees,
         &1_000_000,
         &common::nonce(&env, 3),
+        &None,
+        &source,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Treasury reservation would be breached")]
+fn direct_payout_cannot_spend_funds_reserved_for_a_pending_run() {
+    let env = Env::default();
+    let (client, _token, employee) = common::setup(&env);
+    let pending_employee = employee_fixture::active_employee(&env, &client);
+    let pending_proofs = Vec::from_array(&env, [BytesN::from_array(&env, &[1; 256])]);
+    let pending_amounts = Vec::from_array(&env, [400_000_i128]);
+    let pending_employees = Vec::from_array(&env, [pending_employee]);
+    client.prepare_payroll_run(
+        &pending_proofs,
+        &pending_amounts,
+        &pending_employees,
+        &400_000,
+        &common::nonce(&env, 4),
+        &None,
+    );
+
+    // The payout itself fits the balance, but would leave only 399_999 for a
+    // pending run that has reserved 400_000.
+    let source = common::authorized_source(&env, &client);
+    client.batch_process_payroll(
+        &Vec::from_array(&env, [BytesN::from_array(&env, &[1; 256])]),
+        &Vec::from_array(&env, [600_001_i128]),
+        &Vec::from_array(&env, [employee]),
+        &600_001,
+        &common::nonce(&env, 5),
         &None,
         &source,
     );

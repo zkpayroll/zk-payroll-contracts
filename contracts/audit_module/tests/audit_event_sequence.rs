@@ -6,7 +6,7 @@ use soroban_sdk::{vec, Address, Env, Symbol, Vec};
 fn test_audit_event_sequence_verification_success_path() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     let canonical_events: Vec<Symbol> = vec![
@@ -20,14 +20,14 @@ fn test_audit_event_sequence_verification_success_path() {
     ];
 
     let result = client.verify_audit_event_sequence(&canonical_events);
-    assert_eq!(result, true);
+    assert!(result);
 }
 
 #[test]
 fn test_audit_event_sequence_verification_failure_path_out_of_order() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     // Fails because AuditSuccessful occurs before ViewKeyGenerated
@@ -61,7 +61,7 @@ fn test_audit_event_sequence_verification_failure_path_out_of_order() {
 fn test_audit_event_sequence_verification_edge_cases() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     // Edge case 1: Empty event sequence
@@ -103,7 +103,7 @@ fn test_audit_event_sequence_verification_edge_cases() {
 fn test_audit_lifecycle_stage_transitions() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AuditModule);
+    let contract_id = env.register(AuditModule, ());
     let client = AuditModuleClient::new(&env, &contract_id);
 
     let auditor = Address::generate(&env);

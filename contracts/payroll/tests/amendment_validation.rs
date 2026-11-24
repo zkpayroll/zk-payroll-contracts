@@ -3,8 +3,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    symbol_short, testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, String,
-    Symbol,
+    testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, String, Symbol,
 };
 
 use payroll::{

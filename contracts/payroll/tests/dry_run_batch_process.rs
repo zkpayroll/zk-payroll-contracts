@@ -7,7 +7,6 @@ mod common;
 
 use ::token::TokenClient;
 use payroll::failure_reasons::{DryRunArgs, PayrollFailureReason};
-use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Vec};
 
 fn args(env: &Env, employee: &Address, amount: i128, nonce_marker: u8) -> DryRunArgs {
@@ -65,9 +64,7 @@ fn zero_proofs_is_reported_as_missing_proof() {
     };
     let report = client.dry_run_batch_process_payroll(&a);
     assert!(!report.would_succeed);
-    assert!(report
-        .blockers
-        .contains(&PayrollFailureReason::MissingProof));
+    assert!(report.blockers.contains(PayrollFailureReason::MissingProof));
 }
 
 #[test]
@@ -80,7 +77,7 @@ fn non_positive_amount_is_reported() {
     assert!(!report.would_succeed);
     assert!(report
         .blockers
-        .contains(&PayrollFailureReason::NonPositiveAmount));
+        .contains(PayrollFailureReason::NonPositiveAmount));
 }
 
 #[test]
@@ -95,7 +92,7 @@ fn expected_spend_mismatch_is_reported() {
     assert!(!report.would_succeed);
     assert!(report
         .blockers
-        .contains(&PayrollFailureReason::ExpectedSpendMismatch));
+        .contains(PayrollFailureReason::ExpectedSpendMismatch));
 }
 
 #[test]
@@ -121,7 +118,7 @@ fn duplicate_employee_is_reported() {
     assert!(!report.would_succeed);
     assert!(report
         .blockers
-        .contains(&PayrollFailureReason::DuplicateEmployee));
+        .contains(PayrollFailureReason::DuplicateEmployee));
 }
 
 #[test]
@@ -136,7 +133,7 @@ fn draft_hash_without_precommit_is_reported() {
     assert!(!report.would_succeed);
     assert!(report
         .blockers
-        .contains(&PayrollFailureReason::DraftNotPreCommitted));
+        .contains(PayrollFailureReason::DraftNotPreCommitted));
 }
 
 #[test]
@@ -154,14 +151,14 @@ fn precommitted_draft_hash_is_not_reported_and_is_not_consumed() {
     let report = client.dry_run_batch_process_payroll(&a);
     assert!(!report
         .blockers
-        .contains(&PayrollFailureReason::DraftNotPreCommitted));
+        .contains(PayrollFailureReason::DraftNotPreCommitted));
 
     // The dry-run must not have consumed the pre-commitment: calling it
     // again with the same args must still see it as pre-committed.
     let report_again = client.dry_run_batch_process_payroll(&a);
     assert!(!report_again
         .blockers
-        .contains(&PayrollFailureReason::DraftNotPreCommitted));
+        .contains(PayrollFailureReason::DraftNotPreCommitted));
 }
 
 #[test]
@@ -178,10 +175,10 @@ fn dry_run_never_writes_run_nonce_state() {
     let second = client.dry_run_batch_process_payroll(&a);
     assert!(!first
         .blockers
-        .contains(&PayrollFailureReason::DuplicateRunNonce));
+        .contains(PayrollFailureReason::DuplicateRunNonce));
     assert!(!second
         .blockers
-        .contains(&PayrollFailureReason::DuplicateRunNonce));
+        .contains(PayrollFailureReason::DuplicateRunNonce));
 }
 
 #[test]
@@ -194,7 +191,7 @@ fn asset_not_allowed_is_reported_by_default() {
     let report = client.dry_run_batch_process_payroll(&args(&env, &employee, 100, 1));
     assert!(report
         .blockers
-        .contains(&PayrollFailureReason::AssetNotAllowed));
+        .contains(PayrollFailureReason::AssetNotAllowed));
 }
 
 #[test]
@@ -208,7 +205,7 @@ fn insufficient_treasury_balance_is_reported() {
     let report = client.dry_run_batch_process_payroll(&args(&env, &employee, 2_000_000, 1));
     assert!(report
         .blockers
-        .contains(&PayrollFailureReason::InsufficientTreasuryBalance));
+        .contains(PayrollFailureReason::InsufficientTreasuryBalance));
 }
 
 #[test]

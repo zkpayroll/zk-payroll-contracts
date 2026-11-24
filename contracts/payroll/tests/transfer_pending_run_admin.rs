@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use payroll::{ContractAddresses, Payroll, PayrollClient, PendingPayrollRun};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 

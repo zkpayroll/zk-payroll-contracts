@@ -3,6 +3,51 @@
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Bytes, BytesN, Env, Vec};
 
+/// # Proof Input Validation Invariants
+///
+/// All proof verification in this module enforces the following invariants:
+///
+/// ## 1. **Public Input Count Must Match Verification Key**
+///    - The number of public inputs plus one must equal `vk.ic.len()`
+///    - Format: `public_inputs.len() + 1 == vk.ic.len()`
+///    - Violation Result: `verify()` returns `false` (format rejection, not cryptographic)
+///    - Rationale: Groth16 verification requires exact positional alignment with IC vector
+///
+/// ## 2. **Proof Digest Binding (Reference Mode Only)**
+///    - When using `verify_with_reference()`, the proof bytes must exactly match the digest stored at registration
+///    - Format: `sha256(proof) == reference.proof_hash`
+///    - Violation Result: `verify_with_reference()` returns `false`
+///    - Rationale: Prevents replay and proof mutation attacks; each reference authorizes specific proof material
+///
+/// ## 3. **Reference Expiry Window**
+///    - A reference is valid from registration through `expires_at_ledger` (inclusive)
+///    - Invalid from `expires_at_ledger + 1` onward
+///    - Format: `ledger.sequence() <= reference.expires_at_ledger` for validity
+///    - Violation Result: `verify_with_reference()` returns `false`
+///    - Rationale: Enforces mandatory proof lifetime cap (~30 days); prevents indefinite authorization
+///
+/// ## 4. **Reference Revocation**
+///    - A revoked reference may never authorize verification, regardless of expiry status
+///    - Format: `reference.revoked == false` required for any verification
+///    - Violation Result: `verify_with_reference()` returns `false`
+///    - Rationale: Allows immediate cancellation of compromised or mistaken authorizations
+///
+/// ## 5. **No Private Data Exposure**
+///    - Error messages must not leak employee identities, salary amounts, or raw proof material
+///    - All rejection codes are generic (e.g., `ReferenceExpired`, `ReferenceRevoked`, `ProofMismatch`)
+///    - Rationale: Preserves privacy in payroll contexts; operators can correlate events internally via audit logs
+///
+/// These invariants are enforced across all public entry points:
+/// - `verify()` / `verify_payment_proof()`: inputs 1, 5
+/// - `verify_with_reference()`: inputs 1-5
+/// - `register_proof_reference()`: input 3 (TTL cap checked via `MAX_REFERENCE_TTL_LEDGERS`)
+///
+/// `validate_proof_inputs()` exposes the structural checks as typed
+/// [`ProofError`] values without performing verification. Its error variants
+/// are stable integers and never include proof bytes, public inputs, employee
+/// identities, or salary amounts. The `verify*` entry points call the same
+/// validation path and return `false` on rejection.
+
 /// Groth16 proof components (G1 A, G2 B, G1 C) for BN254.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +100,10 @@ pub enum ProofError {
     InvalidExpiry = 7,
     ExpiryBeyondCap = 8,
     ProofMismatch = 9,
+    /// Public input count does not match the active verification key.
+    InvalidPublicInputCount = 10,
+    /// No verification key has been registered in this verifier instance.
+    VerifierNotInitialized = 11,
 }
 
 #[contracttype]
@@ -105,6 +154,19 @@ impl ProofVerifier {
             .expect("Verifier not initialized")
     }
 
+    /// Validate structural proof inputs without running verification.
+    ///
+    /// Returns a stable, privacy-safe error for an uninitialized verifier or
+    /// a public input count that does not match the active verification key.
+    /// No proof material, public input values, employee identities, or salary
+    /// amounts are included in the error.
+    pub fn validate_proof_inputs(
+        env: Env,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<(), ProofError> {
+        Self::validated_vk(&env, &public_inputs).map(|_| ())
+    }
+
     pub fn verify(env: Env, proof: Groth16Proof, public_inputs: Vec<BytesN<32>>) -> bool {
         let proof_bytes = Self::pack_groth16_proof(&env, &proof);
         Self::verify_payment_proof(env, proof_bytes, public_inputs)
@@ -115,15 +177,10 @@ impl ProofVerifier {
         proof: BytesN<256>,
         public_inputs: Vec<BytesN<32>>,
     ) -> bool {
-        let vk: VerificationKey = env
-            .storage()
-            .persistent()
-            .get(&DataKey::VerificationKey)
-            .expect("Verifier not initialized");
-
-        if public_inputs.len() + 1 != vk.ic.len() {
-            return false;
-        }
+        let vk = match Self::validated_vk(&env, &public_inputs) {
+            Ok(vk) => vk,
+            Err(_) => return false,
+        };
 
         Self::simulated_verify_groth16(&env, &vk, proof, public_inputs)
     }
@@ -276,6 +333,27 @@ impl ProofVerifier {
     /// A reference is current while unrevoked and not past its expiry
     /// ledger. Following `audit_module`'s convention, expiry starts at
     /// `sequence() > expires_at_ledger`.
+    /// Load the verification key only after structural validation succeeds.
+    ///
+    /// Keeping this private lets the public validator and the `verify*` entry
+    /// points share one persistent storage read per verification.
+    fn validated_vk(
+        env: &Env,
+        public_inputs: &Vec<BytesN<32>>,
+    ) -> Result<VerificationKey, ProofError> {
+        let vk: VerificationKey = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerificationKey)
+            .ok_or(ProofError::VerifierNotInitialized)?;
+
+        if public_inputs.len().saturating_add(1) != vk.ic.len() {
+            return Err(ProofError::InvalidPublicInputCount);
+        }
+
+        Ok(vk)
+    }
+
     fn reference_is_current(env: &Env, reference: &ProofReference) -> Result<(), ProofError> {
         if reference.revoked {
             return Err(ProofError::ReferenceRevoked);

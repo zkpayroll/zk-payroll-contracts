@@ -83,7 +83,8 @@ fn register_company_and_employee(env: &Env, ctx: &Ctx, seed: u8) -> (u64, Addres
         .add_employee(&company_id, &employee, &emp_commitment);
 
     let tax = Address::generate(env);
-    ctx.executor.set_withholding_config(&company_id, &0u32, &0u32, &tax, &tax, &0i128, &0i128);
+    ctx.executor
+        .set_withholding_config(&company_id, &0u32, &0u32, &tax, &tax, &0i128, &0i128);
 
     (company_id, treasury, employee)
 }
@@ -133,9 +134,9 @@ fn test_execute_payment_rejects_when_decimals_not_configured() {
     ctx.token.mint(&treasury, &10_000);
 
     let (a, b, c, n) = proof(&env, 1);
-    let result = ctx
-        .executor
-        .try_execute_payment(&company_id, &employee, &1_000, &a, &b, &c, &n, &1);
+    let result =
+        ctx.executor
+            .try_execute_payment(&company_id, &employee, &1_000, &a, &b, &c, &n, &1);
 
     assert_eq!(
         result.unwrap_err().unwrap(),
@@ -156,9 +157,9 @@ fn test_execute_payment_rejects_when_configured_decimals_do_not_match_token() {
     ctx.executor.set_asset_decimals(&ctx.token_id, &6u32);
 
     let (a, b, c, n) = proof(&env, 2);
-    let result = ctx
-        .executor
-        .try_execute_payment(&company_id, &employee, &1_000, &a, &b, &c, &n, &1);
+    let result =
+        ctx.executor
+            .try_execute_payment(&company_id, &employee, &1_000, &a, &b, &c, &n, &1);
 
     assert_eq!(
         result.unwrap_err().unwrap(),

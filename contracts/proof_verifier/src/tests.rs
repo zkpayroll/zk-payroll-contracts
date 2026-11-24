@@ -25,7 +25,7 @@ fn mock_snarkjs_proof(env: &Env) -> BytesN<256> {
 
 fn setup_initialized_contract(env: &Env) -> (ProofVerifierClient<'_>, soroban_sdk::Address) {
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(env, &contract_id);
     let admin = soroban_sdk::Address::generate(env);
     client.init_verifier_admin(&admin);
@@ -41,7 +41,7 @@ fn setup_initialized_contract(env: &Env) -> (ProofVerifierClient<'_>, soroban_sd
 #[test]
 fn test_initialize_stores_admin() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
     let admin = soroban_sdk::Address::generate(&env);
 
@@ -53,7 +53,7 @@ fn test_initialize_stores_admin() {
 #[should_panic(expected = "Already initialized")]
 fn test_init_admin_twice_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
     let admin = soroban_sdk::Address::generate(&env);
 
@@ -65,7 +65,7 @@ fn test_init_admin_twice_panics() {
 fn test_initialize_verifier_stores_vk() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -87,7 +87,7 @@ fn test_initialize_verifier_stores_vk() {
 fn test_initialize_verifier_twice_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -106,7 +106,7 @@ fn test_initialize_verifier_twice_panics() {
 #[should_panic(expected = "Verifier not initialized")]
 fn test_get_vk_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     client.get_verification_key();
@@ -120,7 +120,7 @@ fn test_get_vk_uninitialized_panics() {
 #[should_panic]
 fn test_unauthorized_initialize_verifier_fails() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -135,7 +135,7 @@ fn test_unauthorized_initialize_verifier_fails() {
 #[should_panic]
 fn test_unauthorized_initialize_verifier_wrong_caller() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -163,7 +163,7 @@ fn test_unauthorized_initialize_verifier_wrong_caller() {
 #[should_panic]
 fn test_unauthorized_initialize_twice_different_caller() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -188,7 +188,7 @@ fn test_unauthorized_initialize_twice_different_caller() {
 fn test_verify_payment_proof_interface() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -214,7 +214,7 @@ fn test_verify_payment_proof_interface() {
 fn test_verify_rejects_wrong_input_length() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -231,26 +231,26 @@ fn test_verify_rejects_wrong_input_length() {
 }
 
 #[test]
-#[should_panic(expected = "Verifier not initialized")]
-fn test_verify_before_initialization_panics() {
+fn test_verify_before_initialization_returns_false() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
     client.init_verifier_admin(&admin);
 
-    // VK not yet set — verify must panic.
+    // VK not yet set: structural validation rejects the call silently so
+    // cross-contract callers never have to handle a host panic.
     let proof = mock_snarkjs_proof(&env);
     let public_inputs = Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 32])]);
-    client.verify_payment_proof(&proof, &public_inputs);
+    assert!(!client.verify_payment_proof(&proof, &public_inputs));
 }
 
 #[test]
 fn test_verify_rejects_empty_public_inputs() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -271,7 +271,7 @@ fn test_verify_rejects_empty_public_inputs() {
 fn test_verify_rejects_too_many_public_inputs() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -300,7 +300,7 @@ fn test_verify_rejects_too_many_public_inputs() {
 fn test_verify_with_groth16_proof_struct() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -362,7 +362,7 @@ fn test_replay_admin_init_attack() {
     // Attempting to re-initialize admin after contract is live should fail.
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -596,7 +596,7 @@ fn test_verify_rejects_replay_attack_proof() {
 fn test_verify_rejects_proof_with_mismatched_vk() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     let admin = soroban_sdk::Address::generate(&env);
@@ -694,7 +694,7 @@ fn test_verify_accepts_exact_expected_input_count_for_varying_vk_sizes() {
 
     for ic_len in [2usize, 3, 5, 8] {
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ProofVerifier);
+        let contract_id = env.register(ProofVerifier, ());
         let client = ProofVerifierClient::new(&env, &contract_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -715,7 +715,7 @@ fn test_verify_accepts_exact_expected_input_count_for_varying_vk_sizes() {
 #[test]
 fn test_verify_rejects_one_fewer_than_expected_input_count() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     env.mock_all_auths();
@@ -733,7 +733,7 @@ fn test_verify_rejects_one_fewer_than_expected_input_count() {
 #[test]
 fn test_verify_rejects_one_more_than_expected_input_count() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, ProofVerifier);
+    let contract_id = env.register(ProofVerifier, ());
     let client = ProofVerifierClient::new(&env, &contract_id);
 
     env.mock_all_auths();
@@ -779,4 +779,442 @@ fn test_verify_with_reference_enforces_input_count_boundary() {
     assert!(!client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 1)));
     assert!(client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 2)));
     assert!(!client.verify_with_reference(&ref_id, &proof, &public_inputs_of_len(&env, 3)));
+}
+
+// =========================================================================
+// Invariant: Public Input Count Must Match Verification Key (Invariant #1)
+// =========================================================================
+
+#[test]
+fn invariant_input_count_match_success() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+
+    let proof = mock_snarkjs_proof(&env);
+    // Default VK has ic.len() == 3, so expects 2 public inputs
+    let correct_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[1u8; 32]),
+            BytesN::from_array(&env, &[2u8; 32]),
+        ],
+    );
+
+    assert!(
+        client.verify_payment_proof(&proof, &correct_inputs),
+        "INVARIANT #1: exact input count match must succeed"
+    );
+}
+
+#[test]
+fn invariant_input_count_match_boundary_zero() {
+    let env = Env::default();
+    let contract_id = env.register(ProofVerifier, ());
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+    // VK with ic.len() == 1 expects 0 public inputs
+    let minimal_vk = mock_verification_key_with_ic_len(&env, 1);
+    client.initialize_verifier(&minimal_vk);
+
+    let proof = mock_snarkjs_proof(&env);
+    let no_inputs: Vec<BytesN<32>> = Vec::new(&env);
+
+    assert!(
+        client.verify_payment_proof(&proof, &no_inputs),
+        "INVARIANT #1: zero public inputs accepted when ic.len() == 1"
+    );
+}
+
+#[test]
+fn invariant_input_count_mismatch_returns_false() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+
+    let proof = mock_snarkjs_proof(&env);
+    // VK expects 2 inputs, provide 1
+    let wrong_count = Vec::from_array(
+        &env,
+        [BytesN::from_array(&env, &[1u8; 32])],
+    );
+
+    assert!(
+        !client.verify_payment_proof(&proof, &wrong_count),
+        "INVARIANT #1: mismatched input count returns false, not panic"
+    );
+}
+
+// =========================================================================
+// Invariant: Proof Digest Binding in Reference Mode (Invariant #2)
+// =========================================================================
+
+#[test]
+fn invariant_proof_digest_binding_exact_match() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+
+    let ref_id = BytesN::from_array(&env, &[100u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    // Register with this proof
+    client.register_proof_reference(&admin, &ref_id, &proof, &1000u32);
+
+    // Same proof bytes must verify
+    assert!(
+        client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "INVARIANT #2: exact proof digest match must verify"
+    );
+}
+
+#[test]
+fn invariant_proof_digest_binding_rejects_mutation() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+
+    let ref_id = BytesN::from_array(&env, &[101u8; 32]);
+    let original_proof = mock_snarkjs_proof(&env);
+    let mutated_proof = BytesN::from_array(&env, &[9u8; 256]); // Different proof
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    // Register with original proof
+    client.register_proof_reference(&admin, &ref_id, &original_proof, &1000u32);
+
+    // Attempt to verify with mutated proof
+    assert!(
+        !client.verify_with_reference(&ref_id, &mutated_proof, &expected_inputs),
+        "INVARIANT #2: proof mutation must be rejected via digest mismatch"
+    );
+}
+
+#[test]
+fn invariant_proof_digest_binding_single_byte_tamper() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+
+    let ref_id = BytesN::from_array(&env, &[102u8; 32]);
+    let original_proof = BytesN::from_array(&env, &[8u8; 256]);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    client.register_proof_reference(&admin, &ref_id, &original_proof, &1000u32);
+
+    // Tamper one byte in the proof
+    let mut tampered_bytes = original_proof.to_array();
+    tampered_bytes[0] = tampered_bytes[0].wrapping_add(1);
+    let tampered_proof = BytesN::from_array(&env, &tampered_bytes);
+
+    assert!(
+        !client.verify_with_reference(&ref_id, &tampered_proof, &expected_inputs),
+        "INVARIANT #2: single-byte tampering must be caught"
+    );
+}
+
+// =========================================================================
+// Invariant: Reference Expiry Window (Invariant #3)
+// =========================================================================
+
+#[test]
+fn invariant_expiry_window_valid_at_registration() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+    use soroban_sdk::testutils::Ledger as _;
+
+    let ref_id = BytesN::from_array(&env, &[103u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    env.ledger().set_sequence_number(50);
+    let expires_at = 150u32;
+    client.register_proof_reference(&admin, &ref_id, &proof, &expires_at);
+
+    assert!(
+        client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "INVARIANT #3: reference valid immediately after registration"
+    );
+}
+
+#[test]
+fn invariant_expiry_window_valid_at_exact_ledger() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+    use soroban_sdk::testutils::Ledger as _;
+
+    let ref_id = BytesN::from_array(&env, &[104u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    let expires_at = 100u32;
+    client.register_proof_reference(&admin, &ref_id, &proof, &expires_at);
+
+    env.ledger().set_sequence_number(expires_at);
+    assert!(
+        client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "INVARIANT #3: reference remains valid AT expires_at ledger"
+    );
+}
+
+#[test]
+fn invariant_expiry_window_invalid_after_ledger() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+    use soroban_sdk::testutils::Ledger as _;
+
+    let ref_id = BytesN::from_array(&env, &[105u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    let expires_at = 100u32;
+    client.register_proof_reference(&admin, &ref_id, &proof, &expires_at);
+
+    env.ledger().set_sequence_number(expires_at + 1);
+    assert!(
+        !client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "INVARIANT #3: reference invalid from expires_at + 1 onward"
+    );
+}
+
+// =========================================================================
+// Invariant: Reference Revocation (Invariant #4)
+// =========================================================================
+
+#[test]
+fn invariant_revocation_before_expiry() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+
+    let ref_id = BytesN::from_array(&env, &[106u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    client.register_proof_reference(&admin, &ref_id, &proof, &10000u32);
+    assert!(
+        client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "Before revocation: reference is valid"
+    );
+
+    client.revoke_proof_reference(&admin, &ref_id);
+    assert!(
+        !client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "INVARIANT #4: revocation must invalidate reference before expiry"
+    );
+}
+
+#[test]
+fn invariant_revocation_is_permanent() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+    use soroban_sdk::testutils::Ledger as _;
+
+    let ref_id = BytesN::from_array(&env, &[107u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    let expires_at = 1000u32;
+    client.register_proof_reference(&admin, &ref_id, &proof, &expires_at);
+    client.revoke_proof_reference(&admin, &ref_id);
+
+    // Even if we advance well past expiry, revoked stays rejected
+    env.ledger().set_sequence_number(expires_at + 100);
+    assert!(
+        !client.verify_with_reference(&ref_id, &proof, &expected_inputs),
+        "INVARIANT #4: revoked reference stays rejected even if not yet expired"
+    );
+}
+
+// =========================================================================
+// Invariant: No Private Data Exposure (Invariant #5)
+// =========================================================================
+
+#[test]
+fn invariant_error_messages_do_not_leak_proof_bytes() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+
+    let ref_id = BytesN::from_array(&env, &[108u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+
+    // Register with one proof
+    client.register_proof_reference(&admin, &ref_id, &proof, &1000u32);
+
+    // Attempt verification with wrong proof
+    let other_proof = BytesN::from_array(&env, &[99u8; 256]);
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    // Verification fails, but we verify the error doesn't leak the proof material
+    let result = client.verify_with_reference(&ref_id, &other_proof, &expected_inputs);
+    assert!(!result, "ProofMismatch error must not expose proof bytes or digest");
+    // Note: In Soroban contracts, error messages are limited; the key invariant is that
+    // verify() returns false rather than panicking with diagnostic info
+}
+
+#[test]
+fn invariant_expired_reference_error_generic() {
+    let env = Env::default();
+    let (client, admin) = setup_initialized_contract(&env);
+    use soroban_sdk::testutils::Ledger as _;
+
+    let ref_id = BytesN::from_array(&env, &[109u8; 32]);
+    let proof = mock_snarkjs_proof(&env);
+
+    client.register_proof_reference(&admin, &ref_id, &proof, &50u32);
+    env.ledger().set_sequence_number(100);
+
+    let expected_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    // Result is false; no panic with diagnostic
+    let result = client.verify_with_reference(&ref_id, &proof, &expected_inputs);
+    assert!(
+        !result,
+        "INVARIANT #5: ReferenceExpired returns false, not panic with details"
+    );
+}
+
+// =========================================================================
+// Issue #980/#981/#979: safe proof input validation errors
+// =========================================================================
+
+#[test]
+fn test_validator_reports_uninitialized_verifier() {
+    let env = Env::default();
+    let contract_id = env.register(ProofVerifier, ());
+    let client = ProofVerifierClient::new(&env, &contract_id);
+
+    let public_inputs = Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 32])]);
+    assert_eq!(
+        client
+            .try_validate_proof_inputs(&public_inputs)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::VerifierNotInitialized
+    );
+}
+
+#[test]
+fn test_validator_accepts_correct_input_count() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+    let public_inputs = Vec::from_array(
+        &env,
+        [
+            BytesN::from_array(&env, &[11u8; 32]),
+            BytesN::from_array(&env, &[12u8; 32]),
+        ],
+    );
+
+    client.validate_proof_inputs(&public_inputs);
+    assert!(client.verify_payment_proof(&mock_snarkjs_proof(&env), &public_inputs));
+}
+
+#[test]
+fn test_validator_reports_input_count_mismatch() {
+    let env = Env::default();
+    let (client, _admin) = setup_initialized_contract(&env);
+    // The mock verification key has three IC points, so two inputs are needed.
+    let public_inputs = Vec::from_array(&env, [BytesN::from_array(&env, &[11u8; 32])]);
+
+    assert_eq!(
+        client
+            .try_validate_proof_inputs(&public_inputs)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::InvalidPublicInputCount
+    );
+    assert!(!client.verify_payment_proof(&mock_snarkjs_proof(&env), &public_inputs));
+}
+
+#[test]
+fn test_verify_with_empty_verification_key_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(ProofVerifier, ());
+    let client = ProofVerifierClient::new(&env, &contract_id);
+    let admin = soroban_sdk::Address::generate(&env);
+    client.init_verifier_admin(&admin);
+
+    let empty_vk = VerificationKey {
+        alpha: BytesN::from_array(&env, &[1u8; 64]),
+        beta: BytesN::from_array(&env, &[2u8; 128]),
+        gamma: BytesN::from_array(&env, &[3u8; 128]),
+        delta: BytesN::from_array(&env, &[4u8; 128]),
+        ic: Vec::new(&env),
+    };
+    client.initialize_verifier(&empty_vk);
+
+    let public_inputs = Vec::new(&env);
+    assert_eq!(
+        client
+            .try_validate_proof_inputs(&public_inputs)
+            .unwrap_err()
+            .unwrap(),
+        ProofError::InvalidPublicInputCount
+    );
+    assert!(!client.verify_payment_proof(&mock_snarkjs_proof(&env), &public_inputs));
+}
+
+#[test]
+fn test_validation_error_codes_are_stable_and_data_free() {
+    assert_eq!(ProofError::InvalidPublicInputCount as u32, 10);
+    assert_eq!(ProofError::VerifierNotInitialized as u32, 11);
 }

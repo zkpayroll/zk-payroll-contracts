@@ -113,7 +113,7 @@ pub fn validate_run_amendment(
         );
     }
 
-    if reason.len() == 0 {
+    if reason.is_empty() {
         panic!(
             "Amendment reason must not be empty (AmendmentError::{})",
             AmendmentError::InvalidAmendmentReason.code()
@@ -162,7 +162,8 @@ pub fn validate_run_amendment(
     history.push_back(record);
     e.storage().persistent().set(&finalized_key, &history);
 
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (symbol_short!("payroll"), Symbol::new(e, "run_amended")),
         (run_id, admin, field_ref, now),
     );

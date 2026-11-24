@@ -10,11 +10,11 @@ use soroban_sdk::{Address, BytesN, Env, Vec};
 fn setup(env: &Env) -> (PayrollClient<'_>, PayrollRegistryClient<'_>, Address, u64) {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
-    let registry_address = env.register_contract(None, PayrollRegistry);
+    let registry_address = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_address);
     let company_id = registry.register_company(&admin, &treasury);
 
-    let payroll_address = env.register_contract(None, Payroll);
+    let payroll_address = env.register(Payroll, ());
     let payroll = PayrollClient::new(&env, &payroll_address);
     payroll.initialize(
         &admin,
@@ -120,13 +120,13 @@ fn suspended_compensation_group_member_is_rejected_until_reactivated() {
 fn payroll_runs_proceed_without_compensation_group_when_unconfigured() {
     let env = Env::default();
     env.mock_all_auths();
-    let registry_address = env.register_contract(None, PayrollRegistry);
+    let registry_address = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_address);
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let company_id = registry.register_company(&admin, &treasury);
 
-    let payroll_address = env.register_contract(None, Payroll);
+    let payroll_address = env.register(Payroll, ());
     let payroll = PayrollClient::new(&env, &payroll_address);
     payroll.initialize(
         &admin,

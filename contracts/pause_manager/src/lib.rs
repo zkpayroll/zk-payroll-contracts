@@ -2,7 +2,76 @@
 #![allow(deprecated)]
 
 #[allow(unused_imports)]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec,
+};
+
+/// Stable, privacy-safe errors for administrative pause actions (issue #996).
+///
+/// The variants carry no employee, salary, or commitment data. `message()`
+/// returns an actionable explanation that SDK clients can display directly.
+/// Codes are contract-local and must remain stable for SDK classification.
+#[contracterror]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PauseError {
+    /// The pause manager has no operator yet.
+    NotInitialized = 1,
+    /// An operator is already configured; reinitialization is not supported.
+    AlreadyInitialized = 2,
+    /// The caller is not the operator authorized for this action.
+    UnauthorizedOperator = 3,
+    /// A pending rotation exists; it must be accepted or cancelled first.
+    PendingRotationExists = 4,
+    /// There is no pending rotation to accept or cancel.
+    NoPendingRotation = 5,
+    /// The proposed operator is the current operator, which is a no-op.
+    InvalidRotationTarget = 6,
+}
+
+impl PauseError {
+    /// Returns a fixed, actionable message that exposes no payroll data.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotInitialized => {
+                "Pause manager is not initialized; initialize it before changing pause state."
+            }
+            Self::AlreadyInitialized => {
+                "Pause manager is already initialized; use the existing operator instead."
+            }
+            Self::UnauthorizedOperator => {
+                "Only the current pause operator may perform this action; ask the operator to sign."
+            }
+            Self::PendingRotationExists => {
+                "A pending operator rotation already exists; accept or cancel it before proposing another."
+            }
+            Self::NoPendingRotation => {
+                "There is no pending operator rotation to accept or cancel."
+            }
+            Self::InvalidRotationTarget => {
+                "The new operator must differ from the current operator."
+            }
+        }
+    }
+}
+
+/// A pause action to preflight before submitting its state-changing call.
+///
+/// Preflight is read-only and permissionless: it never mutates storage and does
+/// not require authorization, so dashboards can surface `PauseError` to users
+/// before they sign a transaction.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PauseAction {
+    Initialize,
+    Pause,
+    Unpause,
+    PauseCategory(PauseCategory),
+    UnpauseCategory(PauseCategory),
+    ProposeOperatorRotation(Address, Address),
+    AcceptOperatorRotation(Address),
+    CancelOperatorRotation(Address),
+}
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +284,8 @@ impl PauseManager {
             .persistent()
             .set(&DataKey::PendingOperator, &proposal);
 
-        e.events().publish(
+        payroll_events::publish(
+            &e,
             (
                 Symbol::new(&e, "PauseManager"),
                 Symbol::new(&e, "op_proposed"),
@@ -241,7 +311,8 @@ impl PauseManager {
             .set(&DataKey::Operator, &new_operator);
         e.storage().persistent().remove(&DataKey::PendingOperator);
 
-        e.events().publish(
+        payroll_events::publish(
+            &e,
             (
                 Symbol::new(&e, "PauseManager"),
                 Symbol::new(&e, "op_rotated"),
@@ -266,7 +337,8 @@ impl PauseManager {
         }
         e.storage().persistent().remove(&DataKey::PendingOperator);
 
-        e.events().publish(
+        payroll_events::publish(
+            &e,
             (
                 Symbol::new(&e, "PauseManager"),
                 Symbol::new(&e, "op_cancelled"),
@@ -284,6 +356,59 @@ impl PauseManager {
             .persistent()
             .get(&DataKey::Operator)
             .expect("Not initialized")
+    }
+
+    /// Preflight an administrative pause action without changing state (issue #996).
+    ///
+    /// Returns a stable `PauseError` when the action would fail for a
+    /// state-related reason, allowing clients to present an actionable,
+    /// privacy-safe message before asking the operator to sign. Host-level
+    /// signature checks still apply on the real call and are not duplicated
+    /// here. This query is permissionless and never mutates storage.
+    pub fn check_pause_action(e: Env, action: PauseAction) -> Result<(), PauseError> {
+        let operator: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Operator)
+            .ok_or(PauseError::NotInitialized)?;
+        let pending: Option<PendingOperatorRotation> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingOperator);
+
+        match action {
+            PauseAction::Initialize => Err(PauseError::AlreadyInitialized),
+            PauseAction::Pause
+            | PauseAction::Unpause
+            | PauseAction::PauseCategory(_)
+            | PauseAction::UnpauseCategory(_) => Ok(()),
+            PauseAction::ProposeOperatorRotation(current, new) => {
+                if current != operator {
+                    return Err(PauseError::UnauthorizedOperator);
+                }
+                if pending.is_some() {
+                    return Err(PauseError::PendingRotationExists);
+                }
+                if new == operator {
+                    return Err(PauseError::InvalidRotationTarget);
+                }
+                Ok(())
+            }
+            PauseAction::AcceptOperatorRotation(new) => {
+                let proposal = pending.ok_or(PauseError::NoPendingRotation)?;
+                if new != proposal.new_operator {
+                    return Err(PauseError::UnauthorizedOperator);
+                }
+                Ok(())
+            }
+            PauseAction::CancelOperatorRotation(current) => {
+                if current != operator {
+                    return Err(PauseError::UnauthorizedOperator);
+                }
+                pending.ok_or(PauseError::NoPendingRotation)?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -437,7 +562,7 @@ mod tests {
     fn setup() -> (Env, PauseManagerClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -448,7 +573,7 @@ mod tests {
     fn test_initialize_sets_operator_and_unpaused() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -461,7 +586,7 @@ mod tests {
     fn test_initialize_cannot_be_called_twice() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -499,7 +624,7 @@ mod tests {
     fn test_propose_operator_rotation_creates_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -516,7 +641,7 @@ mod tests {
     fn test_accept_operator_rotation_completes_transfer() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -534,7 +659,7 @@ mod tests {
     fn test_cancel_operator_rotation_removes_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -553,7 +678,7 @@ mod tests {
     fn test_duplicate_operator_rotation_proposal_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -569,7 +694,7 @@ mod tests {
     fn test_cancel_operator_rotation_rejects_non_operator() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -585,7 +710,7 @@ mod tests {
     fn test_cancel_operator_rotation_without_proposal_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -598,7 +723,7 @@ mod tests {
     fn test_accept_operator_rotation_without_proposal_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -621,7 +746,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_old_operator_cannot_pause_after_rotation_completed() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -679,7 +804,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_old_operator_cannot_unpause_after_rotation_completed() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -711,7 +836,7 @@ mod tests {
     fn test_old_operator_cannot_propose_new_rotation_after_being_replaced() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -731,7 +856,7 @@ mod tests {
     fn test_old_operator_cannot_cancel_after_rotation_completed() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let old_operator = Address::generate(&env);
@@ -751,7 +876,7 @@ mod tests {
         // rotation in turn.
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let op_1 = Address::generate(&env);
@@ -777,7 +902,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_pause_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -811,7 +936,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_unpause_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -856,7 +981,7 @@ mod tests {
     #[test]
     fn test_is_paused_returns_false_when_not_initialized() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         assert!(!client.is_paused());
     }
@@ -866,7 +991,7 @@ mod tests {
     fn test_pause_panics_when_not_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         client.pause();
     }
@@ -877,7 +1002,7 @@ mod tests {
     fn test_initialize_sets_all_categories_unpaused() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         let operator = Address::generate(&env);
         client.initialize(&operator);
@@ -986,7 +1111,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_pause_category_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -1019,7 +1144,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_unauthorized_unpause_category_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let operator = Address::generate(&env);
@@ -1064,7 +1189,7 @@ mod tests {
     fn test_pause_category_panics_when_not_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
         client.pause_category(&PauseCategory::Payroll);
     }
@@ -1072,7 +1197,7 @@ mod tests {
     #[test]
     fn test_get_pause_status_without_initialization() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PauseManager);
+        let contract_id = env.register(PauseManager, ());
         let client = PauseManagerClient::new(&env, &contract_id);
 
         let status = client.get_pause_status();

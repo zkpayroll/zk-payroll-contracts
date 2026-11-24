@@ -155,7 +155,8 @@ pub fn record_consent(e: &Env, employer: Address, employee: Address, commitment_
 
     e.storage().persistent().set(&key, &record);
 
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (
             symbol_short!("registry"),
             Symbol::new(e, "consent_recorded"),
@@ -199,7 +200,8 @@ pub fn revoke_consent(e: &Env, employer: Address, employee: Address) {
 
     e.storage().persistent().set(&key, &record);
 
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (symbol_short!("registry"), Symbol::new(e, "consent_revoked")),
         (employer, employee, now),
     );

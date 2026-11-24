@@ -52,6 +52,7 @@ These are non-retryable with the same proof data.
 | 104 | InvalidPublicInputs | Proof public inputs malformed | No | Rebuild proof schema |
 | 105 | VerifyingKeyMismatch | Verifying key does not match proof | No | Verify proof schema version |
 | 106 | InvalidNullifier | Nullifier is malformed or invalid | No | Regenerate with valid nullifier |
+| 107 | UnsupportedProofFormat | Proof is well formed but its format or schema version is not supported | No | Regenerate the proof in a supported format or schema version |
 
 **SDK Guidance**: Proof generation is deterministic given source payroll data. If a
 proof fails verification, regenerate from source rather than retrying the same proof.
@@ -79,6 +80,14 @@ Audit errors relate to auditor permissions, view keys, and audit scope constrain
 **SDK Guidance**: Most audit errors are non-retryable and indicate insufficient
 permissions or stale state. `ViewKeyExpired` (202) is retryable after requesting
 renewal from the admin.
+
+The `audit_module` contract also defines contract-local codes `GrantNotExpired
+(22)` and `GrantNotYetPrunable (23)` for its read-only expiry diagnostic and
+prune gating. These are classified by the `audit_module` contract name, not by
+the shared global ranges above. `GrantNotYetPrunable` is the only retryable one
+of the pair, and only after the retention window has elapsed. See [Auditor Grant
+Expiry Invariants](./audit-grant-expiry-invariants.md) for the exact boundary
+rules and privacy guarantees.
 
 ### Payment Execution (300-399)
 
@@ -118,6 +127,12 @@ Treasury errors relate to fund availability and asset management.
 | 404 | TreasuryLocked | Treasury locked or unavailable | Yes | Wait and retry |
 | 405 | InsufficientUnreservedBalance | Reserved funds too high | Yes | Wait or release reservations |
 | 406 | InvalidAssetConfiguration | Asset config invalid | No | Update configuration |
+
+The payroll contract also exposes contract-local, payload-free reservation
+errors in the 8600–8699 range. These codes are stable and map to fixed messages
+that never carry salary, employee, commitment or proof data. See
+[Treasury Reservation Invariants](./treasury-reservation-invariants.md#6-error-code-registry)
+for the full registry and recovery actions.
 
 **SDK Guidance**: `InsufficientTreasuryBalance` (400) is retryable after funding.
 Most other treasury errors require administrative action or configuration change.
@@ -220,6 +235,29 @@ For SDK clients implementing contract error handling:
 
 5. **Test error path coverage**: Verify that your SDK correctly handles each error
    code and category via integration tests.
+
+### Contract-local pause-manager errors (1-6)
+
+The `pause_manager` contract exposes a separate, contract-local error enum
+`PauseError` for its read-only preflight entrypoint
+`check_pause_action`. These codes are independent of the global ranges above;
+clients must classify them by the `pause_manager` contract name as well as the
+numeric code. All messages returned by `PauseError::message()` are fixed,
+actionable, and contain no employee, salary, or commitment data.
+
+| Code | Name | Cause | Retryable | SDK Action |
+|------|------|-------|-----------|-----------|
+| 1 | NotInitialized | No operator configured | No | Initialize the manager before changing pause state |
+| 2 | AlreadyInitialized | Operator already configured | No | Use the existing operator |
+| 3 | UnauthorizedOperator | Signer is not the authorized operator | No | Ask the current operator to sign |
+| 4 | PendingRotationExists | A rotation proposal is already pending | No | Accept or cancel the pending rotation first |
+| 5 | NoPendingRotation | No proposal to accept or cancel | No | Propose a rotation first |
+| 6 | InvalidRotationTarget | Proposed operator equals the current operator | No | Choose a different operator address |
+
+The preflight query is permissionless, read-only, and never mutates storage.
+The state-changing entrypoints keep their existing panic behavior for backward
+compatibility; `check_pause_action` is the supported way to obtain a typed,
+privacy-safe error before submitting a pause transaction.
 
 ## Backward Compatibility
 

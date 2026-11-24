@@ -98,7 +98,7 @@ pub type SchemaMap = BTreeMap<String, EventSchema>;
 /// under (`payroll_events` helpers require an active contract frame).
 pub fn new_env() -> (Env, Address) {
     let env = Env::default();
-    let contract_id = env.register_contract(None, EventProbe);
+    let contract_id = env.register(EventProbe, ());
     (env, contract_id)
 }
 

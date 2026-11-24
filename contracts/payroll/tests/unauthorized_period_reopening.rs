@@ -38,19 +38,19 @@ fn mock_vk(env: &Env) -> VerificationKey {
 fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address, Address, Address) {
     env.mock_all_auths();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     verifier_client.init_verifier_admin(&Address::generate(env));
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     commitment_client.init_commitment_admin(&Address::generate(env));
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token_client = TokenClient::new(env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     let treasury = Address::generate(env);
@@ -204,7 +204,7 @@ fn test_reopen_blocked_while_contract_is_paused() {
     assert!(payroll.is_period_frozen(&period));
 
     // Initialize and pause the contract
-    let pm_id = env.register_contract(None, PauseManager);
+    let pm_id = env.register(PauseManager, ());
     let pm = PauseManagerClient::new(&env, &pm_id);
     let pm_admin = Address::generate(&env);
     pm.initialize(&pm_admin);

@@ -13,7 +13,7 @@
 //! payroll cannot be executed early, late, or after expiry.
 
 use pause_manager::PauseManagerClient;
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -22,6 +22,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 /// Errors returned by the settlement window contract.
 ///
 /// Error codes are stable; SDK clients should classify on the numeric value.
+/// Error messages/variants are operational and must not expose employee or salary data.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -49,6 +50,9 @@ pub enum SettlementError {
     PayoutScheduleCollision = 10,
     /// The token interface is not supported for payout settlement (#824).
     UnsupportedTokenInterface = 11,
+    /// Settlement receipt was already consumed; replay is rejected.
+    /// Safe/idempotent: callers may treat this as already-settled.
+    SettlementReceiptReplay = 12,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +124,8 @@ pub enum DataKey {
     PauseManager,
     /// Token interface support override keyed by token Address (#824).
     TokenInterfaceOverride(Address),
+    /// Consumed settlement receipt marker keyed by opaque receipt id.
+    SettlementReceipt(BytesN<32>),
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +515,37 @@ impl SettlementWindowContract {
     }
 
     // -----------------------------------------------------------------------
+    // Settlement receipt replay guard (#1001)
+    // -----------------------------------------------------------------------
+
+    /// Consume an opaque settlement receipt exactly once.
+    ///
+    /// Safe error behavior: replay returns `SettlementReceiptReplay` and
+    /// performs no state mutation. Receipt IDs are opaque; no employee/salary
+    /// data is stored or emitted.
+    pub fn consume_settlement_receipt(
+        env: Env,
+        receipt_id: BytesN<32>,
+    ) -> Result<(), SettlementError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        let key = DataKey::SettlementReceipt(receipt_id);
+        if env.storage().persistent().has(&key) {
+            return Err(SettlementError::SettlementReceiptReplay);
+        }
+        env.storage().persistent().set(&key, &true);
+        Ok(())
+    }
+
+    /// Check whether an opaque settlement receipt has already been consumed.
+    pub fn is_settlement_receipt_consumed(env: Env, receipt_id: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::SettlementReceipt(receipt_id))
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -615,6 +652,9 @@ impl SettlementWindowContract {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod execution_start_boundary_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
@@ -623,7 +663,7 @@ mod tests {
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SettlementWindowContract);
+        let contract_id = env.register(SettlementWindowContract, ());
         let admin = Address::generate(&env);
         let client = SettlementWindowContractClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -809,15 +849,13 @@ mod tests {
         let base = env.ledger().timestamp();
         let company_id = 7u64;
 
-        client
-            .create_period(
-                &company_id,
-                &base,
-                &(base + 10),
-                &(base + 100),
-                &(base + 200),
-            )
-            .period_id;
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 100),
+            &(base + 200),
+        );
         // Second call while first is still active
         let result = client.try_create_period(
             &company_id,
@@ -1174,8 +1212,26 @@ mod tests {
         );
 
         // With valid token: succeeds
-        let valid_res = client.check_settlement_payout(&company_id, &1, &token_id);
-        assert_eq!(valid_res, ());
+        client.check_settlement_payout(&company_id, &1, &token_id);
+    }
+
+    #[test]
+    fn test_settlement_receipt_replay_rejected_and_safe() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let receipt = BytesN::from_array(&env, &[7u8; 32]);
+
+        assert!(!client.is_settlement_receipt_consumed(&receipt));
+        assert_eq!(client.try_consume_settlement_receipt(&receipt), Ok(Ok(())));
+        assert!(client.is_settlement_receipt_consumed(&receipt));
+
+        let replay = client.try_consume_settlement_receipt(&receipt);
+        assert_eq!(
+            replay.unwrap_err().unwrap(),
+            SettlementError::SettlementReceiptReplay
+        );
+        // Replay is rejected without mutating consumed state.
+        assert!(client.is_settlement_receipt_consumed(&receipt));
     }
 
     #[test]
@@ -1200,5 +1256,144 @@ mod tests {
         // Admin restores support
         client.set_token_interface_support(&token_id, &true);
         assert_eq!(client.validate_payout_token(&token_id), ());
+    }
+}
+
+/// Regression tests for settlement receipt replay (issue #999).
+///
+/// A settlement receipt is the on-chain record that a payroll period was
+/// finalized. Replaying a finalization call (close, expire, or cancel) must be
+/// rejected as `AlreadyFinalized` without mutating the period's phase,
+/// transition timestamp, or the per-company period sequence. Eligibility
+/// queries used by settlement clients must stay pure so a retried receipt can
+/// safely re-check them.
+#[cfg(test)]
+mod settlement_replay_tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+
+    fn setup_period() -> (Env, Address, u64) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(SettlementWindowContract, ());
+        let client = SettlementWindowContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let company_id = 77u64;
+        let base = env.ledger().timestamp();
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 20),
+            &(base + 30),
+        );
+        (env, id, company_id)
+    }
+
+    #[test]
+    fn test_replayed_close_period_is_rejected_without_mutating_state() {
+        let (env, id, company_id) = setup_period();
+        let client = SettlementWindowContractClient::new(&env, &id);
+        env.ledger().with_mut(|l| l.timestamp += 15);
+
+        client.close_period(&company_id, &1);
+        let finalized = client.get_period(&company_id, &1).unwrap();
+
+        let replay = client.try_close_period(&company_id, &1);
+        assert_eq!(
+            replay.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+
+        let after = client.get_period(&company_id, &1).unwrap();
+        assert_eq!(after.phase, finalized.phase);
+        assert_eq!(after.transitioned_at, finalized.transitioned_at);
+        assert_eq!(client.get_next_period_id(&company_id), 2);
+    }
+
+    #[test]
+    fn test_replayed_expire_period_is_rejected_without_mutating_state() {
+        let (env, id, company_id) = setup_period();
+        let client = SettlementWindowContractClient::new(&env, &id);
+        env.ledger().with_mut(|l| l.timestamp += 25);
+
+        client.expire_period(&company_id, &1);
+        let finalized = client.get_period(&company_id, &1).unwrap();
+
+        let replay = client.try_expire_period(&company_id, &1);
+        assert_eq!(
+            replay.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+
+        let after = client.get_period(&company_id, &1).unwrap();
+        assert_eq!(after.phase, finalized.phase);
+        assert_eq!(after.transitioned_at, finalized.transitioned_at);
+        assert_eq!(client.get_next_period_id(&company_id), 2);
+    }
+
+    #[test]
+    fn test_replayed_cancel_period_is_rejected_without_mutating_state() {
+        let (env, id, company_id) = setup_period();
+        let client = SettlementWindowContractClient::new(&env, &id);
+
+        client.cancel_period(&company_id, &1);
+        let finalized = client.get_period(&company_id, &1).unwrap();
+
+        let replay = client.try_cancel_period(&company_id, &1);
+        assert_eq!(
+            replay.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+
+        let after = client.get_period(&company_id, &1).unwrap();
+        assert_eq!(after.phase, finalized.phase);
+        assert_eq!(after.transitioned_at, finalized.transitioned_at);
+        assert_eq!(client.get_next_period_id(&company_id), 2);
+    }
+
+    #[test]
+    fn test_eligibility_queries_are_pure_across_repeated_receipt_checks() {
+        let (env, id, company_id) = setup_period();
+        let client = SettlementWindowContractClient::new(&env, &id);
+        env.ledger().with_mut(|l| l.timestamp += 15);
+
+        let before = client.get_period(&company_id, &1).unwrap();
+        for _ in 0..4 {
+            assert!(client.try_check_execution_allowed(&company_id, &1).is_ok());
+        }
+        let after = client.get_period(&company_id, &1).unwrap();
+
+        assert_eq!(after.phase, before.phase);
+        assert_eq!(after.transitioned_at, before.transitioned_at);
+        assert_eq!(client.get_next_period_id(&company_id), 2);
+    }
+
+    #[test]
+    fn test_finalized_receipt_cannot_be_replayed_to_free_the_schedule() {
+        let (env, id, company_id) = setup_period();
+        let client = SettlementWindowContractClient::new(&env, &id);
+        env.ledger().with_mut(|l| l.timestamp += 15);
+
+        client.close_period(&company_id, &1);
+        // A replayed close must not reset the period to a mutable phase that
+        // would let a colliding window be registered.
+        assert!(client.try_close_period(&company_id, &1).is_err());
+
+        let (open_at, execute_at, grace_until, close_at) = {
+            let now = env.ledger().timestamp();
+            (now + 40, now + 50, now + 60, now + 70)
+        };
+        // Non-overlapping window is still allowed after finalization.
+        client.create_period(
+            &company_id,
+            &open_at,
+            &execute_at,
+            &grace_until,
+            &close_at,
+        );
+        assert_eq!(client.get_next_period_id(&company_id), 3);
     }
 }

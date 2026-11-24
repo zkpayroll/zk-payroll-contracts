@@ -2,8 +2,6 @@
 //!
 //! Captures and compares payroll draft states for change tracking and audit.
 
-#![no_std]
-
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 /// Error codes for draft comparison.

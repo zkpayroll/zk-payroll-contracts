@@ -161,7 +161,8 @@ pub fn delegate_approver(
 
     e.storage().persistent().set(&key, &record);
 
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (
             symbol_short!("payroll"),
             soroban_sdk::Symbol::new(e, "approver_delegated"),
@@ -185,7 +186,8 @@ pub fn revoke_delegation(e: &Env, delegator: Address) {
 
     e.storage().persistent().remove(&key);
 
-    e.events().publish(
+    payroll_events::publish(
+        e,
         (
             symbol_short!("payroll"),
             soroban_sdk::Symbol::new(e, "delegation_revoked"),

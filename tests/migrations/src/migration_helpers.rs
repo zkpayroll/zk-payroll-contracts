@@ -142,14 +142,14 @@ impl MigrationContext {
 
     /// Register all contracts into the environment.
     pub fn register_contracts(&mut self, env: &Env) {
-        self.registry_id = env.register_contract(None, PayrollRegistry);
-        self.commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        self.verifier_id = env.register_contract(None, ProofVerifier);
-        self.payroll_id = env.register_contract(None, Payroll);
-        self.executor_id = env.register_contract(None, PaymentExecutor);
-        self.audit_id = env.register_contract(None, AuditModule);
-        self.token_id = env.register_contract(None, Token);
-        self.pause_manager_id = env.register_contract(None, PauseManager);
+        self.registry_id = env.register(PayrollRegistry, ());
+        self.commitment_id = env.register(SalaryCommitmentContract, ());
+        self.verifier_id = env.register(ProofVerifier, ());
+        self.payroll_id = env.register(Payroll, ());
+        self.executor_id = env.register(PaymentExecutor, ());
+        self.audit_id = env.register(AuditModule, ());
+        self.token_id = env.register(Token, ());
+        self.pause_manager_id = env.register(PauseManager, ());
     }
 
     /// Initialize all contracts with mock auths (standard deployment flow).
@@ -360,15 +360,12 @@ impl MigrationContext {
         // Re-deploy all contracts as if new WASM was uploaded.
         // This simulates upgrading to a new contract version while preserving
         // existing storage (old keys remain).
-        let new_registry_id =
-            env.register_contract(&Some(self.registry_id.clone()), PayrollRegistry);
-        let new_commitment_id =
-            env.register_contract(&Some(self.commitment_id.clone()), SalaryCommitmentContract);
-        let new_verifier_id = env.register_contract(&Some(self.verifier_id.clone()), ProofVerifier);
-        let new_payroll_id = env.register_contract(&Some(self.payroll_id.clone()), Payroll);
-        let new_executor_id =
-            env.register_contract(&Some(self.executor_id.clone()), PaymentExecutor);
-        let new_audit_id = env.register_contract(&Some(self.audit_id.clone()), AuditModule);
+        let new_registry_id = env.register_at(&self.registry_id, PayrollRegistry, ());
+        let new_commitment_id = env.register_at(&self.commitment_id, SalaryCommitmentContract, ());
+        let new_verifier_id = env.register_at(&self.verifier_id, ProofVerifier, ());
+        let new_payroll_id = env.register_at(&self.payroll_id, Payroll, ());
+        let new_executor_id = env.register_at(&self.executor_id, PaymentExecutor, ());
+        let new_audit_id = env.register_at(&self.audit_id, AuditModule, ());
 
         // Update IDs to new instances (same contract IDs, new WASM)
         // In Soroban, register_contract with Some(id) deploys to the same address.

@@ -1,10 +1,10 @@
 #![cfg(test)]
 
-use payroll::{Payroll, PayrollClient, ReconciliationStatus};
+use payroll::{Payroll, PayrollClient};
 use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
 use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
 use soroban_sdk::testutils::{Address as _, Events};
-use soroban_sdk::{Address, BytesN, Env, Symbol, TryIntoVal, Val, Vec};
+use soroban_sdk::{Address, BytesN, Env, Vec};
 use token::{Token, TokenClient};
 
 fn mock_vk(env: &Env) -> VerificationKey {
@@ -28,8 +28,8 @@ fn mock_vk(env: &Env) -> VerificationKey {
 struct TestContext<'a> {
     env: Env,
     payroll: PayrollClient<'a>,
-    admin: Address,
-    reviewer: Address,
+    _admin: Address,
+    _reviewer: Address,
     employee: Address,
 }
 
@@ -42,19 +42,19 @@ fn setup() -> TestContext<'static> {
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier = ProofVerifierClient::new(&env, &verifier_id);
     verifier.init_verifier_admin(&admin);
     verifier.initialize_verifier(&mock_vk(&env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment = SalaryCommitmentContractClient::new(&env, &commitment_id);
     commitment.init_commitment_admin(&admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
     let token = TokenClient::new(&env, &token_id);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll = PayrollClient::new(&env, &payroll_id);
     payroll.initialize(
         &admin,
@@ -77,8 +77,8 @@ fn setup() -> TestContext<'static> {
     TestContext {
         env,
         payroll,
-        admin,
-        reviewer,
+        _admin: admin,
+        _reviewer: reviewer,
         employee,
     }
 }

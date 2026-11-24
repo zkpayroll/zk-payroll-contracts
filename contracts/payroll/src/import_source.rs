@@ -20,7 +20,7 @@
 //! but the error never exposes which sources are authorized or what the
 //! payroll data contains.
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, String};
 
 use crate::{DataKey, PayrollFailureReason};
 
@@ -97,8 +97,11 @@ pub fn register_source(env: &Env, source_address: Address, source_type: ImportSo
         .persistent()
         .set(&DataKey::ImportSource(source_address.clone()), &source);
 
-    env.events()
-        .publish((symbol_short!("payroll"), symbol_short!("src_reg")), ());
+    payroll_events::publish(
+        env,
+        (symbol_short!("payroll"), symbol_short!("src_reg")),
+        (),
+    );
 }
 
 /// Deactivate an import source without removing its record.
@@ -133,8 +136,11 @@ pub fn deactivate_source(env: &Env, source_address: Address) {
     source.is_active = false;
     env.storage().persistent().set(&source_key, &source);
 
-    env.events()
-        .publish((symbol_short!("payroll"), symbol_short!("src_deact")), ());
+    payroll_events::publish(
+        env,
+        (symbol_short!("payroll"), symbol_short!("src_deact")),
+        (),
+    );
 }
 
 /// Check if a source is authorized and active.
@@ -196,7 +202,6 @@ pub fn validate_source_for_report(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     // Tests will be added by integration tests in contracts/payroll/tests/
 }

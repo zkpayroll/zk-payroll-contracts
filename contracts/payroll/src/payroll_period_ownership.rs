@@ -12,7 +12,7 @@ pub struct PayrollPeriodOwnership {
 
 /// Verifies that the caller matches the recorded owner of a payroll period (#568).
 pub fn verify_payroll_period_owner(
-    env: &Env,
+    _env: &Env,
     stored_owner: &Address,
     caller: &Address,
 ) -> Result<(), AuthError> {
