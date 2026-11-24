@@ -240,10 +240,6 @@ pub(crate) fn check_contract_period_consistency(
 /// Returns the list of sequence-related blockers found in the supplied
 /// `DryRunArgs`. This is a pure function over the arguments and does not
 /// touch storage, so it is safe to call from any context.
-#[expect(
-    dead_code,
-    reason = "Preflight helper is not wired into the current entrypoint"
-)]
 pub(crate) fn check_sequence_consistency(
     e: &Env,
     args: &DryRunArgs,

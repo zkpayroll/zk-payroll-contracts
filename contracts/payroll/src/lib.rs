@@ -3399,6 +3399,12 @@ impl Payroll {
         )
     }
 
+    fn is_payroll_run_finalized_internal(e: &Env, run_id: u64) -> bool {
+        e.storage()
+            .persistent()
+            .has(&DataKey::PayrollRun(run_id))
+    }
+
     fn is_retryable_payroll_state_internal(state: PayrollRunState) -> bool {
         matches!(state, PayrollRunState::Failed)
     }
@@ -4192,6 +4198,14 @@ impl Payroll {
         let current = Self::get_payroll_run_state_internal(&e, run_id);
         if !Self::is_allowed_payroll_state_transition_internal(current, next_state) {
             panic!("Invalid payroll state transition");
+        }
+        if Self::is_payroll_run_finalized_internal(&e, run_id)
+            && matches!(
+                next_state,
+                PayrollRunState::ProofPending | PayrollRunState::ReadyToSubmit
+            )
+        {
+            panic!("Cannot submit proofs for a finalized payroll run");
         }
 
         Self::record_payroll_run_state(&e, run_id, next_state);
@@ -5752,6 +5766,20 @@ impl Payroll {
             if Self::nonce_is_stale(&e, &addrs.admin, &args.nonce) {
                 report.push(PayrollFailureReason::NonceNotMonotonic);
             }
+
+            let last_accepted_sequence = e
+                .storage()
+                .persistent()
+                .get::<_, EmployerNonceSequenceState>(&DataKey::EmployerNonceSequence(
+                    addrs.admin.clone(),
+                ))
+                .and_then(|state| u32::try_from(state.current_sequence).ok());
+            failure_reasons::check_sequence_consistency(
+                &e,
+                &args,
+                last_accepted_sequence,
+                &mut report,
+            );
 
             if !Self::is_asset_allowed(e.clone(), addrs.token.clone()) {
                 report.push(PayrollFailureReason::AssetNotAllowed);
