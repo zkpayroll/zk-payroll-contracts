@@ -185,11 +185,12 @@ This preserves privacy for employees and salary information throughout all retry
 
 ## Testing Strategy
 
-Retry invariants are tested across three test suites:
+Retry invariants are tested across four test suites:
 
-1. **invariant_tests.rs** (I-9): AlreadyPaid retry does not alter running total.
-2. **recovery_tests.rs** (test_partial_batch_failure_*): Partial batch failures and per-employee retry.
-3. **security_tests.rs** (test_retry_*): Cross-period retries, idempotency, and nullifier replay prevention.
+1. **retry_invariant_tests.rs** (R-1 through R-7): Dedicated payout batch retry regression and invariant tests covering receipt idempotency, partial-batch retries, closed-period barriers, pre-validation retries, and nullifier replay protection.
+2. **invariant_tests.rs** (I-9): AlreadyPaid retry does not alter running total.
+3. **recovery_tests.rs** (test_partial_batch_failure_*): Partial batch failures and per-employee retry.
+4. **security_tests.rs** (test_retry_*): Cross-period retries, idempotency, and nullifier replay prevention.
 
 Each invariant is exercised with success, failure, and boundary cases to confirm contract behavior is predictable and safe.
 
