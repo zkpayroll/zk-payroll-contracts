@@ -425,6 +425,41 @@ fn the_purger_cannot_change_the_retention_policy() {
 }
 
 #[test]
+fn only_the_authorized_admin_can_extend_the_retention_window() {
+    let (env, contract_id, admin, client) = setup();
+    let extended = FINALIZED_RETENTION_SECS + 1;
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_retention_override",
+            args: (COMPANY, RecordType::FinalizedBatch, extended).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(
+        client.try_set_retention_override(
+            &COMPANY,
+            &RecordType::FinalizedBatch,
+            &extended
+        ),
+        Ok(Ok(()))
+    );
+
+    env.set_auths(&[]);
+    let unauthorized = client.try_set_retention_override(
+        &COMPANY,
+        &RecordType::FinalizedBatch,
+        &(extended + 1),
+    );
+    assert!(matches!(unauthorized, Err(Err(_))));
+
+    env.mock_all_auths();
+    assert_eq!(window_now(&env, &client, 1), extended);
+}
+
+#[test]
 fn a_rejected_policy_update_leaves_the_current_policy_in_force() {
     let (env, contract_id, _admin, client) = setup();
     let now = env.ledger().timestamp();

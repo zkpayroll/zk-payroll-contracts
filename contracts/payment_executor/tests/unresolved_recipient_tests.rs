@@ -14,6 +14,7 @@ const PERIOD: u32 = 1;
 
 struct System<'a> {
     executor: PaymentExecutorClient<'a>,
+    registry: PayrollRegistryClient<'a>,
     commitments: SalaryCommitmentContractClient<'a>,
     token: TokenClient<'a>,
     company_id: u64,
@@ -65,7 +66,20 @@ fn setup(env: &Env) -> System<'_> {
     executor.set_withholding_config(&company_id, &0u32, &0u32, &tax, &tax, &0i128, &0i128);
     token.mint(&treasury, &1_000_000i128);
 
-    System { executor, commitments, token, company_id, treasury }
+    System {
+        executor,
+        registry,
+        commitments,
+        token,
+        company_id,
+        treasury,
+    }
+}
+
+fn register_employee(sys: &System, employee: &Address, commitment: &BytesN<32>) {
+    sys.commitments.store_commitment(employee, commitment);
+    sys.registry
+        .add_employee(&sys.company_id, employee, commitment);
 }
 
 fn pay(env: &Env, sys: &System, recipient: &Address, seed: u8) -> Result<(), PaymentError> {
@@ -127,7 +141,7 @@ fn resolved_recipient_is_paid() {
     let env = Env::default();
     let sys = setup(&env);
     let employee = Address::generate(&env);
-    sys.commitments.store_commitment(&employee, &BytesN::from_array(&env, &[5u8; 32]));
+    register_employee(&sys, &employee, &BytesN::from_array(&env, &[5u8; 32]));
 
     assert_eq!(pay(&env, &sys, &employee, 9), Ok(()));
     assert!(sys.executor.is_paid(&employee, &PERIOD));
@@ -143,6 +157,55 @@ fn rejected_attempt_does_not_burn_the_nullifier() {
     // First attempt fails because the commitment is not registered yet...
     assert_eq!(pay(&env, &sys, &employee, 4), Err(PaymentError::RecipientUnresolved));
     // ...and once it is, the same proof nullifier is still usable.
-    sys.commitments.store_commitment(&employee, &BytesN::from_array(&env, &[6u8; 32]));
+    register_employee(&sys, &employee, &BytesN::from_array(&env, &[6u8; 32]));
     assert_eq!(pay(&env, &sys, &employee, 4), Ok(()));
+}
+
+#[test]
+fn recipient_registered_to_another_employer_is_rejected_before_proof_check() {
+    let env = Env::default();
+    let sys = setup(&env);
+    let employee = Address::generate(&env);
+    let commitment = BytesN::from_array(&env, &[10u8; 32]);
+    register_employee(&sys, &employee, &commitment);
+
+    let other_admin = Address::generate(&env);
+    let other_treasury = Address::generate(&env);
+    let other_company_id = sys
+        .registry
+        .register_company(&other_admin, &other_treasury);
+    sys.executor.create_period(&other_company_id);
+    let tax = Address::generate(&env);
+    sys.executor.set_withholding_config(
+        &other_company_id,
+        &0u32,
+        &0u32,
+        &tax,
+        &tax,
+        &0i128,
+        &0i128,
+    );
+    sys.token.mint(&other_treasury, &1_000_000i128);
+
+    // The test verifier accepts structurally valid mock proofs; the executor
+    // must reject this employer mismatch before invoking it.
+    let result = sys.executor.try_execute_payment(
+        &other_company_id,
+        &employee,
+        &10_000i128,
+        &BytesN::from_array(&env, &[1u8; 64]),
+        &BytesN::from_array(&env, &[2u8; 128]),
+        &BytesN::from_array(&env, &[3u8; 64]),
+        &BytesN::from_array(&env, &[11u8; 32]),
+        &PERIOD,
+    );
+
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PaymentError::RecipientUnresolved
+    );
+    assert_eq!(sys.token.balance(&other_treasury), 1_000_000i128);
+    assert_eq!(sys.token.balance(&employee), 0);
+    assert_eq!(sys.executor.get_total_paid(&other_company_id), 0);
+    assert!(!sys.executor.is_paid(&employee, &PERIOD));
 }
