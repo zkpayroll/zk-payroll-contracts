@@ -53,6 +53,8 @@ pub enum SettlementError {
     /// Settlement receipt was already consumed; replay is rejected.
     /// Safe/idempotent: callers may treat this as already-settled.
     SettlementReceiptReplay = 12,
+    /// Receipt is not owned by the company and period being finalized.
+    SettlementReceiptOwnershipMismatch = 13,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,14 @@ pub struct SettlementPeriod {
     pub transitioned_at: u64,
 }
 
+/// Non-sensitive scope binding for a consumed settlement receipt.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementReceiptOwner {
+    pub company_id: u64,
+    pub period_id: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -126,6 +136,8 @@ pub enum DataKey {
     TokenInterfaceOverride(Address),
     /// Consumed settlement receipt marker keyed by opaque receipt id.
     SettlementReceipt(BytesN<32>),
+    /// Company and period scope for a consumed settlement receipt.
+    SettlementReceiptScope(BytesN<32>),
 }
 
 // ---------------------------------------------------------------------------
@@ -335,16 +347,26 @@ impl SettlementWindowContract {
     }
 
     /// Close the period after all payments are settled (admin call).
+    /// The receipt must have been consumed for this exact company and period.
     pub fn close_period(
         env: Env,
         company_id: u64,
         period_id: u32,
+        receipt_id: BytesN<32>,
     ) -> Result<SettlementPeriod, SettlementError> {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
         let mut period = Self::load_period(&env, company_id, period_id)?;
         Self::require_not_finalized(&period)?;
+        let receipt_owner: SettlementReceiptOwner = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementReceiptScope(receipt_id))
+            .ok_or(SettlementError::SettlementReceiptOwnershipMismatch)?;
+        if receipt_owner.company_id != company_id || receipt_owner.period_id != period_id {
+            return Err(SettlementError::SettlementReceiptOwnershipMismatch);
+        }
 
         let now = env.ledger().timestamp();
         period.phase = PeriodPhase::Closed;
@@ -522,18 +544,29 @@ impl SettlementWindowContract {
     ///
     /// Safe error behavior: replay returns `SettlementReceiptReplay` and
     /// performs no state mutation. Receipt IDs are opaque; no employee/salary
-    /// data is stored or emitted.
+    /// data is stored or emitted. The receipt is bound to the supplied period
+    /// so it cannot authorize another company's or period's finalization.
     pub fn consume_settlement_receipt(
         env: Env,
+        company_id: u64,
+        period_id: u32,
         receipt_id: BytesN<32>,
     ) -> Result<(), SettlementError> {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
+        Self::load_period(&env, company_id, period_id)?;
 
-        let key = DataKey::SettlementReceipt(receipt_id);
+        let key = DataKey::SettlementReceipt(receipt_id.clone());
         if env.storage().persistent().has(&key) {
             return Err(SettlementError::SettlementReceiptReplay);
         }
+        env.storage().persistent().set(
+            &DataKey::SettlementReceiptScope(receipt_id.clone()),
+            &SettlementReceiptOwner {
+                company_id,
+                period_id,
+            },
+        );
         env.storage().persistent().set(&key, &true);
         Ok(())
     }
@@ -913,7 +946,9 @@ mod tests {
             &(base + 100),
             &(base + 200),
         );
-        client.close_period(&company_id, &1);
+        let receipt = BytesN::from_array(&env, &[20u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &receipt);
+        client.close_period(&company_id, &1, &receipt);
 
         // Period 2 opens exactly when period 1 closes. Windows are half-open,
         // so touching boundaries are adjacent, not colliding.
@@ -941,7 +976,9 @@ mod tests {
             &(base + 100),
             &(base + 200),
         );
-        client.close_period(&company_id, &1);
+        let receipt = BytesN::from_array(&env, &[21u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &receipt);
+        client.close_period(&company_id, &1, &receipt);
 
         // Overlaps period 1 even though period 1 is closed: a closed period
         // still reserves its payout window.
@@ -1220,18 +1257,117 @@ mod tests {
         let (env, contract_id, _admin) = setup();
         let client = SettlementWindowContractClient::new(&env, &contract_id);
         let receipt = BytesN::from_array(&env, &[7u8; 32]);
+        let now = env.ledger().timestamp();
+        client.create_period(&1, &now, &(now + 10), &(now + 20), &(now + 30));
 
         assert!(!client.is_settlement_receipt_consumed(&receipt));
-        assert_eq!(client.try_consume_settlement_receipt(&receipt), Ok(Ok(())));
+        assert_eq!(
+            client.try_consume_settlement_receipt(&1, &1, &receipt),
+            Ok(Ok(()))
+        );
         assert!(client.is_settlement_receipt_consumed(&receipt));
 
-        let replay = client.try_consume_settlement_receipt(&receipt);
+        let replay = client.try_consume_settlement_receipt(&1, &1, &receipt);
         assert_eq!(
             replay.unwrap_err().unwrap(),
             SettlementError::SettlementReceiptReplay
         );
         // Replay is rejected without mutating consumed state.
         assert!(client.is_settlement_receipt_consumed(&receipt));
+    }
+
+    #[test]
+    fn test_close_period_requires_receipt_owned_by_that_period() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 31u64;
+        client.create_period(&company_id, &base, &(base + 10), &(base + 20), &(base + 30));
+        let receipt = BytesN::from_array(&env, &[31u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &receipt);
+
+        let closed = client.close_period(&company_id, &1, &receipt);
+        assert_eq!(closed.phase, PeriodPhase::Closed);
+        assert!(client.is_settlement_receipt_consumed(&receipt));
+    }
+
+    #[test]
+    fn test_close_period_rejects_receipt_owned_by_another_company() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 32u64;
+        client.create_period(&company_id, &base, &(base + 10), &(base + 20), &(base + 30));
+        let other_company_id = 33u64;
+        client.create_period(
+            &other_company_id,
+            &base,
+            &(base + 10),
+            &(base + 20),
+            &(base + 30),
+        );
+        let receipt = BytesN::from_array(&env, &[32u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &receipt);
+
+        let result = client.try_close_period(&other_company_id, &1, &receipt);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::SettlementReceiptOwnershipMismatch
+        );
+        assert_eq!(
+            client.get_phase(&other_company_id, &1),
+            Some(PeriodPhase::Pending)
+        );
+    }
+
+    #[test]
+    fn test_close_period_rejects_receipt_owned_by_another_period() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 35u64;
+        client.create_period(&company_id, &base, &(base + 10), &(base + 20), &(base + 30));
+        let first_receipt = BytesN::from_array(&env, &[35u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &first_receipt);
+        client.close_period(&company_id, &1, &first_receipt);
+
+        client.create_period(
+            &company_id,
+            &(base + 40),
+            &(base + 50),
+            &(base + 60),
+            &(base + 70),
+        );
+        let result = client.try_close_period(&company_id, &2, &first_receipt);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::SettlementReceiptOwnershipMismatch
+        );
+        assert_eq!(
+            client.get_phase(&company_id, &2),
+            Some(PeriodPhase::Pending)
+        );
+    }
+
+    #[test]
+    fn test_close_period_rejects_unconsumed_receipt_at_boundary() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 34u64;
+        client.create_period(&company_id, &base, &(base + 10), &(base + 20), &(base + 30));
+        let unconsumed = BytesN::from_array(&env, &[0u8; 32]);
+
+        let result = client.try_close_period(&company_id, &1, &unconsumed);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::SettlementReceiptOwnershipMismatch
+        );
+        assert!(!client.is_settlement_receipt_consumed(&unconsumed));
+        assert_eq!(
+            client.get_phase(&company_id, &1),
+            Some(PeriodPhase::Pending)
+        );
     }
 
     #[test]
@@ -1298,10 +1434,12 @@ mod settlement_replay_tests {
         let client = SettlementWindowContractClient::new(&env, &id);
         env.ledger().with_mut(|l| l.timestamp += 15);
 
-        client.close_period(&company_id, &1);
+        let receipt = BytesN::from_array(&env, &[77u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &receipt);
+        client.close_period(&company_id, &1, &receipt);
         let finalized = client.get_period(&company_id, &1).unwrap();
 
-        let replay = client.try_close_period(&company_id, &1);
+        let replay = client.try_close_period(&company_id, &1, &receipt);
         assert_eq!(
             replay.unwrap_err().unwrap(),
             SettlementError::AlreadyFinalized
@@ -1377,10 +1515,12 @@ mod settlement_replay_tests {
         let client = SettlementWindowContractClient::new(&env, &id);
         env.ledger().with_mut(|l| l.timestamp += 15);
 
-        client.close_period(&company_id, &1);
+        let receipt = BytesN::from_array(&env, &[78u8; 32]);
+        client.consume_settlement_receipt(&company_id, &1, &receipt);
+        client.close_period(&company_id, &1, &receipt);
         // A replayed close must not reset the period to a mutable phase that
         // would let a colliding window be registered.
-        assert!(client.try_close_period(&company_id, &1).is_err());
+        assert!(client.try_close_period(&company_id, &1, &receipt).is_err());
 
         let (open_at, execute_at, grace_until, close_at) = {
             let now = env.ledger().timestamp();

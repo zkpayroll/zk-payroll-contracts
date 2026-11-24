@@ -174,6 +174,7 @@ fn test_revision_change_invalidates_old_approval_hash() {
     assert_eq!(rolled_back.current_approvals, 0);
     assert_eq!(rolled_back.current_stage, 0);
     assert!(!rolled_back.is_locked);
+    assert!(rolled_back.signers.is_empty());
     assert_ne!(rolled_back.protected_content_hash, old_hash);
 
     // An approval bound to the old revision cannot be replayed.
@@ -185,11 +186,13 @@ fn test_revision_change_invalidates_old_approval_hash() {
 
     // The revised revision is still approvable with its new hash.
     let fresh = ctx.payroll().submit_draft_approval(
-        &signer2,
+        &signer1,
         &draft_id,
         &rolled_back.protected_content_hash,
     );
     assert_eq!(fresh.current_approvals, 1);
+    assert_eq!(fresh.signers.len(), 1);
+    assert_eq!(fresh.signers.get(0), Some(signer1));
 }
 
 // ── Failure paths ────────────────────────────────────────────────────────────

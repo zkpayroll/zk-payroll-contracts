@@ -189,6 +189,7 @@ codes across the payment path:
 | `payment_executor` | `4` | `PeriodNotFound` | "Payroll period does not exist. Create a period before submitting payments." |
 | `payment_executor` | `5` | `PeriodClosed` | "Payroll period is closed. Open a new period." |
 | `payment_executor` | `6` | `PeriodAlreadyExists` | "A period already exists for this company. Close it before creating a new one." |
+| `payment_executor` | `21` | `DuplicateRecipientPosition` | "A recipient appears more than once in this batch. Remove duplicate rows and retry." |
 | `audit_module` | `1` | `KeyNotFound` | "No view key found for this auditor." |
 | `audit_module` | `2` | `WrongAuditor` | "Caller is not the designated auditor for this key." |
 | `audit_module` | `3` | `KeyExpired` | "Auditor view key has expired. Request a new key." |
