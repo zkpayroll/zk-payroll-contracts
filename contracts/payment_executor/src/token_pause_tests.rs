@@ -38,6 +38,12 @@ impl PausableToken {
             .set(&TokenKey::Balance(to), &(current + amount));
     }
 
+    /// Matches the decimals configured on the executor in `setup`, so the
+    /// executor's on-chain decimal precision check passes.
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+
     pub fn balance(env: Env, id: Address) -> i128 {
         env.storage()
             .persistent()
@@ -209,15 +215,32 @@ fn test_same_payout_succeeds_on_retry_once_the_token_resumes() {
 
     f.token().set_paused(&true);
     assert!(f
-        .client
-        .try_execute_payment(&f.company_id, &f.employee, &1000, &a, &b, &c, &nullifier, &1)
+        .client()
+        .try_execute_payment(
+            &f.company_id,
+            &f.employee,
+            &1000,
+            &a,
+            &b,
+            &c,
+            &nullifier,
+            &1
+        )
         .is_err());
 
     f.token().set_paused(&false);
     // Retry with the identical proof and nullifier: the failed attempt must not
     // have consumed them.
-    f.client()
-        .execute_payment(&f.company_id, &f.employee, &1000, &a, &b, &c, &nullifier, &1);
+    f.client().execute_payment(
+        &f.company_id,
+        &f.employee,
+        &1000,
+        &a,
+        &b,
+        &c,
+        &nullifier,
+        &1,
+    );
 
     assert!(f.client().is_paid(&f.employee, &1));
     assert_eq!(f.client().get_total_paid(&f.company_id), 1000);
@@ -233,8 +256,17 @@ fn test_repeated_failed_retries_while_paused_accumulate_nothing() {
     f.token().set_paused(&true);
     for _ in 0..3 {
         assert!(f
-            .client
-            .try_execute_payment(&f.company_id, &f.employee, &1000, &a, &b, &c, &nullifier, &1)
+            .client()
+            .try_execute_payment(
+                &f.company_id,
+                &f.employee,
+                &1000,
+                &a,
+                &b,
+                &c,
+                &nullifier,
+                &1
+            )
             .is_err());
     }
     assert_eq!(f.client().get_total_paid(&f.company_id), 0);
@@ -242,14 +274,31 @@ fn test_repeated_failed_retries_while_paused_accumulate_nothing() {
 
     // Boundary: after all those failures the payout still goes through exactly once.
     f.token().set_paused(&false);
-    f.client()
-        .execute_payment(&f.company_id, &f.employee, &1000, &a, &b, &c, &nullifier, &1);
+    f.client().execute_payment(
+        &f.company_id,
+        &f.employee,
+        &1000,
+        &a,
+        &b,
+        &c,
+        &nullifier,
+        &1,
+    );
     assert_eq!(f.client().get_total_paid(&f.company_id), 1000);
 
     // A further retry after success is rejected and moves no funds.
     assert!(f
-        .client
-        .try_execute_payment(&f.company_id, &f.employee, &1000, &a, &b, &c, &nullifier, &1)
+        .client()
+        .try_execute_payment(
+            &f.company_id,
+            &f.employee,
+            &1000,
+            &a,
+            &b,
+            &c,
+            &nullifier,
+            &1
+        )
         .is_err());
     assert_eq!(f.token().balance(&f.employee), 1_000);
     assert_eq!(f.token().balance(&f.treasury), 9_000);

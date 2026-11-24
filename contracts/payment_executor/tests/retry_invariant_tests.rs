@@ -42,7 +42,17 @@ fn mock_vk(env: &Env) -> VerificationKey {
     }
 }
 
-fn setup_system<'a>(env: &'a Env) -> (PaymentExecutorClient<'a>, PayrollRegistryClient<'a>, SalaryCommitmentContractClient<'a>, TokenClient<'a>, u64, Address, Address) {
+fn setup_system<'a>(
+    env: &'a Env,
+) -> (
+    PaymentExecutorClient<'a>,
+    PayrollRegistryClient<'a>,
+    SalaryCommitmentContractClient<'a>,
+    TokenClient<'a>,
+    u64,
+    Address,
+    Address,
+) {
     env.mock_all_auths();
 
     let executor_id = env.register(PaymentExecutor, ());
@@ -83,12 +93,34 @@ fn setup_system<'a>(env: &'a Env) -> (PaymentExecutorClient<'a>, PayrollRegistry
     executor.set_asset_decimals(&executor.get_addresses().token, &7u32);
 
     let tax_addr = Address::generate(env);
-    executor.set_withholding_config(&company_id, &0u32, &0u32, &tax_addr, &tax_addr, &0i128, &0i128);
+    executor.set_withholding_config(
+        &company_id,
+        &0u32,
+        &0u32,
+        &tax_addr,
+        &tax_addr,
+        &0i128,
+        &0i128,
+    );
 
-    (executor, registry, commitment_client, token, company_id, admin, treasury)
+    (
+        executor,
+        registry,
+        commitment_client,
+        token,
+        company_id,
+        admin,
+        treasury,
+    )
 }
 
-fn register_employee(env: &Env, registry: &PayrollRegistryClient, commitment_client: &SalaryCommitmentContractClient, company_id: u64, seed: u8,) -> (Address, BytesN<32>) {
+fn register_employee(
+    env: &Env,
+    registry: &PayrollRegistryClient,
+    commitment_client: &SalaryCommitmentContractClient,
+    company_id: u64,
+    seed: u8,
+) -> (Address, BytesN<32>) {
     let employee = Address::generate(env);
     let commitment = BytesN::from_array(env, &[seed; 32]);
     commitment_client.store_commitment(&employee, &commitment);
@@ -146,7 +178,7 @@ fn test_receipt_idempotency_rejects_duplicate() {
         &1,
         &receipt,
     );
-    assert!(result1.is_ok(), "first call should succeed");
+    assert_eq!(result1.len(), employees.len(), "first call should succeed");
 
     // Second call with the same receipt: rejected immediately.
     let result2 = executor.try_execute_batch_with_receipt(
@@ -221,10 +253,16 @@ fn test_receipt_not_consumed_on_partial_batch_failure() {
         &1,
         &receipt,
     );
-    assert!(result1.is_err(), "batch should fail due to insufficient balance");
+    assert!(
+        result1.is_err(),
+        "batch should fail due to insufficient balance"
+    );
 
     // Verify receipt was not consumed.
-    assert!(!executor.is_settlement_receipt_used(&receipt), "receipt must NOT be consumed on failure");
+    assert!(
+        !executor.is_settlement_receipt_used(&receipt),
+        "receipt must NOT be consumed on failure"
+    );
 
     // Refund treasury and retry with same receipt.
     token.mint(&treasury, &200_000);
@@ -239,8 +277,15 @@ fn test_receipt_not_consumed_on_partial_batch_failure() {
         &1,
         &receipt,
     );
-    assert!(result2.is_ok(), "retry with same receipt should succeed");
-    assert!(executor.is_settlement_receipt_used(&receipt), "receipt must be consumed on success");
+    assert_eq!(
+        result2.len(),
+        employees.len(),
+        "retry with same receipt should succeed"
+    );
+    assert!(
+        executor.is_settlement_receipt_used(&receipt),
+        "receipt must be consumed on success"
+    );
 }
 
 // ===========================================================================
@@ -262,7 +307,16 @@ fn test_nullifier_global_uniqueness_across_periods() {
     let (pa2, pb2, pc2, _) = make_proof(&env, 21);
 
     // First payment in period 1 with nullifier.
-    executor.execute_payment(&company_id, &emp1, &1000, &pa1, &pb1, &pc1, &null_shared, &1);
+    executor.execute_payment(
+        &company_id,
+        &emp1,
+        &1000,
+        &pa1,
+        &pb1,
+        &pc1,
+        &null_shared,
+        &1,
+    );
     assert_eq!(executor.get_total_paid(&company_id), 1000);
 
     // Close period 1 and open period 2.
@@ -311,7 +365,8 @@ fn test_already_paid_rejects_second_payment_same_period() {
     assert!(executor.is_paid(&emp, &1));
 
     // Second payment with fresh proof still fails with AlreadyPaid.
-    let result = executor.try_execute_payment(&company_id, &emp, &3000, &pa2, &pb2, &pc2, &null2, &1);
+    let result =
+        executor.try_execute_payment(&company_id, &emp, &3000, &pa2, &pb2, &pc2, &null2, &1);
     assert_eq!(
         result.unwrap_err().unwrap(),
         PaymentError::AlreadyPaid,
@@ -343,7 +398,11 @@ fn test_same_employee_payable_across_periods() {
 
     // Pay the same employee in period 2 with a fresh proof.
     executor.execute_payment(&company_id, &emp, &3000, &pa2, &pb2, &pc2, &null2, &2);
-    assert_eq!(executor.get_total_paid(&company_id), 8000, "second payment in new period should succeed");
+    assert_eq!(
+        executor.get_total_paid(&company_id),
+        8000,
+        "second payment in new period should succeed"
+    );
 }
 
 // ===========================================================================
@@ -485,7 +544,8 @@ fn test_total_monotonicity_failed_retry_does_not_decrease() {
 
     // Retry (with different proof) in same period: fails with AlreadyPaid.
     let (pa2, pb2, pc2, null2) = make_proof(&env, 61);
-    let result = executor.try_execute_payment(&company_id, &emp, &10_000, &pa2, &pb2, &pc2, &null2, &1);
+    let result =
+        executor.try_execute_payment(&company_id, &emp, &10_000, &pa2, &pb2, &pc2, &null2, &1);
     assert_eq!(result.unwrap_err().unwrap(), PaymentError::AlreadyPaid);
 
     // Total must not have changed.
