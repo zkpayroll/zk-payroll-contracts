@@ -395,6 +395,61 @@ fn test_batch_total_equals_sum_of_amounts() {
     );
 }
 
+#[test]
+fn test_batch_rejects_duplicate_recipient_positions_before_payout() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, token, company_id, _admin, treasury) =
+        setup_system(&env, 20_000);
+    let (employee, _) = register_employee(&env, &registry, &commitment_client, company_id, 72);
+    let (proof_a1, proof_b1, proof_c1, nullifier1) = make_proof(&env, 72);
+    let (proof_a2, proof_b2, proof_c2, nullifier2) = make_proof(&env, 73);
+
+    let result = executor.try_execute_batch_payroll(
+        &company_id,
+        &Vec::from_array(&env, [employee.clone(), employee.clone()]),
+        &Vec::from_array(&env, [5_000i128, 5_000i128]),
+        &Vec::from_array(&env, [proof_a1, proof_a2]),
+        &Vec::from_array(&env, [proof_b1, proof_b2]),
+        &Vec::from_array(&env, [proof_c1, proof_c2]),
+        &Vec::from_array(&env, [nullifier1, nullifier2]),
+        &1,
+    );
+
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        PaymentError::DuplicateRecipientPosition
+    );
+    assert!(!executor.is_paid(&employee, &1));
+    assert_eq!(token.balance(&employee), 0);
+    assert_eq!(token.balance(&treasury), 20_000);
+    assert_eq!(executor.get_total_paid(&company_id), 0);
+}
+
+#[test]
+fn test_single_recipient_batch_is_valid_boundary() {
+    let env = Env::default();
+    let (executor, registry, commitment_client, token, company_id, _admin, _treasury) =
+        setup_system(&env, 10_000);
+    let (employee, _) = register_employee(&env, &registry, &commitment_client, company_id, 74);
+    let (proof_a, proof_b, proof_c, nullifier) = make_proof(&env, 74);
+
+    let records = executor.execute_batch_payroll(
+        &company_id,
+        &Vec::from_array(&env, [employee.clone()]),
+        &Vec::from_array(&env, [5_000i128]),
+        &Vec::from_array(&env, [proof_a]),
+        &Vec::from_array(&env, [proof_b]),
+        &Vec::from_array(&env, [proof_c]),
+        &Vec::from_array(&env, [nullifier]),
+        &1,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert!(executor.is_paid(&employee, &1));
+    assert_eq!(token.balance(&employee), 5_000);
+    assert_eq!(executor.get_total_paid(&company_id), 5_000);
+}
+
 // ===========================================================================
 // I-7. Totals for different companies are fully isolated
 // ===========================================================================

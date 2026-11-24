@@ -106,6 +106,9 @@ pub enum PaymentError {
     /// no active salary commitment, or it is the company treasury or this
     /// contract (issue #889). Never includes the address or amount.
     RecipientUnresolved = 20,
+    /// A recipient appears more than once in a payout batch. The error does
+    /// not include the recipient address or payout amount.
+    DuplicateRecipientPosition = 21,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -1081,6 +1084,14 @@ impl PaymentExecutor {
             .unwrap_or(MAX_PAYOUT_BATCH_SIZE);
         if count > effective_limit {
             return Err(PaymentError::BatchTooLarge);
+        }
+
+        let mut recipients = soroban_sdk::Vec::new(&env);
+        for employee in employees.iter() {
+            if recipients.contains(&employee) {
+                return Err(PaymentError::DuplicateRecipientPosition);
+            }
+            recipients.push_back(employee);
         }
 
         let mut records = soroban_sdk::Vec::new(&env);

@@ -4,6 +4,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
 #[contracttype]
 pub enum DataKey {
     Balance(Address),
+    Decimals,
 }
 
 #[contract]
@@ -11,8 +12,9 @@ pub struct Token;
 
 #[contractimpl]
 impl Token {
-    pub fn initialize(_e: Env, _admin: Address, _decimal: u32, _name: String, _symbol: String) {
+    pub fn initialize(e: Env, _admin: Address, decimal: u32, _name: String, _symbol: String) {
         // Initialization logic placeholder
+        e.storage().instance().set(&DataKey::Decimals, &decimal);
     }
 
     pub fn mint(e: Env, to: Address, amount: i128) {
@@ -55,8 +57,8 @@ impl Token {
             .set(&to_key, &(to_balance + amount));
     }
 
-    pub fn decimals(_e: Env) -> u32 {
-        7
+    pub fn decimals(e: Env) -> u32 {
+        e.storage().instance().get(&DataKey::Decimals).unwrap_or(7)
     }
 
     pub fn name(e: Env) -> String {

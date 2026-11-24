@@ -223,6 +223,48 @@ fn test_precision_regression_non_round_amounts_preserved_with_enforced_decimals(
 }
 
 #[test]
+fn test_maximum_token_precision_is_preserved_in_payout_totals() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let (company_id, treasury, employee) = register_company_and_employee(&env, &ctx, 6);
+    let token_admin = Address::generate(&env);
+    ctx.token.initialize(
+        &token_admin,
+        &18u32,
+        &soroban_sdk::String::from_str(&env, "Precision Token"),
+        &soroban_sdk::String::from_str(&env, "PREC"),
+    );
+    ctx.executor.set_asset_decimals(&ctx.token_id, &18u32);
+
+    let amounts = [1_000_000_000i128, 999_000_000_000_000_000i128];
+    let expected_total = amounts.iter().sum::<i128>();
+    ctx.token.mint(&treasury, &expected_total);
+
+    for (index, amount) in amounts.into_iter().enumerate() {
+        if index > 0 {
+            ctx.executor.close_period(&company_id, &1u32);
+            ctx.executor.create_period(&company_id);
+        }
+        let (a, b, c, n) = proof(&env, 20 + index as u8);
+        ctx.executor.execute_payment(
+            &company_id,
+            &employee,
+            &amount,
+            &a,
+            &b,
+            &c,
+            &n,
+            &((index + 1) as u32),
+        );
+    }
+
+    assert_eq!(ctx.executor.get_asset_decimals(&ctx.token_id), 18);
+    assert_eq!(ctx.executor.get_total_paid(&company_id), expected_total);
+    assert_eq!(ctx.token.balance(&employee), expected_total);
+    assert_eq!(ctx.token.balance(&treasury), 0);
+}
+
+#[test]
 fn test_execute_batch_rejects_mismatched_decimals_without_partial_state_changes() {
     let env = Env::default();
     let ctx = setup(&env);
