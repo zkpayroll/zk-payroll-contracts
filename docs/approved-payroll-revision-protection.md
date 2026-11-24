@@ -37,6 +37,8 @@ approvals.
 | `submit_draft_approval(signer, draft_id, protected_content_hash)` | Any signer | Records one approval against the revision identified by the supplied hash. Advances the stage; locks once `required_approvals` is reached. |
 | `get_draft_approval_state(draft_id)` | Anyone | Read-only: the current `MultiStageApproval`, or `None`. |
 | `amend_draft_with_rollback(admin, draft_id, new_total_amount, new_employee_count, new_obligation_root, new_metadata_hash)` | Admin | Re-binds the tracker to the revised protected fields and rolls approvals back when the hash changes. |
+| `get_draft_revision_head(draft_id)` / `get_draft_revision_record(draft_id, revision)` | Anyone | Read-only ancestry queries. Existing trackers without lineage metadata appear as revision 1. |
+| `amend_draft_from_revision(admin, draft_id, expected_parent_revision, ...)` | Admin | Checked amendment that rejects stale parent revisions with `StaleParentRevision` before any write. |
 
 ## Revision protection rules
 
@@ -54,6 +56,10 @@ rather than reusing approvals: when the new protected fields hash differently,
 the tracker is re-bound to the new revision and `current_approvals`,
 `current_stage`, `is_locked`, and the signer list are reset. A revision that
 leaves the protected fields unchanged keeps the existing approvals.
+Each protected-content change appends a revision record linked to its parent
+revision and hash. The invalidation reason is recorded as the generic
+`ProtectedContentChanged` value, without identifying which private payroll
+field changed.
 
 ## Storage key
 
@@ -62,6 +68,9 @@ a **separate enum** from `DataKey`: `DataKey` is already at the Soroban
 contract-spec ceiling of 50 union cases, so this feature is keyed on its own
 enum to leave every existing storage key — and the
 data already persisted by deployed contracts — untouched.
+Revision lineage is stored separately under `DraftRevisionKey`. A tracker
+created before lineage support is lazily represented as revision 1; its
+original timestamp is unknown and remains `None` in the synthesized record.
 
 ## Event surface
 
@@ -73,15 +82,29 @@ topics = ( Symbol("payroll"), Symbol("approvals_rolled_back") )
 data   = ( draft_id: u64 )
 ```
 
+The additive `approval_invalidation_recorded` event records the ancestry edge
+and generic invalidation reason while preserving the original event shape:
+
+```text
+topics = ( Symbol("payroll"), Symbol("approval_invalidation_recorded") )
+data   = ( draft_id: u64, parent_revision: u64, revision: u64,
+           reason: ApprovalInvalidationReason )
+```
+
+The event and typed errors contain no protected values, employee data, or proof
+material. See [Payroll Upgrade Compatibility](../contracts/payroll/UPGRADE_COMPATIBILITY.md)
+for the storage and API compatibility rules.
+
 ## QA coverage
 
 - `contracts/payroll/tests/approval_rollback.rs` (5 tests) — multi-stage flow,
   stale-hash rejection, rollback on protected-field edits, duplicate signer,
   and approval-after-lock.
-- `contracts/payroll/tests/approved_revision_protection.rs` (6 tests) — lock at
-  threshold, unchanged revision keeps approvals, changed revision invalidates
-  the old hash, zero `required_approvals` rejected, approving an unknown draft
-  rejected, and non-admin initialisation/amendment rejected.
+- `contracts/payroll/tests/approved_revision_protection.rs` — lock at threshold,
+  unchanged revision keeps approvals, changed revision invalidates the old hash,
+  ancestry links, stale-parent rejection, zero `required_approvals` rejected,
+  approving an unknown draft rejected, and non-admin initialisation/amendment
+  rejected.
 
 ```bash
 cargo test -p payroll --test approval_rollback

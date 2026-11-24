@@ -803,6 +803,46 @@ pub enum ApprovalInvalidationError {
     ApprovalNotInitialized = 8406,
     /// The new protected fields equal the current revision; nothing to invalidate.
     NoRevisionChange = 8407,
+    /// The caller's expected parent revision is no longer current.
+    StaleParentRevision = 8408,
+    /// Stored revision ancestry does not match the approval tracker.
+    RevisionAncestryMismatch = 8409,
+    /// The draft revision counter cannot be incremented safely.
+    RevisionCounterExhausted = 8410,
+}
+
+/// Payload-free reason recorded when an approval revision is invalidated.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ApprovalInvalidationReason {
+    ProtectedContentChanged = 1,
+}
+
+/// One node in a draft's append-only protected-content revision lineage.
+///
+/// Hashes identify revisions without storing payroll values. Legacy revision
+/// records may have no timestamp because their original creation time was not
+/// persisted by earlier contract versions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftRevisionRecord {
+    pub draft_id: u64,
+    pub revision: u64,
+    pub parent_revision: Option<u64>,
+    pub parent_hash: Option<BytesN<32>>,
+    pub content_hash: BytesN<32>,
+    pub invalidation_reason: Option<ApprovalInvalidationReason>,
+    pub recorded_at: Option<u64>,
+}
+
+/// Separate namespace for revision lineage so existing approval storage keys
+/// and value schemas remain unchanged during upgrades.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftRevisionKey {
+    Head(u64),
+    Revision(u64, u64),
 }
 
 /// Validated, read-only inputs for a draft amendment. Built by
@@ -811,6 +851,8 @@ struct AmendmentPreflight {
     approval: signing::MultiStageApproval,
     new_hash: BytesN<32>,
     hash_changed: bool,
+    current_revision: DraftRevisionRecord,
+    next_revision: Option<DraftRevisionRecord>,
 }
 
 // ── Issue #342: dispute freeze/thaw controls ─────────────────────────────────
@@ -10357,15 +10399,60 @@ impl Payroll {
             &obligation_root,
             &metadata_hash,
         );
+        let previous_approval: Option<signing::MultiStageApproval> = e
+            .storage()
+            .persistent()
+            .get(&ApprovalKey::DraftApproval(draft_id));
+        let current_revision = previous_approval.as_ref().map(|previous| {
+            Self::current_draft_revision_record(&e, draft_id, previous)
+                .unwrap_or_else(|_| panic!("Draft revision ancestry is inconsistent"))
+        });
+        let next_revision = match current_revision.as_ref() {
+            Some(current) if current.content_hash != protected_content_hash => Some(
+                Self::next_draft_revision_record(
+                    &e,
+                    current,
+                    protected_content_hash.clone(),
+                    ApprovalInvalidationReason::ProtectedContentChanged,
+                )
+                .unwrap_or_else(|_| panic!("Draft revision counter cannot be advanced")),
+            ),
+            _ => None,
+        };
         let approval = signing::init_multi_stage_approval(
             &e,
             draft_id,
-            protected_content_hash,
+            protected_content_hash.clone(),
             required_approvals,
         );
         e.storage()
             .persistent()
             .set(&ApprovalKey::DraftApproval(draft_id), &approval);
+
+        match (current_revision, next_revision) {
+            (Some(current), Some(next)) => {
+                Self::store_draft_revision_record(&e, &current, &next);
+                Self::emit_approval_invalidation(&e, &current, &next);
+            }
+            (Some(current), None) => {
+                let key = DraftRevisionKey::Revision(draft_id, current.revision);
+                if !e.storage().persistent().has(&key) {
+                    Self::store_first_draft_revision_record(&e, &current);
+                }
+            }
+            (None, _) => {
+                let first = DraftRevisionRecord {
+                    draft_id,
+                    revision: 1,
+                    parent_revision: None,
+                    parent_hash: None,
+                    content_hash: protected_content_hash,
+                    invalidation_reason: None,
+                    recorded_at: Some(e.ledger().timestamp()),
+                };
+                Self::store_first_draft_revision_record(&e, &first);
+            }
+        }
         approval
     }
 
@@ -10430,6 +10517,185 @@ impl Payroll {
             .get(&ApprovalKey::DraftApproval(draft_id))
     }
 
+    /// Return the current revision number for a draft, if its approval tracker
+    /// exists. Legacy trackers without lineage metadata are viewed as revision 1.
+    pub fn get_draft_revision_head(e: Env, draft_id: u64) -> Option<u64> {
+        e.storage()
+            .persistent()
+            .get(&DraftRevisionKey::Head(draft_id))
+            .or_else(|| {
+                e.storage()
+                    .persistent()
+                    .has(&ApprovalKey::DraftApproval(draft_id))
+                    .then_some(1)
+            })
+    }
+
+    /// Read one protected-content revision record without exposing payroll values.
+    /// A legacy tracker without revision metadata is returned as an unstamped
+    /// revision 1 until its lineage is first extended.
+    pub fn get_draft_revision_record(
+        e: Env,
+        draft_id: u64,
+        revision: u64,
+    ) -> Option<DraftRevisionRecord> {
+        if let Some(record) = e
+            .storage()
+            .persistent()
+            .get(&DraftRevisionKey::Revision(draft_id, revision))
+        {
+            return Some(record);
+        }
+        if revision != 1
+            || e.storage()
+                .persistent()
+                .has(&DraftRevisionKey::Head(draft_id))
+        {
+            return None;
+        }
+        let approval: signing::MultiStageApproval = e
+            .storage()
+            .persistent()
+            .get(&ApprovalKey::DraftApproval(draft_id))?;
+        Some(DraftRevisionRecord {
+            draft_id,
+            revision: 1,
+            parent_revision: None,
+            parent_hash: None,
+            content_hash: approval.protected_content_hash,
+            invalidation_reason: None,
+            recorded_at: None,
+        })
+    }
+
+    fn current_draft_revision_record(
+        e: &Env,
+        draft_id: u64,
+        approval: &signing::MultiStageApproval,
+    ) -> Result<DraftRevisionRecord, ApprovalInvalidationError> {
+        let head: Option<u64> = e
+            .storage()
+            .persistent()
+            .get(&DraftRevisionKey::Head(draft_id));
+        let current = match head {
+            Some(revision) => e
+                .storage()
+                .persistent()
+                .get::<DraftRevisionKey, DraftRevisionRecord>(
+                    &DraftRevisionKey::Revision(draft_id, revision),
+                )
+                .ok_or(ApprovalInvalidationError::RevisionAncestryMismatch)?,
+            None => DraftRevisionRecord {
+                draft_id,
+                revision: 1,
+                parent_revision: None,
+                parent_hash: None,
+                content_hash: approval.protected_content_hash.clone(),
+                invalidation_reason: None,
+                recorded_at: None,
+            },
+        };
+        if current.draft_id != draft_id
+            || current.revision != head.unwrap_or(1)
+            || current.content_hash != approval.protected_content_hash
+        {
+            return Err(ApprovalInvalidationError::RevisionAncestryMismatch);
+        }
+        let parent_is_consistent = match (current.parent_revision, current.parent_hash.as_ref()) {
+            (None, None) => current.revision == 1 && current.invalidation_reason.is_none(),
+            (Some(parent_revision), Some(parent_hash)) => {
+                if parent_revision.checked_add(1) != Some(current.revision)
+                    || current.invalidation_reason.is_none()
+                {
+                    false
+                } else {
+                    e.storage()
+                        .persistent()
+                        .get::<DraftRevisionKey, DraftRevisionRecord>(
+                            &DraftRevisionKey::Revision(draft_id, parent_revision),
+                        )
+                        .is_some_and(|parent| {
+                            parent.draft_id == draft_id
+                                && parent.revision == parent_revision
+                                && parent.content_hash == *parent_hash
+                        })
+                }
+            }
+            _ => false,
+        };
+        if !parent_is_consistent {
+            return Err(ApprovalInvalidationError::RevisionAncestryMismatch);
+        }
+        Ok(current)
+    }
+
+    fn next_draft_revision_record(
+        e: &Env,
+        parent: &DraftRevisionRecord,
+        content_hash: BytesN<32>,
+        reason: ApprovalInvalidationReason,
+    ) -> Result<DraftRevisionRecord, ApprovalInvalidationError> {
+        let revision = parent
+            .revision
+            .checked_add(1)
+            .ok_or(ApprovalInvalidationError::RevisionCounterExhausted)?;
+        Ok(DraftRevisionRecord {
+            draft_id: parent.draft_id,
+            revision,
+            parent_revision: Some(parent.revision),
+            parent_hash: Some(parent.content_hash.clone()),
+            content_hash,
+            invalidation_reason: Some(reason),
+            recorded_at: Some(e.ledger().timestamp()),
+        })
+    }
+
+    fn store_first_draft_revision_record(e: &Env, record: &DraftRevisionRecord) {
+        e.storage().persistent().set(
+            &DraftRevisionKey::Revision(record.draft_id, record.revision),
+            record,
+        );
+        e.storage()
+            .persistent()
+            .set(&DraftRevisionKey::Head(record.draft_id), &record.revision);
+    }
+
+    fn store_draft_revision_record(
+        e: &Env,
+        parent: &DraftRevisionRecord,
+        record: &DraftRevisionRecord,
+    ) {
+        let parent_key = DraftRevisionKey::Revision(parent.draft_id, parent.revision);
+        if !e.storage().persistent().has(&parent_key) {
+            Self::store_first_draft_revision_record(e, parent);
+        }
+        e.storage().persistent().set(
+            &DraftRevisionKey::Revision(record.draft_id, record.revision),
+            record,
+        );
+        e.storage()
+            .persistent()
+            .set(&DraftRevisionKey::Head(record.draft_id), &record.revision);
+    }
+
+    fn emit_approval_invalidation(
+        e: &Env,
+        parent: &DraftRevisionRecord,
+        record: &DraftRevisionRecord,
+    ) {
+        let reason = record
+            .invalidation_reason
+            .expect("Invalidation reason missing from changed revision");
+        payroll_events::publish(
+            e,
+            (
+                symbol_short!("payroll"),
+                Symbol::new(e, "approval_invalidation_recorded"),
+            ),
+            (record.draft_id, parent.revision, record.revision, reason),
+        );
+    }
+
     /// Validate every precondition for a draft amendment before any write (#986).
     /// This helper is pure with respect to storage: it reads state but never
     /// mutates it, so a rejection cannot leave a partially updated tracker.
@@ -10437,6 +10703,7 @@ impl Payroll {
         e: &Env,
         admin: &Address,
         draft_id: u64,
+        expected_parent_revision: Option<u64>,
         new_total_amount: i128,
         new_employee_count: u32,
         new_obligation_root: &BytesN<32>,
@@ -10465,6 +10732,11 @@ impl Payroll {
             .persistent()
             .get(&ApprovalKey::DraftApproval(draft_id))
             .ok_or(ApprovalInvalidationError::ApprovalNotInitialized)?;
+        let current_revision =
+            Self::current_draft_revision_record(e, draft_id, &approval)?;
+        if expected_parent_revision.is_some_and(|expected| expected != current_revision.revision) {
+            return Err(ApprovalInvalidationError::StaleParentRevision);
+        }
         let new_hash = signing::compute_protected_content_hash(
             e,
             new_total_amount,
@@ -10473,10 +10745,22 @@ impl Payroll {
             new_metadata_hash,
         );
         let hash_changed = new_hash != approval.protected_content_hash;
+        let next_revision = if hash_changed {
+            Some(Self::next_draft_revision_record(
+                e,
+                &current_revision,
+                new_hash.clone(),
+                ApprovalInvalidationReason::ProtectedContentChanged,
+            )?)
+        } else {
+            None
+        };
         Ok(AmendmentPreflight {
             approval,
             new_hash,
             hash_changed,
+            current_revision,
+            next_revision,
         })
     }
 
@@ -10491,6 +10775,15 @@ impl Payroll {
             return preflight.approval;
         }
         let mut approval = preflight.approval;
+        let next_revision = preflight
+            .next_revision
+            .expect("Changed revision must have an ancestry record");
+        Self::store_draft_revision_record(
+            e,
+            &preflight.current_revision,
+            &next_revision,
+        );
+        Self::emit_approval_invalidation(e, &preflight.current_revision, &next_revision);
         approval.protected_content_hash = preflight.new_hash;
         approval.current_approvals = 0;
         approval.current_stage = 0;
@@ -10523,6 +10816,13 @@ impl Payroll {
             }
             ApprovalInvalidationError::ApprovalNotInitialized => "Draft approval not initialized",
             ApprovalInvalidationError::NoRevisionChange => "No protected revision change",
+            ApprovalInvalidationError::StaleParentRevision => "Draft parent revision is stale",
+            ApprovalInvalidationError::RevisionAncestryMismatch => {
+                "Draft revision ancestry is inconsistent"
+            }
+            ApprovalInvalidationError::RevisionCounterExhausted => {
+                "Draft revision counter cannot be advanced"
+            }
         }
     }
 
@@ -10546,6 +10846,7 @@ impl Payroll {
             &e,
             &admin,
             draft_id,
+            None,
             new_total_amount,
             new_employee_count,
             &new_obligation_root,
@@ -10575,6 +10876,37 @@ impl Payroll {
             &e,
             &admin,
             draft_id,
+            None,
+            new_total_amount,
+            new_employee_count,
+            &new_obligation_root,
+            &new_metadata_hash,
+        )?;
+        if !preflight.hash_changed {
+            return Err(ApprovalInvalidationError::NoRevisionChange);
+        }
+        admin.require_auth();
+        Ok(Self::apply_amendment(&e, draft_id, preflight))
+    }
+
+    /// Amend a draft only if `expected_parent_revision` is still its current
+    /// protected-content revision. This prevents a stale editor from replacing
+    /// a newer draft; the legacy amendment entrypoints remain available.
+    pub fn amend_draft_from_revision(
+        e: Env,
+        admin: Address,
+        draft_id: u64,
+        expected_parent_revision: u64,
+        new_total_amount: i128,
+        new_employee_count: u32,
+        new_obligation_root: BytesN<32>,
+        new_metadata_hash: BytesN<32>,
+    ) -> Result<signing::MultiStageApproval, ApprovalInvalidationError> {
+        let preflight = Self::preflight_amend_draft_with_rollback(
+            &e,
+            &admin,
+            draft_id,
+            Some(expected_parent_revision),
             new_total_amount,
             new_employee_count,
             &new_obligation_root,
