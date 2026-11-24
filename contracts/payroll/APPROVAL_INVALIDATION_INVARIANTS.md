@@ -46,7 +46,7 @@ helper (`preflight_amend_draft_with_rollback`) before any storage write, then ap
 change with at most one write via `apply_amendment`. A rejection therefore cannot leave a
 partially updated approval tracker.
 
-Errors are unit-only, append-only `ApprovalInvalidationError` codes (8401 to 8407). They
+Errors are unit-only, append-only `ApprovalInvalidationError` codes (8401 to 8410). They
 name only the failed precondition, never an amount, signer, or content hash. An unchanged
 protected revision returns `NoRevisionChange` rather than a misleading success, since
 there is nothing to invalidate. The legacy panicking API maps these codes back to its
@@ -54,6 +54,20 @@ original messages, so existing callers behave identically.
 
 **Enforcement points:** `preflight_amend_draft_with_rollback`, `apply_amendment`,
 `amend_draft_rollback_checked`.
+
+## A8: Draft revisions retain verifiable ancestry
+
+Each protected-content revision is recorded under the separate `DraftRevisionKey`
+namespace with its revision number, parent revision, parent hash, content hash,
+and optional invalidation reason. `amend_draft_from_revision` accepts an expected
+parent revision and returns `StaleParentRevision` without writes if another edit
+has already advanced the draft. Existing trackers without lineage metadata are
+treated as revision 1 and materialized when their first child revision is
+written. The `approval_invalidation_recorded` event reports only draft/revision
+identifiers and the generic `ProtectedContentChanged` reason.
+
+**Enforcement points:** `current_draft_revision_record`,
+`preflight_amend_draft_with_rollback`, `amend_draft_from_revision`.
 
 ## Test coverage
 

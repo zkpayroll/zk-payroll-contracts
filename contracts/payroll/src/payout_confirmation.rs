@@ -193,6 +193,7 @@ mod tests {
     #[test]
     fn confirmed_receipts_reconcile_out_of_order_and_can_share_one_transaction() {
         let env = Env::default();
+        // A confirmation is valid at the exact current-ledger timestamp.
         env.ledger().with_mut(|li| li.timestamp = 100);
         let first = payout(&env, 1);
         let second = payout(&env, 2);
@@ -203,6 +204,8 @@ mod tests {
             &vec![&env, confirmation(&env, second), confirmation(&env, first)],
         )
         .unwrap();
+        assert_eq!(result.run_id, 1);
+        assert_eq!(result.expected_count, 2);
         assert_eq!(result.status, ReconciliationStatus::Reconciled);
         assert_eq!(
             (
