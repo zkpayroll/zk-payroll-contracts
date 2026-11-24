@@ -495,7 +495,7 @@ fn test_query_by_employee_filters_by_auditor() {
 }
 
 #[test]
-fn test_query_by_period_filters_by_time_range() {
+fn test_adjacent_period_queries_keep_audit_entries_in_scope() {
     let (env, contract_id) = setup();
     let client = AuditModuleClient::new(&env, &contract_id);
 
@@ -511,19 +511,37 @@ fn test_query_by_period_filters_by_time_range() {
     preimage.extend_from_array(&blinding_slice);
     let stored: BytesN<32> = env.crypto().sha256(&preimage).into();
 
-    let ts = env.ledger().timestamp();
-    client.verify_commitment_with_key(
-        &auditor,
-        &stored,
-        &amount,
-        &blinding,
-        &AuditScope::EmployeeList,
-    );
+    let period_start = env.ledger().timestamp();
+    for offset in 0..3u64 {
+        env.ledger().set_timestamp(period_start + offset);
+        client.verify_commitment_with_key(
+            &auditor,
+            &stored,
+            &amount,
+            &blinding,
+            &AuditScope::EmployeeList,
+        );
+    }
 
     let company_id = Symbol::new(&env, "default");
-    let result = client.query_by_period(&company_id, &ts, &(ts + 10_000));
+    let first_period = client.query_by_period(&company_id, &period_start, &(period_start + 1));
+    let adjacent_period =
+        client.query_by_period(&company_id, &(period_start + 2), &(period_start + 3));
+    let outside_period = client.query_by_period(
+        &company_id,
+        &(period_start + 3),
+        &(period_start + 3),
+    );
 
-    assert!(!result.entries.is_empty());
+    assert_eq!(first_period.entries.len(), 2);
+    assert_eq!(first_period.entries.get(0).unwrap().timestamp, period_start);
+    assert_eq!(first_period.entries.get(1).unwrap().timestamp, period_start + 1);
+    assert_eq!(adjacent_period.entries.len(), 1);
+    assert_eq!(
+        adjacent_period.entries.get(0).unwrap().timestamp,
+        period_start + 2
+    );
+    assert!(outside_period.entries.is_empty());
 }
 
 #[test]

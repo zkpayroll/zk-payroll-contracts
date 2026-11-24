@@ -31,6 +31,16 @@ fn distinct_run_ids_are_claimed_per_employer() {
 }
 
 #[test]
+fn missing_run_identifier_lookup_returns_none_without_claiming_it() {
+    let (env, client, (company_id, admin), _) = setup();
+    let missing_ref = run_ref(&env, 0xA5);
+
+    assert_eq!(client.get_payroll_run_owner(&missing_ref), None);
+    client.claim_payroll_run_id(&company_id, &admin, &run_ref(&env, 0x5A));
+    assert_eq!(client.get_payroll_run_owner(&missing_ref), None);
+}
+
+#[test]
 #[should_panic(expected = "Payroll run identifier collides with another employer")]
 fn run_id_owned_by_another_employer_is_rejected() {
     let (env, client, (a, admin_a), (b, admin_b)) = setup();
