@@ -402,3 +402,6 @@ mod tests;
 
 #[cfg(test)]
 mod expiry_tests;
+
+#[cfg(test)]
+mod truncated_inputs_tests;
