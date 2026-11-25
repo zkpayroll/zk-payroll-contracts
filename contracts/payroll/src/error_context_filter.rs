@@ -60,6 +60,97 @@ pub enum ErrorContextFilterError {
     ValueTooLong = 2,
 }
 
+/// Returns `true` if `key` names a field whose value must never appear in
+/// externally visible error context.
+///
+/// The match is intentionally conservative: any key that could plausibly
+/// carry salary amounts, employee identifiers, or proof/commitment data is
+/// treated as sensitive. False positives only cost a redacted field; false
+/// negatives could leak payroll data, so unknown-but-suspicious keys are
+/// redacted rather than surfaced.
+///
+/// Guarantees:
+/// - Salary-related keys (`salary`, `amount`, `wage`, `compensation`, ...)
+///   are always redacted.
+/// - Employee identity keys (`employee`, `employee_id`, `address`, ...) are
+///   always redacted.
+/// - Proof/commitment keys (`proof`, `commitment`, `nullifier`, `hash`, ...)
+///   are always redacted.
+pub fn is_sensitive_context_key(key: &Symbol) -> bool {
+    // Symbols are compared against short static names. We avoid allocating
+    // strings and never echo the key itself into any error output.
+    let sensitive: [&str; 18] = [
+        "salary",
+        "amount",
+        "wage",
+        "compensation",
+        "employee",
+        "employee_id",
+        "address",
+        "recipient",
+        "proof",
+        "commitment",
+        "nullifier",
+        "hash",
+        "secret",
+        "token",
+        "balance",
+        "payroll",
+        "identity",
+        "account",
+    ];
+    for name in sensitive.iter() {
+        if key == &Symbol::new(&key.env(), name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Redact sensitive fields from an error context while preserving safe ones.
+///
+/// This is the privacy-safe entry point for error paths. It combines the
+/// structural filtering of [`filter_error_context`] with key-based redaction:
+///
+/// - Fields whose key is sensitive (see [`is_sensitive_context_key`]) are
+///   dropped and counted in `redacted_count`.
+/// - Fields whose value exceeds [`MAX_ERROR_CONTEXT_VALUE_BYTES`] are dropped
+///   and counted in `redacted_count`.
+/// - Fields beyond [`MAX_ERROR_CONTEXT_FIELDS`] are dropped and counted.
+///
+/// The returned payload never contains salary amounts, employee identifiers,
+/// or proof/commitment data, so it is safe to surface to integrators and to
+/// include in logs.
+pub fn redact_sensitive_error_context(
+    e: &Env,
+    fields: Vec<ErrorContext>,
+) -> ErrorContextFilter {
+    let mut safe = Vec::new(e);
+    let mut redacted_count = 0u32;
+
+    let limit = fields.len().min(MAX_ERROR_CONTEXT_FIELDS);
+    for i in 0..limit {
+        let field = fields.get(i).unwrap();
+        if is_sensitive_context_key(&field.key) {
+            redacted_count += 1;
+        } else if field.value.len() > MAX_ERROR_CONTEXT_VALUE_BYTES {
+            redacted_count += 1;
+        } else {
+            safe.push_back(field);
+        }
+    }
+
+    // Count any fields beyond the field limit as redacted too.
+    if fields.len() > MAX_ERROR_CONTEXT_FIELDS {
+        redacted_count += fields.len() - MAX_ERROR_CONTEXT_FIELDS;
+    }
+
+    ErrorContextFilter {
+        fields: safe,
+        redacted_count,
+    }
+}
+
 /// Filter an error context, enforcing structural bounds.
 ///
 /// Returns an `ErrorContextFilter` with only the fields that pass the

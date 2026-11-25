@@ -24,6 +24,8 @@ pub enum ApprovalQuorumError {
     ApprovalExpired = 6,
     /// The approval proposal is already fully finalized/executed.
     AlreadyExecuted = 7,
+    /// The approval references a payroll draft revision that has been superseded.
+    SupersededDraftRevision = 8,
 }
 
 /// Configuration for payroll approval quorum.
@@ -52,6 +54,8 @@ pub struct PayrollApprovalRecord {
     pub is_ready: bool,
     /// Whether execution has completed
     pub executed: bool,
+    /// Revision of the payroll draft this approval record is bound to.
+    pub draft_revision: u32,
 }
 
 /// Validates that a quorum configuration is well-formed.
@@ -73,20 +77,42 @@ pub fn initialize_approval_record(env: &Env, payroll_run_id: u64) -> PayrollAppr
         created_at: env.ledger().timestamp(),
         is_ready: false,
         executed: false,
+        draft_revision: 0,
     }
 }
 
+/// Initializes an approval record bound to a specific payroll draft revision.
+pub fn initialize_approval_record_for_revision(
+    env: &Env,
+    payroll_run_id: u64,
+    draft_revision: u32,
+) -> PayrollApprovalRecord {
+    let mut record = initialize_approval_record(env, payroll_run_id);
+    record.draft_revision = draft_revision;
+    record
+}
+
 /// Adds an approval to the record and validates quorum compliance.
+///
+/// `current_draft_revision` is the revision of the payroll draft currently in
+/// effect. If it differs from the revision the record is bound to, the draft
+/// has been superseded and the approval is rejected. The error carries no
+/// salary, employee, or proof data.
 pub fn add_approval(
     env: &Env,
     record: &mut PayrollApprovalRecord,
     config: &PayrollQuorumConfig,
     approver: Address,
+    current_draft_revision: u32,
 ) -> Result<bool, ApprovalQuorumError> {
     validate_quorum_config(config)?;
 
     if record.executed {
         return Err(ApprovalQuorumError::AlreadyExecuted);
+    }
+
+    if record.draft_revision != current_draft_revision {
+        return Err(ApprovalQuorumError::SupersededDraftRevision);
     }
 
     if config.expiration_window_secs > 0 {
@@ -167,7 +193,7 @@ mod tests {
         assert!(!record.is_ready);
 
         // First approval
-        let is_ready = add_approval(&env, &mut record, &config, approver1.clone()).unwrap();
+        let is_ready = add_approval(&env, &mut record, &config, approver1.clone(), 0).unwrap();
         assert!(!is_ready);
         assert!(!record.is_ready);
         assert_eq!(
@@ -176,7 +202,7 @@ mod tests {
         );
 
         // Second approval satisfies quorum
-        let is_ready_now = add_approval(&env, &mut record, &config, approver2.clone()).unwrap();
+        let is_ready_now = add_approval(&env, &mut record, &config, approver2.clone(), 0).unwrap();
         assert!(is_ready_now);
         assert!(record.is_ready);
         assert!(validate_quorum_met(&record, &config).is_ok());
@@ -201,16 +227,16 @@ mod tests {
 
         // Stranger fails
         assert_eq!(
-            add_approval(&env, &mut record, &config, stranger),
+            add_approval(&env, &mut record, &config, stranger, 0),
             Err(ApprovalQuorumError::UnauthorizedApprover)
         );
 
         // Authorized succeeds
-        assert!(add_approval(&env, &mut record, &config, approver1.clone()).is_ok());
+        assert!(add_approval(&env, &mut record, &config, approver1.clone(), 0).is_ok());
 
         // Duplicate fails
         assert_eq!(
-            add_approval(&env, &mut record, &config, approver1),
+            add_approval(&env, &mut record, &config, approver1, 0),
             Err(ApprovalQuorumError::DuplicateApproval)
         );
     }
@@ -232,8 +258,44 @@ mod tests {
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
         assert_eq!(
-            add_approval(&env, &mut record, &config, approver1),
+            add_approval(&env, &mut record, &config, approver1, 0),
             Err(ApprovalQuorumError::ApprovalExpired)
+        );
+    }
+
+    #[test]
+    fn test_rejects_superseded_draft_revision() {
+        let env = Env::default();
+        let approver1 = Address::generate(&env);
+        let mut approvers = Vec::new(&env);
+        approvers.push_back(approver1.clone());
+
+        let config = PayrollQuorumConfig {
+            threshold: 1,
+            approvers,
+            expiration_window_secs: 0,
+        };
+
+        let mut record = initialize_approval_record_for_revision(&env, 104, 3);
+        assert_eq!(record.draft_revision, 3);
+
+        // Current revision matches: approval accepted.
+        assert!(add_approval(&env, &mut record, &config, approver1.clone(), 3).is_ok());
+
+        // Draft superseded by a newer revision: approval rejected.
+        let mut stale = initialize_approval_record_for_revision(&env, 104, 3);
+        assert_eq!(
+            add_approval(&env, &mut stale, &config, approver1.clone(), 4),
+            Err(ApprovalQuorumError::SupersededDraftRevision)
+        );
+        assert_eq!(stale.confirmed_approvers.len(), 0);
+        assert!(!stale.is_ready);
+
+        // Boundary: revision 0 record rejects a bumped revision of 1.
+        let mut zero = initialize_approval_record(&env, 105);
+        assert_eq!(
+            add_approval(&env, &mut zero, &config, approver1, 1),
+            Err(ApprovalQuorumError::SupersededDraftRevision)
         );
     }
 }

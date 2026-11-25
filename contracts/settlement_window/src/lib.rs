@@ -579,6 +579,51 @@ impl SettlementWindowContract {
     }
 
     // -----------------------------------------------------------------------
+    // Settlement timeout recovery boundaries (#1093)
+    // -----------------------------------------------------------------------
+
+    /// Return the inclusive lower and upper recovery bounds for a period.
+    ///
+    /// Recovery is permitted only on the closed interval
+    /// `[execute_at, grace_until]`. Before `execute_at` there is nothing to
+    /// recover, and after `grace_until` the period must expire instead of being
+    /// recovered. Returns `(lower, upper)` as Unix seconds; only timing metadata
+    /// is exposed — never salary, employee, or proof data.
+    pub fn get_recovery_bounds(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+    ) -> Result<(u64, u64), SettlementError> {
+        let period = Self::load_period(&env, company_id, period_id)?;
+        Ok((period.execute_at, period.grace_until))
+    }
+
+    /// Check whether timeout recovery is allowed for the period right now.
+    ///
+    /// Recovery is a read-only eligibility check: it never mutates state, so it
+    /// is safe to retry. It succeeds only while the current ledger time is
+    /// within the inclusive recovery bounds `[execute_at, grace_until]` and the
+    /// period has not been finalized. Errors are sanitized `SettlementError`
+    /// variants and carry no payroll-sensitive data.
+    pub fn check_recovery_allowed(
+        env: Env,
+        company_id: u64,
+        period_id: u32,
+    ) -> Result<(), SettlementError> {
+        let period = Self::load_period(&env, company_id, period_id)?;
+        Self::require_not_finalized(&period)?;
+
+        let now = env.ledger().timestamp();
+        if now < period.execute_at {
+            return Err(SettlementError::ExecutionWindowNotOpen);
+        }
+        if now > period.grace_until {
+            return Err(SettlementError::ExecutionWindowExpired);
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
@@ -1368,6 +1413,162 @@ mod tests {
             client.get_phase(&company_id, &1),
             Some(PeriodPhase::Pending)
         );
+    }
+
+    // ── Settlement timeout recovery boundaries (#1093) ───────────────────────
+
+    #[test]
+    fn test_recovery_bounds_expose_execute_and_grace() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 60u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        let (lower, upper) = client.get_recovery_bounds(&company_id, &1);
+        assert_eq!(lower, base + 10);
+        assert_eq!(upper, base + 50);
+    }
+
+    #[test]
+    fn test_recovery_bounds_missing_period_rejected() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+
+        let result = client.try_get_recovery_bounds(&99u64, &1);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::PeriodNotFound
+        );
+    }
+
+    #[test]
+    fn test_recovery_rejected_before_execute_at() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 61u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = base + 9);
+        let result = client.try_check_recovery_allowed(&company_id, &1);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowNotOpen
+        );
+    }
+
+    #[test]
+    fn test_recovery_allowed_on_lower_and_upper_bounds() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 62u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        // Inclusive lower bound.
+        env.ledger().with_mut(|l| l.timestamp = base + 10);
+        assert!(client.try_check_recovery_allowed(&company_id, &1).is_ok());
+
+        // Inclusive upper bound.
+        env.ledger().with_mut(|l| l.timestamp = base + 50);
+        assert!(client.try_check_recovery_allowed(&company_id, &1).is_ok());
+    }
+
+    #[test]
+    fn test_recovery_rejected_one_ledger_past_grace() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 63u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = base + 51);
+        let result = client.try_check_recovery_allowed(&company_id, &1);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::ExecutionWindowExpired
+        );
+    }
+
+    #[test]
+    fn test_recovery_rejected_once_finalized() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 64u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = base + 20);
+        client.cancel_period(&company_id, &1);
+
+        let result = client.try_check_recovery_allowed(&company_id, &1);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            SettlementError::AlreadyFinalized
+        );
+    }
+
+    #[test]
+    fn test_recovery_check_is_pure() {
+        let (env, contract_id, _admin) = setup();
+        let client = SettlementWindowContractClient::new(&env, &contract_id);
+        let base = env.ledger().timestamp();
+        let company_id = 65u64;
+
+        client.create_period(
+            &company_id,
+            &base,
+            &(base + 10),
+            &(base + 50),
+            &(base + 100),
+        );
+        env.ledger().with_mut(|l| l.timestamp = base + 20);
+
+        let before = client.get_period(&company_id, &1).unwrap();
+        for _ in 0..3 {
+            assert!(client.try_check_recovery_allowed(&company_id, &1).is_ok());
+        }
+        let after = client.get_period(&company_id, &1).unwrap();
+
+        assert_eq!(after.phase, before.phase);
+        assert_eq!(after.transitioned_at, before.transitioned_at);
+        assert_eq!(client.get_next_period_id(&company_id), 2);
     }
 
     #[test]

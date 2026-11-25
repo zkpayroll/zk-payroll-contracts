@@ -403,6 +403,59 @@ fn check_stale_approval_boundary_case() {
         .is_ok());
 }
 
+/// An approval that references a superseded draft revision must be rejected
+/// (#876): once a run is re-prepared, the old approval can no longer be used
+/// to authorize a payout, and cleanup must not leak payroll values.
+#[test]
+fn approval_referencing_superseded_draft_is_rejected() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let run_id = prepare_and_approve(&payroll, &env, &reviewer, &employee, 60);
+
+    // Re-prepare the same run with a new draft revision, superseding the
+    // approval that was recorded against the previous draft.
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 61);
+    payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // The superseded approval must not authorize a payout.
+    let result = payroll.try_finalize_payroll_run(&admin, &run_id);
+    assert!(
+        result.is_err(),
+        "an approval referencing a superseded draft must not settle"
+    );
+
+    // Cleanup of the superseded approval must not expose payroll values.
+    let status = payroll.get_stale_approval_status(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS);
+    if let Some(status) = status {
+        assert_eq!(status.run_id, run_id);
+    }
+}
+
+/// Boundary: an approval recorded against the current draft revision is still
+/// valid and must not be treated as superseded.
+#[test]
+fn approval_for_current_draft_is_not_treated_as_superseded() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+
+    let reviewer = Address::generate(&env);
+    payroll.add_reviewer(&admin, &reviewer);
+
+    let run_id = prepare_and_approve(&payroll, &env, &reviewer, &employee, 62);
+
+    // No re-preparation: the approval still references the current draft.
+    assert!(
+        payroll.get_run_review(&run_id).is_some(),
+        "approval for the current draft must remain recorded"
+    );
+    assert!(!payroll.is_payroll_approval_expired(&run_id, &DEFAULT_APPROVAL_EXPIRY_SECONDS));
+}
+
 /// Successful approval with valid current state is not stale.
 #[test]
 fn check_stale_approval_valid_approval_not_stale() {

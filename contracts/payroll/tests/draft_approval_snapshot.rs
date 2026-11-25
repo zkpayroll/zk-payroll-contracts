@@ -241,6 +241,86 @@ fn verify_and_release_require_a_locked_snapshot() {
 }
 
 #[test]
+fn approval_on_superseded_revision_is_rejected() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // Approve the draft at its current revision, then supersede it via amendment.
+    let approval = ctx.client.init_draft_approval(
+        &ctx.admin,
+        &ctx.draft_id,
+        &TOTAL,
+        &EMPLOYEES,
+        &digest(&env, 0x11),
+        &digest(&env, 0x22),
+        &2,
+    );
+    let stale_hash = approval.protected_content_hash;
+    ctx.client
+        .amend_run_draft(&ctx.admin, &ctx.draft_id, &1_100, &EMPLOYEES);
+
+    // Approvals referencing the superseded revision must not count toward quorum.
+    let signer = Address::generate(&env);
+    assert!(ctx
+        .client
+        .try_submit_draft_approval(&signer, &ctx.draft_id, &stale_hash)
+        .is_err());
+    assert_eq!(
+        ctx.client
+            .try_lock_draft_approval_snapshot(&ctx.admin, &ctx.draft_id),
+        Err(Ok(DraftSnapshotError::ApprovalQuorumNotMet))
+    );
+    assert!(!ctx.client.is_draft_snapshot_locked(&ctx.draft_id));
+}
+
+#[test]
+fn approval_on_current_revision_succeeds() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    ctx.client
+        .amend_run_draft(&ctx.admin, &ctx.draft_id, &1_100, &EMPLOYEES);
+
+    // Fresh approvals bound to the current revision reach quorum and lock.
+    let hash = approve(&ctx, 2);
+    let snapshot = ctx
+        .client
+        .lock_draft_approval_snapshot(&ctx.admin, &ctx.draft_id);
+    assert_eq!(snapshot.protected_content_hash, hash);
+    assert_eq!(snapshot.total_amount, 1_100);
+    assert!(ctx.client.is_draft_snapshot_locked(&ctx.draft_id));
+}
+
+#[test]
+fn approval_at_exact_revision_boundary_is_accepted() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // Approve at the current revision without any intervening amendment.
+    let approval = ctx.client.init_draft_approval(
+        &ctx.admin,
+        &ctx.draft_id,
+        &TOTAL,
+        &EMPLOYEES,
+        &digest(&env, 0x11),
+        &digest(&env, 0x22),
+        &2,
+    );
+    let current_hash = approval.protected_content_hash;
+    let signer = Address::generate(&env);
+    ctx.client
+        .submit_draft_approval(&signer, &ctx.draft_id, &current_hash);
+
+    // The boundary revision (no supersession) still counts toward quorum.
+    let state = ctx
+        .client
+        .get_draft_approval_state(&ctx.draft_id)
+        .expect("tracker kept");
+    assert_eq!(state.current_approvals, 1);
+    assert!(!state.is_locked);
+}
+
+#[test]
 fn verify_detects_draft_drift_written_outside_the_guarded_paths() {
     let env = Env::default();
     let ctx = setup(&env);

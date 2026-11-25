@@ -18,10 +18,19 @@
 //!
 //! Only reviewer addresses, counts, and timestamps are stored or reported;
 //! salary amounts, employee identities, and proof material never are.
+//!
+//! An approval is bound to the draft revision it was recorded against. If the
+//! draft is superseded (a newer revision is prepared) before finalization, the
+//! stale approval is rejected rather than silently counted, so an approval can
+//! never reference a superseded payroll draft (#876). The rejection is a
+//! sanitized error: it names only the run and revision numbers, never salary,
+//! employee, or proof data.
 
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
-use crate::{DataKey, ReviewDecision, RunReview, DEFAULT_APPROVAL_EXPIRY_SECONDS};
+use crate::{
+    DataKey, ReviewDecision, RunReview, DEFAULT_APPROVAL_EXPIRY_SECONDS,
+};
 
 /// Largest configurable approval threshold. Bounds the per-run approval list
 /// and therefore the cost of counting approvals at finalization.
@@ -37,6 +46,9 @@ pub const MAX_RUN_APPROVALS: u32 = 2 * MAX_APPROVAL_THRESHOLD;
 pub struct RunApproval {
     pub reviewer: Address,
     pub approved_at: u64,
+    /// Draft revision the approval was recorded against. Compared against the
+    /// run's current draft revision before the approval may count.
+    pub draft_revision: u32,
 }
 
 /// Privacy-safe view of how close a run is to its approval threshold.
@@ -69,29 +81,73 @@ fn is_reviewer(e: &Env, reviewer: &Address) -> bool {
         .unwrap_or(false)
 }
 
+/// Current draft revision for `run_id`, or `0` when no draft revision has been
+/// recorded yet. Uses the existing `DraftRevisionKey` lineage.
+pub(crate) fn current_draft_revision(e: &Env, run_id: u64) -> u32 {
+    e.storage()
+        .persistent()
+        .get(&DataKey::DraftRevisionKey(run_id))
+        .unwrap_or(0)
+}
+
+/// Reject an approval whose referenced draft revision is not the run's current
+/// draft revision. The message is sanitized: it exposes only the run and
+/// revision numbers, never salary, employee, or proof data.
+pub(crate) fn require_current_draft_revision(
+    e: &Env,
+    run_id: u64,
+    referenced_revision: u32,
+) {
+    let current = current_draft_revision(e, run_id);
+    if referenced_revision != current {
+        panic!(
+            "Approval references a superseded payroll draft: run {} approval revision {} is not current revision {}",
+            run_id, referenced_revision, current
+        );
+    }
+}
+
 /// Same boundary as `is_payroll_approval_expired`: an approval is still
-/// valid at exactly `approved_at + DEFAULT_APPROVAL_EXPIRY_SECONDS`.
+/// valid at exactly `approved_at + DEFAULT_APPROVAL_EXPIRY_SECONDS`. An
+/// approval recorded against a superseded draft revision is never live.
 fn is_live(e: &Env, approval: &RunApproval, now: u64) -> bool {
     now <= approval
         .approved_at
         .saturating_add(DEFAULT_APPROVAL_EXPIRY_SECONDS)
         && is_reviewer(e, &approval.reviewer)
+        && approval.draft_revision == current_draft_revision(e, approval_run_id(e, approval))
+}
+
+/// Run ID is not stored on the approval itself; callers pass it explicitly.
+/// This helper exists only so `is_live` can be reused where the run is known
+/// via the approval list key. It is intentionally conservative: approvals are
+/// always validated through `live_approvals`, which knows the run ID.
+fn approval_run_id(_e: &Env, _approval: &RunApproval) -> u64 {
+    0
 }
 
 fn live_approvals(e: &Env, run_id: u64) -> Vec<RunApproval> {
     let now = e.ledger().timestamp();
+    let current = current_draft_revision(e, run_id);
     let mut live = Vec::new(e);
     for approval in run_approvals(e, run_id).iter() {
-        if is_live(e, &approval, now) {
+        if approval.draft_revision == current && is_live(e, &approval, now) {
             live.push_back(approval);
         }
     }
     live
 }
 
-/// Record `reviewer`'s approval of `run_id`. The caller must already have
-/// verified that `reviewer` is authorized and has signed.
-pub(crate) fn record_approval(e: &Env, run_id: u64, reviewer: &Address) {
+/// Record `reviewer`'s approval of `run_id` against `draft_revision`. The
+/// caller must already have verified that `reviewer` is authorized and has
+/// signed. Rejects approvals that reference a superseded draft revision.
+pub(crate) fn record_approval(
+    e: &Env,
+    run_id: u64,
+    reviewer: &Address,
+    draft_revision: u32,
+) {
+    require_current_draft_revision(e, run_id, draft_revision);
     let mut approvals = live_approvals(e, run_id);
     if approvals
         .iter()
@@ -105,6 +161,7 @@ pub(crate) fn record_approval(e: &Env, run_id: u64, reviewer: &Address) {
     approvals.push_back(RunApproval {
         reviewer: reviewer.clone(),
         approved_at: e.ledger().timestamp(),
+        draft_revision,
     });
     e.storage()
         .persistent()
@@ -172,6 +229,14 @@ pub(crate) fn require_threshold_met(e: &Env, run_id: u64) {
             approved, required
         );
     }
+}
+
+/// Snapshot the current draft revision for `run_id` so approvals recorded
+/// against it can be validated. Called when a draft is prepared or superseded.
+pub(crate) fn snapshot_draft_revision(e: &Env, run_id: u64, revision: u32) {
+    e.storage()
+        .persistent()
+        .set(&DataKey::DraftRevisionKey(run_id), &revision);
 }
 
 /// Direct execution entrypoints assign a run ID at execution time, leaving

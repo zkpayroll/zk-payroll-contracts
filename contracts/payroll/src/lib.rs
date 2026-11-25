@@ -256,6 +256,14 @@ pub use recurring_schedule::{
     ScheduleTransitionError,
 };
 
+/// Settlement timeout recovery boundaries (#1093).
+pub mod settlement_timeout_recovery;
+pub use settlement_timeout_recovery::{
+    assert_settlement_recovery_allowed, check_settlement_recovery, SettlementRecoveryBoundary,
+    SettlementRecoveryError, SettlementRecoveryOutcome, SettlementRecoveryPhase,
+    MAX_SETTLEMENT_RECOVERY_WINDOW_SECONDS, SETTLEMENT_TIMEOUT_SECONDS,
+};
+
 const MAX_BATCH: u32 = 50;
 /// Minimum seconds between draft edits before emitting a concurrent-edit warning (#790).
 const DRAFT_CONCURRENT_EDIT_WARNING_WINDOW_SECS: u64 = 300;
@@ -17700,6 +17708,123 @@ mod tests {
                 Some(2)
             );
         });
+    }
+
+    // ── Settlement timeout recovery boundaries (#1093) ───────────────────────
+
+    #[test]
+    fn test_settlement_recovery_rejects_unknown_run() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, _employee) =
+            setup_simple_payroll(&env);
+
+        let result = payroll_client.try_recover_timed_out_settlement(&admin, &999u64);
+        assert!(result.is_err(), "unknown runs must not be recoverable");
+    }
+
+    #[test]
+    fn test_settlement_recovery_rejects_run_before_timeout() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 260);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        // Still inside the settlement timeout window: recovery must be refused.
+        let result = payroll_client.try_recover_timed_out_settlement(&admin, &run_id);
+        assert!(result.is_err(), "recovery before timeout must be rejected");
+    }
+
+    #[test]
+    fn test_settlement_recovery_rejects_non_admin() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 261);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += SETTLEMENT_TIMEOUT_SECONDS + 1;
+        });
+
+        let outsider = Address::generate(&env);
+        let result = payroll_client.try_recover_timed_out_settlement(&outsider, &run_id);
+        assert!(result.is_err(), "non-admin recovery must be rejected");
+    }
+
+    #[test]
+    fn test_settlement_recovery_rejects_run_past_recovery_window() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 262);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += SETTLEMENT_TIMEOUT_SECONDS + MAX_SETTLEMENT_RECOVERY_WINDOW_SECONDS + 1;
+        });
+
+        let result = payroll_client.try_recover_timed_out_settlement(&admin, &run_id);
+        assert!(result.is_err(), "recovery past the window must be rejected");
+    }
+
+    #[test]
+    fn test_settlement_recovery_success_marks_run_failed() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 263);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += SETTLEMENT_TIMEOUT_SECONDS + 1;
+        });
+
+        let outcome = payroll_client.recover_timed_out_settlement(&admin, &run_id);
+        assert_eq!(outcome.run_id, run_id);
+        assert_eq!(outcome.phase, SettlementRecoveryPhase::Recovered);
+        assert_eq!(
+            payroll_client.get_payroll_run_state(&run_id),
+            PayrollRunState::Failed
+        );
+        assert!(payroll_client.is_payroll_state_retryable(&PayrollRunState::Failed));
+    }
+
+    #[test]
+    fn test_settlement_recovery_rejects_terminal_run() {
+        let env = Env::default();
+        let (payroll_client, admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+        let nonce = test_nonce(&env, 264);
+        let run_id = payroll_client
+            .prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+        payroll_client.cancel_payroll_run_with_reason(
+            &admin,
+            &run_id,
+            &Symbol::new(&env, "operator_cancel"),
+        );
+
+        env.ledger().with_mut(|li| {
+            li.timestamp += SETTLEMENT_TIMEOUT_SECONDS + 1;
+        });
+
+        let result = payroll_client.try_recover_timed_out_settlement(&admin, &run_id);
+        assert!(result.is_err(), "terminal runs must not be recovered");
     }
 
     #[test]

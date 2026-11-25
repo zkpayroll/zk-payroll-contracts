@@ -709,6 +709,156 @@ fn preflight_allows_both_execution_endpoints() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Settlement timeout recovery boundaries (#1093)
+//
+// Recovery (expiration of a pending run) is only permitted once the settlement
+// window has fully closed. These tests pin the exact boundaries and assert the
+// surfaced errors never leak salary, employee, or proof data.
+// ---------------------------------------------------------------------------
+
+/// Returns true when `debug` contains any byte sequence that could identify a
+/// sensitive payroll value (employee address, proof bytes, or salary amount).
+fn debug_leaks_sensitive_data(debug: &str, employee: &Address, amount: i128) -> bool {
+    // Employee addresses render as `G...`/`C...` strkeys; a substring match on
+    // the rendered address is sufficient to catch accidental inclusion.
+    let employee_str = format!("{employee:?}");
+    if debug.contains(&employee_str) {
+        return true;
+    }
+    // Salary amounts must never appear verbatim in error output.
+    if debug.contains(&amount.to_string()) {
+        return true;
+    }
+    // Proof payloads are 256 zero bytes in the fixtures; a run of zero bytes
+    // in the debug rendering would indicate the proof leaked into the error.
+    if debug.contains("0u8; 256") || debug.contains("BytesN(256)") {
+        return true;
+    }
+    false
+}
+
+#[test]
+fn recovery_within_window_is_rejected_and_error_is_sanitized() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let amount = 10_000i128;
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, amount);
+    let nonce = test_nonce(&env, 30);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &amount, &nonce, &None);
+
+    // Still inside the execution window: recovery must be rejected.
+    set_timestamp(&env, EXEC_END);
+    let result = payroll.try_expire_pending_run(&admin, &run_id);
+    let err = result.expect_err("recovery inside window must fail");
+    let debug = format!("{err:?}");
+    assert!(
+        !debug_leaks_sensitive_data(&debug, &employee, amount),
+        "recovery error leaked sensitive payroll data: {debug}"
+    );
+    assert!(payroll.get_pending_run(&run_id).is_some());
+}
+
+#[test]
+fn recovery_before_lower_bound_is_rejected_and_error_is_sanitized() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let amount = 10_000i128;
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, amount);
+    let nonce = test_nonce(&env, 31);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &amount, &nonce, &None);
+
+    // Before the window even opens: recovery must be rejected.
+    set_timestamp(&env, OPEN_AT);
+    let result = payroll.try_expire_pending_run(&admin, &run_id);
+    let err = result.expect_err("recovery before lower bound must fail");
+    let debug = format!("{err:?}");
+    assert!(
+        !debug_leaks_sensitive_data(&debug, &employee, amount),
+        "recovery error leaked sensitive payroll data: {debug}"
+    );
+    assert!(payroll.get_pending_run(&run_id).is_some());
+}
+
+#[test]
+fn recovery_after_upper_bound_succeeds() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 32);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // Strictly after close_at: recovery is permitted.
+    set_timestamp(&env, CLOSE_AT + 1);
+    payroll.expire_pending_run(&admin, &run_id);
+    assert!(payroll.get_pending_run(&run_id).is_none());
+    let status = payroll
+        .get_cancelled_batch_status(&run_id)
+        .expect("expiration record expected");
+    assert!(status.is_cancelled);
+    assert_eq!(
+        status.reason,
+        Symbol::new(&env, "settlement_window_expired")
+    );
+}
+
+#[test]
+fn recovery_exact_boundary_timestamps() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    // One tick before close_at: recovery rejected (grace still active).
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 33);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+    set_timestamp(&env, CLOSE_AT - 1);
+    assert!(payroll.try_expire_pending_run(&admin, &run_id).is_err());
+    assert!(payroll.get_pending_run(&run_id).is_some());
+
+    // Exactly at close_at: recovery succeeds (upper bound is inclusive).
+    set_timestamp(&env, CLOSE_AT);
+    payroll.expire_pending_run(&admin, &run_id);
+    assert!(payroll.get_pending_run(&run_id).is_none());
+}
+
+#[test]
+fn recovery_errors_are_stable_and_typed() {
+    let env = Env::default();
+    let (payroll, admin, _treasury, _treasury_owner, employee) = setup_payroll(&env);
+    let period = Symbol::new(&env, "period_a");
+    open_period_with_window(&payroll, &admin, &period);
+
+    set_timestamp(&env, EXEC_START);
+    let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 10_000);
+    let nonce = test_nonce(&env, 34);
+    let run_id = payroll.prepare_payroll_run(&proofs, &amounts, &employees, &10_000, &nonce, &None);
+
+    // Before the close boundary the typed error is stable and carries no
+    // sensitive payload.
+    set_timestamp(&env, CLOSE_AT - 1);
+    assert_eq!(
+        payroll.try_expire_pending_run(&admin, &run_id),
+        Err(Ok(
+            PayrollPeriodBoundaryError::CloseBoundaryNotReached.into()
+        ))
+    );
+}
+
 #[test]
 fn boundary_errors_are_stable_across_execution_entrypoints() {
     let env = Env::default();

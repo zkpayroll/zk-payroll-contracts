@@ -22,6 +22,21 @@ reaches quorum, the admin can lock a snapshot of exactly what was approved.
    discards every collected approval, so a corrected draft must be approved
    again before it can be re-locked.
 
+## Revision binding
+
+An approval is bound to the draft revision it was collected against. Each
+approval records the draft's revision (its `amendment_count` and protected
+content hash) at submission time, and any operation that consumes an approval
+(for example locking a snapshot or executing an approved draft) re-checks that
+binding.
+
+If the draft has been amended since an approval was collected, the approval
+references a superseded revision and is rejected with
+`DraftSnapshotError::ApprovalReferencesSupersededDraft` (code `6490`). The
+error carries no draft content, amounts, or employee data; it only signals that
+the approval is stale. Re-run `init_draft_approval` and collect fresh approvals
+against the current revision before retrying.
+
 `get_draft_approval_snapshot(draft_id)` and `is_draft_snapshot_locked(draft_id)`
 are read-only views.
 
@@ -39,6 +54,7 @@ are read-only views.
 | 6487 | `SnapshotNotFound` | No snapshot is locked for this draft. |
 | 6488 | `DraftChangedSinceSnapshot` | Draft content drifted; do not execute. |
 | 6489 | `ApprovalChangedSinceSnapshot` | Approval tracker drifted; re-run approval. |
+| 6490 | `ApprovalReferencesSupersededDraft` | Approval was collected against a superseded draft revision; re-run approval. |
 
 ## Events
 
