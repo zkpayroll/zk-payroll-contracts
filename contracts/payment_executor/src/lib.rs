@@ -109,6 +109,11 @@ pub enum PaymentError {
     /// A recipient appears more than once in a payout batch. The error does
     /// not include the recipient address or payout amount.
     DuplicateRecipientPosition = 21,
+    /// The final gross payout total exceeds the treasury funds available for
+    /// the company. No payment state is mutated when this guard fires.
+    PayoutTotalExceedsTreasury = 22,
+    /// The batch payout total overflowed while being accumulated.
+    PayoutTotalOverflow = 23,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -1097,6 +1102,27 @@ impl PaymentExecutor {
             .unwrap_or(MAX_PAYOUT_BATCH_SIZE);
         if count > effective_limit {
             return Err(PaymentError::BatchTooLarge);
+        }
+
+        // Validate the complete payout total before executing the first
+        // payment. This prevents a later underfunded recipient from leaving a
+        // partially settled batch and keeps the failure privacy-safe.
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company = registry.get_company(&company_id);
+        let mut payout_total = 0i128;
+        for amount in amounts.iter() {
+            payout_total = payout_total
+                .checked_add(amount)
+                .ok_or(PaymentError::PayoutTotalOverflow)?;
+        }
+        let token_client = token::Client::new(&env, &addresses.token);
+        if payout_total > token_client.balance(&company.treasury) {
+            return Err(PaymentError::PayoutTotalExceedsTreasury);
         }
 
         let mut recipients = soroban_sdk::Vec::new(&env);
