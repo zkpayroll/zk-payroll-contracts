@@ -99,7 +99,7 @@ fn require_admin(e: &Env, admin: &Address) -> Result<(), PaymentAssetCompatibili
     Ok(())
 }
 
-fn expected_decimals(e: &Env) -> Option<u32> {
+pub(crate) fn expected_decimals(e: &Env) -> Option<u32> {
     e.storage()
         .persistent()
         .get(&PaymentAssetKey::ExpectedDecimals)

@@ -811,7 +811,8 @@ Privacy-safe read-only preflight: returns no commitment values.
 - `panic!("Array length mismatch")`
 - `panic!("Missing payroll proof: one proof is required per payment")`
 - `panic!("Batch too large")`
-- `panic!("Expected spend mismatch: authorised X but batch totals Y")`
+- `panic!("Expected spend mismatch: the authorised total differs from the batch total")`
+- `panic!("Payout batch total overflow: amounts cannot be represented in i128")` (#1085; no values echoed)
 - `panic!("Payroll is paused")`
 - `panic!("Invalid payment proof for employee N")`
 - `panic!("Nullifier already used")`

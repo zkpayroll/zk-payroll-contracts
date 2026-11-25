@@ -96,6 +96,9 @@ pub enum PayrollFailureReason {
     /// unavailable: use `prepare_payroll_run`, collect reviewer approvals,
     /// then `finalize_payroll_run`.
     ApprovalWorkflowRequired = 23,
+    /// Aggregating the payout amounts would overflow `i128`, so the batch
+    /// total cannot be represented without losing precision (#1085).
+    PayoutTotalOverflow = 24,
 }
 
 /// Result of a dry-run preflight check for `batch_process_payroll`.

@@ -181,6 +181,13 @@ pub use cross_currency_rounding::{
     RoundingMode, RoundingSafeguardError,
 };
 
+/// Payout amount precision and rounding validation (#1085).
+pub mod payout_precision;
+pub use payout_precision::{
+    validate_pro_rata_payout, PayoutBatchAssessment, PayoutPrecisionAssessment,
+    PayoutPrecisionError, PayoutRoundingMode, MAX_PAYOUT_DECIMALS, PAYOUT_BPS_SCALE,
+};
+
 /// Scoped emergency pause recovery (#349).
 pub mod scoped_pause;
 pub use scoped_pause::{
@@ -4646,20 +4653,10 @@ impl Payroll {
             }
         }
 
-        let mut total: i128 = 0;
-        for i in 0..count {
-            let amt = amounts.get(i).unwrap();
-            if amt <= 0 {
-                panic!("Amount must be positive");
-            }
-            total += amt;
-        }
-        if total != expected_total_spend {
-            panic!(
-                "Expected spend mismatch: authorised {} but batch totals {}",
-                expected_total_spend, total
-            );
-        }
+        // Issue #1085: aggregate payouts with checked arithmetic. A batch that
+        // cannot be represented exactly is rejected before state changes, and
+        // failure messages never echo the amounts involved.
+        payout_precision::require_precise_batch_total(&e, &amounts, expected_total_spend);
 
         let addrs: ContractAddresses = e
             .storage()
@@ -4749,6 +4746,14 @@ impl Payroll {
         Self::add_locked_funds(&e, addrs.token.clone(), expected_total_spend);
 
         payroll_events::emit_run_prepared(&e, run_id, expected_total_spend);
+        // Issue #1085: report the precision check without publishing any
+        // payout amounts, employee addresses, or salary data.
+        payroll_events::emit_payout_precision_validated(
+            &e,
+            run_id,
+            payment_asset_compatibility::expected_decimals(&e),
+            e.ledger().timestamp(),
+        );
         Self::emit_treasury_balance_snapshot(&e, addrs.token, Symbol::new(&e, "run_prepared"));
 
         run_id
@@ -5281,24 +5286,12 @@ impl Payroll {
             }
         }
 
-        let mut total: i128 = 0;
-        for i in 0..count {
-            let amt = amounts.get(i).unwrap();
-            if amt <= 0 {
-                panic!("Amount must be positive");
-            }
-            total += amt;
-        }
+        // Issue #1085: checked aggregation prevents a wrapped total from
+        // matching an understated authorised spend.
+        payout_precision::require_precise_batch_total(&e, &amounts, expected_total_spend);
 
         // #514 - validate minimum payout amount threshold
         Self::validate_minimum_payout_amount(&e, &amounts);
-
-        if total != expected_total_spend {
-            panic!(
-                "Expected spend mismatch: authorised {} but batch totals {}",
-                expected_total_spend, total
-            );
-        }
 
         let addrs: ContractAddresses = e
             .storage()
@@ -5532,20 +5525,10 @@ impl Payroll {
             }
         }
 
-        let mut total: i128 = 0;
-        for i in 0..count {
-            let amt = amounts.get(i).unwrap();
-            if amt <= 0 {
-                panic!("Amount must be positive");
-            }
-            total += amt;
-        }
-        if total != expected_total_spend {
-            panic!(
-                "Expected spend mismatch: authorised {} but batch totals {}",
-                expected_total_spend, total
-            );
-        }
+        // Issue #1085: aggregate payouts with checked arithmetic. A batch that
+        // cannot be represented exactly is rejected before state changes, and
+        // failure messages never echo the amounts involved.
+        payout_precision::require_precise_batch_total(&e, &amounts, expected_total_spend);
 
         let addrs: ContractAddresses = e
             .storage()
@@ -5771,16 +5754,25 @@ impl Payroll {
 
         let mut total: i128 = 0;
         let mut any_non_positive = false;
+        let mut total_overflow = false;
         for i in 0..args.amounts.len() {
             let amt = args.amounts.get(i).unwrap();
             if amt <= 0 {
                 any_non_positive = true;
             } else {
-                total += amt;
+                // Issue #1085: report an unrepresentable batch total instead
+                // of wrapping it into a misleading expected-spend mismatch.
+                match total.checked_add(amt) {
+                    Some(next) => total = next,
+                    None => total_overflow = true,
+                }
             }
         }
         if any_non_positive {
             report.push(PayrollFailureReason::NonPositiveAmount);
+        }
+        if total_overflow {
+            report.push(PayrollFailureReason::PayoutTotalOverflow);
         }
 
         // #514 - validate minimum payout amount threshold in dry run
@@ -6035,20 +6027,10 @@ impl Payroll {
             panic!("Batch employee count exceeds maximum limit of 50");
         }
 
-        let mut total: i128 = 0;
-        for i in 0..count {
-            let amt = amounts.get(i).unwrap();
-            if amt <= 0 {
-                panic!("Amount must be positive");
-            }
-            total += amt;
-        }
-        if total != expected_total_spend {
-            panic!(
-                "Expected spend mismatch: authorised {} but batch totals {}",
-                expected_total_spend, total
-            );
-        }
+        // Issue #1085: aggregate payouts with checked arithmetic. A batch that
+        // cannot be represented exactly is rejected before state changes, and
+        // failure messages never echo the amounts involved.
+        payout_precision::require_precise_batch_total(&e, &amounts, expected_total_spend);
 
         let addrs: ContractAddresses = e
             .storage()

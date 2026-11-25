@@ -909,6 +909,27 @@ pub fn emit_minimum_payout_amount_violation(e: &Env, minimum_amount: i128) {
     );
 }
 
+/// Emitted after a payroll batch passes payout precision validation (issue #1085).
+///
+/// The payload carries only aggregate metadata: run identifier, pinned payment
+/// precision (if any), and timestamp. Individual payout amounts, salaries,
+/// employees, and proofs are deliberately omitted.
+pub fn emit_payout_precision_validated(
+    e: &Env,
+    run_id: u64,
+    decimals: Option<u32>,
+    checked_at: u64,
+) {
+    publish(
+        e,
+        (
+            payroll_topic(),
+            Symbol::new(e, "payout_precision_validated"),
+        ),
+        (run_id, decimals, checked_at),
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Pause Manager Events
 // ═════════════════════════════════════════════════════════════════════════════
