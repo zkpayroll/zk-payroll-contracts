@@ -274,7 +274,7 @@ pub use pay_group_effective_date::{
 pub mod payout_confirmation;
 pub use payout_confirmation::{
     ExpectedPayout, PayoutConfirmation, PayoutConfirmationError, PayoutConfirmationStatus,
-    PayoutConfirmationValidation, PayoutReconciliation,
+    PayoutConfirmationValidation, PayoutReconciliation, require_final_recipient_settlement,
 };
 
 /// Configuration-ledger export consistency validation (#785).
