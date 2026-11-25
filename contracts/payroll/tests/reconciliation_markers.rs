@@ -12,7 +12,7 @@ fn setup() -> (Env, PayrollClient<'static>, Address, Address, Address) {
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
-    let verifier = env.register_contract(None, ProofVerifier);
+    let verifier = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(&env, &verifier);
     verifier_client.init_verifier_admin(&admin);
     verifier_client.initialize_verifier(&VerificationKey {
@@ -31,14 +31,14 @@ fn setup() -> (Env, PayrollClient<'static>, Address, Address, Address) {
         ),
     });
 
-    let commitment = env.register_contract(None, SalaryCommitmentContract);
+    let commitment = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(&env, &commitment);
     commitment_client.init_commitment_admin(&admin);
     commitment_client.store_commitment(&employee, &BytesN::from_array(&env, &[1u8; 32]));
 
-    let token = env.register_contract(None, Token);
+    let token = env.register(Token, ());
     TokenClient::new(&env, &token).mint(&treasury, &10_000);
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll = PayrollClient::new(&env, &payroll_id);
     payroll.initialize(
         &admin,

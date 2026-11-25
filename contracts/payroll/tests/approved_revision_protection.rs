@@ -13,7 +13,7 @@
 //! | `test_non_admin_cannot_init_or_amend` | Only the admin may initialise or revise a tracker |
 
 use ::token::Token;
-use payroll::{Payroll, PayrollClient};
+use payroll::{ApprovalInvalidationReason, ApprovalInvalidationError, Payroll, PayrollClient};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env};
 
@@ -34,11 +34,11 @@ fn setup() -> Ctx {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let client = PayrollClient::new(&env, &payroll_id);
     client.initialize(
         &admin,
-        &env.register_contract(None, Token),
+        &env.register(Token, ()),
         &Address::generate(&env),
         &Address::generate(&env),
         &Address::generate(&env),
@@ -174,7 +174,25 @@ fn test_revision_change_invalidates_old_approval_hash() {
     assert_eq!(rolled_back.current_approvals, 0);
     assert_eq!(rolled_back.current_stage, 0);
     assert!(!rolled_back.is_locked);
+    assert!(rolled_back.signers.is_empty());
     assert_ne!(rolled_back.protected_content_hash, old_hash);
+    assert_eq!(ctx.payroll().get_draft_revision_head(&draft_id), Some(2));
+    let revision_one = ctx
+        .payroll()
+        .get_draft_revision_record(&draft_id, &1)
+        .unwrap();
+    let revision_two = ctx
+        .payroll()
+        .get_draft_revision_record(&draft_id, &2)
+        .unwrap();
+    assert_eq!(revision_one.parent_revision, None);
+    assert_eq!(revision_two.parent_revision, Some(1));
+    assert_eq!(revision_two.parent_hash, Some(old_hash.clone()));
+    assert_eq!(
+        revision_two.invalidation_reason,
+        Some(ApprovalInvalidationReason::ProtectedContentChanged)
+    );
+    assert_eq!(revision_two.content_hash, rolled_back.protected_content_hash);
 
     // An approval bound to the old revision cannot be replayed.
     let signer2 = Address::generate(&ctx.env);
@@ -185,11 +203,65 @@ fn test_revision_change_invalidates_old_approval_hash() {
 
     // The revised revision is still approvable with its new hash.
     let fresh = ctx.payroll().submit_draft_approval(
-        &signer2,
+        &signer1,
         &draft_id,
         &rolled_back.protected_content_hash,
     );
     assert_eq!(fresh.current_approvals, 1);
+    assert_eq!(fresh.signers.len(), 1);
+    assert_eq!(fresh.signers.get(0), Some(signer1));
+}
+
+#[test]
+fn test_amendment_rejects_stale_parent_revision_without_mutation() {
+    let ctx = setup();
+    let draft_id = 6u64;
+    let initial = ctx.payroll().init_draft_approval(
+        &ctx.admin,
+        &draft_id,
+        &10_000i128,
+        &2u32,
+        &digest(&ctx, 0x31),
+        &digest(&ctx, 0x32),
+        &2u32,
+    );
+    assert_eq!(ctx.payroll().get_draft_revision_head(&draft_id), Some(1));
+
+    let amended = ctx
+        .payroll()
+        .amend_draft_from_revision(
+            &ctx.admin,
+            &draft_id,
+            &1u64,
+            &12_000i128,
+            &2u32,
+            &digest(&ctx, 0x33),
+            &digest(&ctx, 0x34),
+        )
+        .unwrap();
+    assert_ne!(amended.protected_content_hash, initial.protected_content_hash);
+
+    let stale = ctx.payroll().try_amend_draft_from_revision(
+        &ctx.admin,
+        &draft_id,
+        &1u64,
+        &15_000i128,
+        &3u32,
+        &digest(&ctx, 0x35),
+        &digest(&ctx, 0x36),
+    );
+    assert_eq!(
+        stale,
+        Err(Ok(ApprovalInvalidationError::StaleParentRevision))
+    );
+    assert_eq!(ctx.payroll().get_draft_revision_head(&draft_id), Some(2));
+    assert_eq!(
+        ctx.payroll()
+            .get_draft_approval_state(&draft_id)
+            .unwrap()
+            .protected_content_hash,
+        amended.protected_content_hash
+    );
 }
 
 // ── Failure paths ────────────────────────────────────────────────────────────

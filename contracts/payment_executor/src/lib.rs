@@ -1,4 +1,6 @@
 #![no_std]
+// Soroban generates clients for the established positional contract ABI.
+#![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
 use alloc::format;
@@ -105,6 +107,18 @@ pub enum PaymentError {
     PayoutExceedsReservedFunds = 20,
     /// Invalid reserved funds configuration (e.g. negative amount) (issue #902).
     InvalidReservedAmount = 21,
+    /// The payout recipient cannot be resolved to a payable employee: it is
+    /// not active for this company, has no active salary commitment, or is
+    /// the company treasury or this contract. Never includes address or amount.
+    RecipientUnresolved = 20,
+    /// A recipient appears more than once in a payout batch. The error does
+    /// not include the recipient address or payout amount.
+    DuplicateRecipientPosition = 21,
+    /// The final gross payout total exceeds the treasury funds available for
+    /// the company. No payment state is mutated when this guard fires.
+    PayoutTotalExceedsTreasury = 22,
+    /// The batch payout total overflowed while being accumulated.
+    PayoutTotalOverflow = 23,
 }
 
 /// Result of a pre-activation upgrade compatibility check.
@@ -209,6 +223,8 @@ pub enum DataKey {
 #[contract]
 pub struct PaymentExecutor;
 
+// Preserve the existing contract ABI and generated client signatures.
+#[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl PaymentExecutor {
     fn amount_to_public_input(env: &Env, amount: i128) -> BytesN<32> {
@@ -223,16 +239,18 @@ impl PaymentExecutor {
     }
 
     fn require_not_paused(env: &Env) {
-        if env.storage().persistent().has(&DataKey::PauseManager) {
-            let pm_addr: Address = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PauseManager)
-                .unwrap();
-            let pm_client = PauseManagerClient::new(env, &pm_addr);
-            if pm_client.is_paused() {
-                panic!("Payroll is paused");
-            }
+        if !env.storage().persistent().has(&DataKey::PauseManager) {
+            return;
+        }
+        let pm_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseManager)
+            .unwrap();
+        let pm_client = PauseManagerClient::new(env, &pm_addr);
+        let status = pm_client.get_pause_status();
+        if status.payroll_paused || status.treasury_paused || status.audit_paused || status.admin_paused {
+            panic!("Payroll operations are paused");
         }
     }
 
@@ -252,7 +270,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::StorageVersion, &1u32);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (
                 Symbol::new(&env, "TreasuryAssetAllowedUpdated"),
                 addresses.token.clone(),
@@ -307,7 +326,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::AllowedAsset(asset.clone()), &allowed);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "TreasuryAssetAllowedUpdated"), asset),
             (allowed, env.ledger().timestamp()),
         );
@@ -439,6 +459,10 @@ impl PaymentExecutor {
     /// Configure the decimal places for an asset token (issue #354).
     /// Required to ensure proper amount normalization and prevent decimal mismatches.
     /// Only executor admin can set this configuration.
+    ///
+    /// Decimal precision must be between 1 and 18 (inclusive). A value of 0
+    /// is rejected because it cannot represent fractional base units and would
+    /// make precision enforcement ambiguous.
     pub fn set_asset_decimals(env: Env, asset: Address, decimals: u32) {
         let admin: Address = env
             .storage()
@@ -447,6 +471,9 @@ impl PaymentExecutor {
             .expect("Executor admin not set");
         admin.require_auth();
 
+        if decimals == 0 {
+            panic!("Asset decimals must be greater than zero");
+        }
         if decimals > 18 {
             panic!("Asset decimals must not exceed 18");
         }
@@ -455,7 +482,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::AssetDecimals(asset.clone()), &decimals);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "AssetDecimalsConfigured"), asset),
             (decimals, env.ledger().timestamp()),
         );
@@ -760,6 +788,33 @@ impl PaymentExecutor {
     // -----------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
+    /// Execute a payment for a single employee in a given period.
+    ///
+    /// Records the payment, marks the employee as paid for the period,
+    /// and updates the running total. Rejected payments do not alter state.
+    ///
+    /// For batch execution with idempotency, use `execute_batch_with_receipt`
+    /// (issue #551).
+    ///
+    /// # Retry Invariants (see RETRY_INVARIANTS.md)
+    ///
+    /// **R-2: Nullifier Global Uniqueness**
+    /// Each nullifier is consumed globally (across all employees, companies,
+    /// and periods). Reuse returns `ProofAlreadyUsed`. Retry must use a fresh
+    /// proof with a new nullifier.
+    ///
+    /// **R-3: Per-Employee Per-Period Uniqueness**
+    /// Each (employee, period) pair receives at most one successful payment.
+    /// A second attempt (even with a fresh proof) returns `AlreadyPaid`. Retry
+    /// by opening a new period and paying with a fresh proof.
+    ///
+    /// **R-5: Closed Period Barrier**
+    /// A payment to a closed period returns `PeriodClosed` without state
+    /// mutation. Retry by opening a new period.
+    ///
+    /// **R-7: Total Paid Monotonicity**
+    /// A failed payment does not decrease `get_total_paid`. On success, the
+    /// total increases by the payment amount.
     pub fn execute_payment(
         env: Env,
         company_id: u64,
@@ -825,9 +880,20 @@ impl PaymentExecutor {
         // Read the employee commitment from the dedicated commitment contract
         // and company metadata from payroll_registry.
         let commitment_client = SalaryCommitmentContractClient::new(&env, &addresses.commitment);
-        let commitment = commitment_client.get_commitment(&employee).commitment;
         let registry = PayrollRegistryClient::new(&env, &addresses.registry);
         let company: CompanyInfo = registry.get_company(&company_id);
+
+        // Issue #889: refuse to finalize a payout whose recipient does not
+        // resolve, before any proof check, transfer, or state write.
+        Self::require_resolved_recipient(
+            &env,
+            &commitment_client,
+            &registry,
+            company_id,
+            &company,
+            &employee,
+        )?;
+        let commitment = commitment_client.get_commitment(&employee).commitment;
 
         // Ensure only HR admin for this company can trigger payroll and treasury authorizes payment.
         if company.revoked {
@@ -874,6 +940,14 @@ impl PaymentExecutor {
         let asset_decimals = Self::get_asset_decimals(env.clone(), addresses.token.clone());
         if asset_decimals == 0 {
             return Err(PaymentError::AssetDecimalsMissing);
+        }
+
+        // Enforce configured precision matches the token contract to prevent
+        // mis-scaled payouts when an asset's declared decimals drift.
+        let token_client = token::Client::new(&env, &addresses.token);
+        let token_decimals = token_client.decimals();
+        if token_decimals != asset_decimals {
+            return Err(PaymentError::AssetDecimalsMismatch);
         }
 
         // Verify amount is properly normalized according to asset decimal configuration
@@ -949,8 +1023,56 @@ impl PaymentExecutor {
         Ok(record)
     }
 
+    /// A recipient resolves when it is active for this company, holds an
+    /// active (non-revoked) salary commitment, and is neither the paying
+    /// treasury nor this contract. This binds payout authorization to the
+    /// employer before proof verification.
+    fn require_resolved_recipient(
+        env: &Env,
+        commitments: &SalaryCommitmentContractClient,
+        registry: &PayrollRegistryClient,
+        company_id: u64,
+        company: &CompanyInfo,
+        recipient: &Address,
+    ) -> Result<(), PaymentError> {
+        if *recipient == company.treasury || *recipient == env.current_contract_address() {
+            return Err(PaymentError::RecipientUnresolved);
+        }
+        if !registry.is_employee_active(&company_id, recipient) {
+            return Err(PaymentError::RecipientUnresolved);
+        }
+        if !commitments.is_commitment_active(recipient) {
+            return Err(PaymentError::RecipientUnresolved);
+        }
+        Ok(())
+    }
+
     /// Execute batch payroll for multiple employees
     #[allow(clippy::too_many_arguments)]
+    /// Execute a batch payroll run for multiple employees in a single period.
+    ///
+    /// Processes each employee's payment sequentially. Payments that succeed
+    /// are irreversible; if payment k fails, employees 0..k-1 are paid,
+    /// employees k..n are not processed.
+    ///
+    /// For idempotent batch execution with RPC retry safety, use
+    /// `execute_batch_with_receipt` instead (issue #551).
+    ///
+    /// # Retry Invariants (see RETRY_INVARIANTS.md)
+    ///
+    /// **R-4: Batch-Level Atomicity Boundary**
+    /// Batch payment is not atomic. Callers must query `is_paid` for each
+    /// employee to identify which were paid on partial failure, then retry
+    /// only the unpaid employees.
+    ///
+    /// **R-5: Closed Period Barrier**
+    /// A payment to a closed period is rejected with `PeriodClosed` without
+    /// state mutation. Retry by opening a new period.
+    ///
+    /// **R-6: Pre-Validation Before State Mutation**
+    /// Array length mismatches return `ArrayLengthMismatch` before any state
+    /// is mutated. Empty batches return `EmptyBatch`. Oversized batches
+    /// return `BatchTooLarge`. All pre-checks are safe for retry.
     pub fn execute_batch_payroll(
         env: Env,
         company_id: u64,
@@ -1005,6 +1127,33 @@ impl PaymentExecutor {
             if total_payout > reserved {
                 return Err(PaymentError::PayoutExceedsReservedFunds);
             }
+        // Validate the complete payout total before executing the first
+        // payment. This prevents a later underfunded recipient from leaving a
+        // partially settled batch and keeps the failure privacy-safe.
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .expect("Not initialized");
+        let registry = PayrollRegistryClient::new(&env, &addresses.registry);
+        let company = registry.get_company(&company_id);
+        let mut payout_total = 0i128;
+        for amount in amounts.iter() {
+            payout_total = payout_total
+                .checked_add(amount)
+                .ok_or(PaymentError::PayoutTotalOverflow)?;
+        }
+        let token_client = token::Client::new(&env, &addresses.token);
+        if payout_total > token_client.balance(&company.treasury) {
+            return Err(PaymentError::PayoutTotalExceedsTreasury);
+        }
+
+        let mut recipients = soroban_sdk::Vec::new(&env);
+        for employee in employees.iter() {
+            if recipients.contains(&employee) {
+                return Err(PaymentError::DuplicateRecipientPosition);
+            }
+            recipients.push_back(employee);
         }
 
         let mut records = soroban_sdk::Vec::new(&env);
@@ -1040,6 +1189,39 @@ impl PaymentExecutor {
     /// Receipt IDs are never emitted in events and carry no salary or
     /// employee data — the contract treats them as opaque 32-byte
     /// identifiers, so error paths stay privacy-safe.
+    ///
+    /// ## Settlement receipt replay invariants
+    ///
+    /// - **Global uniqueness:** a `receipt_id` is a single-use token across the
+    ///   entire contract (all companies and periods). Reuse is always rejected.
+    /// - **Check-before-effects:** the duplicate guard runs before any payment
+    ///   state is mutated, so a replay attempt is a pure no-op.
+    /// - **Commit-on-success only:** the receipt marker is written only after the
+    ///   full batch succeeds. Any failure or trap leaves the receipt unused so a
+    ///   corrected retry with the same `receipt_id` may proceed.
+    /// - **Privacy:** receipt IDs are opaque identifiers and are never emitted in
+    ///   events or error payloads.
+    /// - **Composable guards:** receipt replay protection is independent of proof
+    ///   nullifier and per-employee-per-period checks; all applicable guards must
+    ///   pass for execution to succeed.
+    ///
+    /// # Retry Invariants (see RETRY_INVARIANTS.md)
+    ///
+    /// **R-1: Settlement Receipt Idempotency**
+    /// The receipt is checked before any state mutation. If already consumed,
+    /// the call returns `SettlementReceiptAlreadyUsed` without altering state.
+    /// The receipt is recorded only after the entire batch succeeds. If any
+    /// payment in the batch fails, the receipt remains unconsumed, allowing
+    /// a corrected retry with the same receipt ID.
+    ///
+    /// **R-4: Batch-Level Atomicity Boundary**
+    /// Batch payment is not atomic. If employee k fails, employees 1..k-1
+    /// are permanently paid; employees k..n are not processed. Callers must
+    /// query which employees were paid and retry the unpaid ones.
+    ///
+    /// **R-6: Pre-Validation Before State Mutation**
+    /// Array length mismatches return `ArrayLengthMismatch` before any state
+    /// is mutated, allowing safe retry with corrected arrays.
     pub fn execute_batch_with_receipt(
         env: Env,
         company_id: u64,
@@ -1122,7 +1304,8 @@ impl PaymentExecutor {
             .persistent()
             .set(&DataKey::MaxBatchSize(company_id), &max_size);
 
-        env.events().publish(
+        payroll_events::publish(
+            &env,
             (Symbol::new(&env, "PayoutBatchSizeLimitSet"), company_id),
             max_size,
         );
@@ -1233,6 +1416,9 @@ impl PaymentExecutor {
 }
 
 #[cfg(test)]
+mod token_pause_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ::pause_manager::{PauseManager, PauseManagerClient};
@@ -1249,9 +1435,7 @@ mod tests {
         let Some(event) = recorded.events().get(index) else {
             panic!("no contract event recorded at index {index}");
         };
-        let xdr::ContractEventBody::V0(body) = &event.body else {
-            panic!("expected a v0 contract event body");
-        };
+        let xdr::ContractEventBody::V0(body) = &event.body;
         let mut topics = soroban_sdk::Vec::new(env);
         for topic in body.topics.iter() {
             topics.push_back(Val::try_from_val(env, topic).expect("invalid event topic"));
@@ -1280,10 +1464,10 @@ mod tests {
 
     fn setup_addresses(env: &Env) -> ContractAddresses {
         env.mock_all_auths();
-        let registry_id = env.register_contract(None, PayrollRegistry);
-        let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-        let verifier_id = env.register_contract(None, ProofVerifier);
-        let token_id = env.register_contract(None, Token);
+        let registry_id = env.register(PayrollRegistry, ());
+        let commitment_id = env.register(SalaryCommitmentContract, ());
+        let verifier_id = env.register(ProofVerifier, ());
+        let token_id = env.register(Token, ());
 
         let verifier_client = ProofVerifierClient::new(env, &verifier_id);
         let verifier_admin = Address::generate(env);
@@ -1343,7 +1527,7 @@ mod tests {
     #[test]
     fn test_initialize() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1354,7 +1538,7 @@ mod tests {
     fn test_is_paid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1369,7 +1553,7 @@ mod tests {
     fn test_execute_payment_transfers_after_verification() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1427,7 +1611,7 @@ mod tests {
     fn test_double_spend_proof_reuse_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1485,7 +1669,7 @@ mod tests {
     fn test_batch_array_length_mismatch_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1531,7 +1715,7 @@ mod tests {
     fn test_create_period() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1554,7 +1738,7 @@ mod tests {
     fn test_duplicate_period_creation_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1578,7 +1762,7 @@ mod tests {
     fn test_close_period() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1600,7 +1784,7 @@ mod tests {
     fn test_payment_in_closed_period_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1643,7 +1827,7 @@ mod tests {
     fn test_payment_in_nonexistent_period_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1685,7 +1869,7 @@ mod tests {
     fn test_reentrancy_cei_pattern() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1771,7 +1955,7 @@ mod tests {
     ) {
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(env, &contract_id);
 
         let addresses = setup_addresses(env);
@@ -1795,7 +1979,7 @@ mod tests {
         client.set_executor_admin(&admin);
 
         // Register and configure pause manager
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let pm_client = PauseManagerClient::new(env, &pm_id);
         let operator = Address::generate(env);
         pm_client.initialize(&operator);
@@ -1884,7 +2068,7 @@ mod tests {
     fn test_executor_works_without_pause_manager() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1932,7 +2116,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_set_pause_manager_rejects_unauthorized() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -1963,7 +2147,7 @@ mod tests {
         client.set_executor_admin(&admin);
 
         // Attacker tries to set pause manager
-        let pm_id = env.register_contract(None, PauseManager);
+        let pm_id = env.register(PauseManager, ());
         let attacker = Address::generate(&env);
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &attacker,
@@ -1983,7 +2167,7 @@ mod tests {
     fn test_fresh_proof_within_expiration_window() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2031,7 +2215,7 @@ mod tests {
     fn test_period_tracks_creation_time() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2065,7 +2249,7 @@ mod tests {
     #[test]
     fn test_get_max_proof_age() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let max_age = client.get_max_proof_age();
@@ -2077,7 +2261,7 @@ mod tests {
     fn test_asset_allowlist_management_and_execution() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2103,7 +2287,7 @@ mod tests {
     fn test_execute_payment_fails_when_asset_disallowed() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2146,7 +2330,7 @@ mod tests {
     #[test]
     fn test_storage_version_returns_version_1() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2159,7 +2343,7 @@ mod tests {
     fn test_asset_allowed_emits_events() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2198,7 +2382,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_company_admin_cannot_set_asset_allowed() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2233,7 +2417,7 @@ mod tests {
     #[should_panic(expected = "authorized")]
     fn test_executor_admin_cannot_execute_payment_for_foreign_company() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2427,35 +2611,12 @@ mod tests {
 
     // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Issue #538: Withholding configuration tests ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
-    /// Helper: register a company + set up withholding config with zero rates so
-    /// tests that don't care about deductions still pass the withholding gate.
-    fn setup_zero_rate_withholding(
-        env: &Env,
-        client: &PaymentExecutorClient,
-        company_id: u64,
-        tax_recipient: &Address,
-    ) {
-        let executor_admin = Address::generate(env);
-        // set_executor_admin is a one-time call; ignore error if already set
-        let _ = client.try_set_executor_admin(&executor_admin);
-
-        client.set_withholding_config(
-            &company_id,
-            &0u32,         // income_tax_bps  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 0 % (no deductions)
-            &0u32,         // social_tax_bps  ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 0 %
-            tax_recipient, // income_tax_recipient
-            tax_recipient, // social_tax_recipient
-            &0i128,        // max_gross_per_payment ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no cap
-            &0i128,        // min_net_per_payment   ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no floor
-        );
-    }
-
     /// set_withholding_config stores config and is readable via get_withholding_config.
     #[test]
     fn test_set_and_get_withholding_config() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2493,7 +2654,7 @@ mod tests {
     fn test_withholding_rate_exceeds_100_percent_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2528,7 +2689,7 @@ mod tests {
     fn test_withholding_rate_exactly_100_percent_accepted() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2560,7 +2721,7 @@ mod tests {
     fn test_execute_payment_fails_without_withholding_config() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2608,7 +2769,7 @@ mod tests {
     fn test_get_withholding_config_returns_none_when_not_set() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);
@@ -2622,7 +2783,7 @@ mod tests {
     fn test_execute_payment_fails_when_gross_exceeds_cap() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, PaymentExecutor);
+        let contract_id = env.register(PaymentExecutor, ());
         let client = PaymentExecutorClient::new(&env, &contract_id);
 
         let addresses = setup_addresses(&env);

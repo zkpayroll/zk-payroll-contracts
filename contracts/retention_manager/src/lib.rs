@@ -21,6 +21,11 @@
 //! ## Safety guards
 //!
 //! - A record with an active audit grant or open challenge cannot be pruned.
+//! - Once pruned/archived, a retention record becomes immutable; block-mutation
+//!   attempts fail with `ArchivedRecord`.
+//! - A record whose settlement is still pending cannot be pruned, even after
+//!   its retention window has elapsed. Clearing the hold restores normal
+//!   pruning eligibility.
 //! - Pruning emits a `RetentionPruned` event for off-chain archive systems.
 //! - Pruning is authorized (admin-only); the system does not auto-prune.
 
@@ -61,6 +66,16 @@ pub enum RetentionError {
     Unauthorized = 5,
     /// The record type is not recognised.
     UnknownRecordType = 6,
+    /// A retention override update would shorten the effective window (#975).
+    RetentionWindowShortened = 7,
+    /// The record has been archived/pruned and cannot be mutated (#825).
+    ArchivedRecord = 8,
+    /// Settlement for this record is still pending; pruning is not allowed (#901).
+    SettlementPending = 9,
+    /// Payroll is paused, so the retention policy cannot be changed right now.
+    Paused = 10,
+    /// The contract has no admin yet, so there is nobody to authorise a policy change.
+    NotInitialized = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +120,15 @@ pub struct RetentionRecord {
     pub challenge_block: bool,
     /// True when this record has been pruned (tombstone entry retained briefly).
     pub pruned: bool,
+    /// `Some(true)` while settlement for this record is still pending. A pending
+    /// settlement protects the record from pruning because removing it could
+    /// destroy the only evidence needed to finish reconciliation.
+    ///
+    /// `Option<bool>` keeps the struct append-safe: records written by an
+    /// earlier contract version decode with `None`, which means "no hold", so
+    /// they stay prunable under the normal window. Appended at the end of the
+    /// struct so existing storage keys stay valid.
+    pub settlement_pending: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +208,8 @@ impl RetentionManagerContract {
     /// `company_id` — owning company.
     /// `record_id`  — caller-supplied opaque identifier (run_id, grant_id, …).
     /// `record_type` — determines the retention window.
+    ///
+    /// Panics if the same (company, record, type) is already registered.
     pub fn register_record(
         env: Env,
         company_id: u64,
@@ -193,16 +219,31 @@ impl RetentionManagerContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
+        // Registering again would overwrite the entry: it would clear the audit and challenge
+        // blocks and un-prune a tombstone, which is the on-chain proof that pruning happened.
+        if env
+            .storage()
+            .persistent()
+            .has(&Self::record_key(company_id, record_id, &record_type))
+        {
+            panic!("Record already registered");
+        }
+
         let now = env.ledger().timestamp();
         let window = Self::retention_window_for(&env, company_id, &record_type);
+        // Saturate instead of panicking on an extreme override or timestamp.
+        // Clamping keeps the record effectively non-prunable, which is the
+        // privacy-preserving failure mode for retention policy.
+        let eligible_after = now.saturating_add(window);
         let entry = RetentionRecord {
             record_id,
             record_type,
             registered_at: now,
-            eligible_after: now + window,
+            eligible_after,
             audit_block: false,
             challenge_block: false,
             pruned: false,
+            settlement_pending: None,
         };
 
         env.storage().persistent().set(
@@ -215,7 +256,7 @@ impl RetentionManagerContract {
             company_id,
             record_id,
             Self::record_type_symbol(&env, &record_type),
-            now + window,
+            eligible_after,
         );
 
         entry
@@ -229,6 +270,13 @@ impl RetentionManagerContract {
     ///
     /// When `blocked = true` the record is protected from pruning even if the
     /// retention window has elapsed. Only the admin may change this flag.
+    fn require_not_archived(entry: &RetentionRecord) -> Result<(), RetentionError> {
+        if entry.pruned {
+            return Err(RetentionError::ArchivedRecord);
+        }
+        Ok(())
+    }
+
     pub fn set_audit_block(
         env: Env,
         company_id: u64,
@@ -245,6 +293,7 @@ impl RetentionManagerContract {
             .persistent()
             .get(&key)
             .ok_or(RetentionError::RecordNotFound)?;
+        Self::require_not_archived(&entry)?;
 
         entry.audit_block = blocked;
         env.storage().persistent().set(&key, &entry);
@@ -280,6 +329,7 @@ impl RetentionManagerContract {
             .persistent()
             .get(&key)
             .ok_or(RetentionError::RecordNotFound)?;
+        Self::require_not_archived(&entry)?;
 
         entry.challenge_block = blocked;
         env.storage().persistent().set(&key, &entry);
@@ -290,6 +340,45 @@ impl RetentionManagerContract {
             record_id,
             Symbol::new(&env, "challenge"),
             blocked,
+        );
+
+        Ok(entry)
+    }
+
+    /// Set or clear the settlement-pending hold on a retention record.
+    ///
+    /// While `pending = true` the record is protected from pruning even if the
+    /// retention window has elapsed and no audit or challenge block is set.
+    /// This prevents a purge from destroying records that settlement or
+    /// reconciliation still depends on. Only the admin may change this flag,
+    /// and an archived record rejects the mutation.
+    pub fn set_settlement_pending(
+        env: Env,
+        company_id: u64,
+        record_id: u64,
+        record_type: RecordType,
+        pending: bool,
+    ) -> Result<RetentionRecord, RetentionError> {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env);
+
+        let key = Self::record_key(company_id, record_id, &record_type);
+        let mut entry: RetentionRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(RetentionError::RecordNotFound)?;
+        Self::require_not_archived(&entry)?;
+
+        entry.settlement_pending = Some(pending);
+        env.storage().persistent().set(&key, &entry);
+
+        payroll_events::emit_retention_block_changed(
+            &env,
+            company_id,
+            record_id,
+            Symbol::new(&env, "settlement"),
+            pending,
         );
 
         Ok(entry)
@@ -307,6 +396,7 @@ impl RetentionManagerContract {
     ///   3. `now >= eligible_after` (retention window elapsed).
     ///   4. `audit_block == false`.
     ///   5. `challenge_block == false`.
+    ///   6. `settlement_pending != Some(true)`.
     ///
     /// On success, the record is marked as pruned (tombstoned) and a
     /// `RetentionPruned` event is emitted for off-chain archive systems.
@@ -344,6 +434,9 @@ impl RetentionManagerContract {
         if entry.challenge_block {
             return Err(RetentionError::ActiveChallengeBlock);
         }
+        if entry.settlement_pending == Some(true) {
+            return Err(RetentionError::SettlementPending);
+        }
 
         entry.pruned = true;
         env.storage().persistent().set(&key, &entry);
@@ -367,21 +460,57 @@ impl RetentionManagerContract {
     ///
     /// Allows companies with stricter compliance requirements to extend the
     /// default window. Admin-only. Setting to 0 restores the global default.
+    ///
+    /// # Invariants (#975, #977)
+    ///
+    /// The effective window is monotonic: a non-zero override must strictly
+    /// extend the current window. An update that would shorten it, or merely
+    /// restate it, is rejected with `RetentionWindowShortened`. Clearing an
+    /// override (0) is the only way to restore the built-in default and is
+    /// allowed only while that default is already at least the current
+    /// effective window. Existing records keep the `eligible_after` timestamp
+    /// frozen at registration; changes affect only future registrations.
     pub fn set_retention_override(
         env: Env,
         company_id: u64,
         record_type: RecordType,
         window_secs: u64,
-    ) {
-        Self::require_not_paused(&env);
-        Self::require_admin(&env);
+    ) -> Result<(), RetentionError> {
+        Self::ensure_not_paused(&env)?;
+        Self::ensure_admin(&env)?;
 
         let key = DataKey::RetentionOverride(company_id, record_type as u32);
+        let current = Self::retention_window_for(&env, company_id, &record_type);
+        let default = Self::default_window_for(&record_type);
+        // `0` clears the override, so the new effective window is the built-in
+        // default. Any other value replaces the effective window directly.
+        let new_effective = if window_secs == 0 {
+            if default < current {
+                return Err(RetentionError::RetentionWindowShortened);
+            }
+            default
+        } else {
+            if window_secs <= current {
+                return Err(RetentionError::RetentionWindowShortened);
+            }
+            window_secs
+        };
+
         if window_secs == 0 {
             env.storage().persistent().remove(&key);
         } else {
             env.storage().persistent().set(&key, &window_secs);
         }
+
+        payroll_events::emit_retention_override_set(
+            &env,
+            company_id,
+            Self::record_type_symbol(&env, &record_type),
+            current,
+            new_effective,
+        );
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -417,6 +546,7 @@ impl RetentionManagerContract {
                 !entry.pruned
                     && !entry.audit_block
                     && !entry.challenge_block
+                    && entry.settlement_pending != Some(true)
                     && env.ledger().timestamp() >= entry.eligible_after
             }
             None => false,
@@ -434,6 +564,32 @@ impl RetentionManagerContract {
             .get(&DataKey::Admin)
             .expect("Not initialized");
         admin.require_auth();
+    }
+
+    /// Typed twin of `require_not_paused` for entrypoints that return `Result`.
+    fn ensure_not_paused(env: &Env) -> Result<(), RetentionError> {
+        if let Some(addr) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::PauseManager)
+        {
+            if PauseManagerClient::new(env, &addr).is_paused() {
+                return Err(RetentionError::Paused);
+            }
+        }
+        Ok(())
+    }
+
+    /// Typed twin of `require_admin`: a missing admin is an error, not a panic. The admin's own
+    /// authorisation is still enforced by the host.
+    fn ensure_admin(env: &Env) -> Result<(), RetentionError> {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(RetentionError::NotInitialized)?;
+        admin.require_auth();
+        Ok(())
     }
 
     fn require_purger(env: &Env) {
@@ -458,6 +614,16 @@ impl RetentionManagerContract {
         DataKey::Record(company_id, record_id, *record_type as u32)
     }
 
+    /// The built-in default window for a record type, with no override applied.
+    fn default_window_for(record_type: &RecordType) -> u64 {
+        match record_type {
+            RecordType::FinalizedBatch => FINALIZED_RETENTION_SECS,
+            RecordType::CancelledBatch => CANCELLED_RETENTION_SECS,
+            RecordType::ExpiredAuditGrant => AUDIT_GRANT_RETENTION_SECS,
+            RecordType::ChallengeRecord => CHALLENGE_RETENTION_SECS,
+        }
+    }
+
     fn retention_window_for(env: &Env, company_id: u64, record_type: &RecordType) -> u64 {
         let override_key = DataKey::RetentionOverride(company_id, *record_type as u32);
         if let Some(override_secs) = env
@@ -467,12 +633,7 @@ impl RetentionManagerContract {
         {
             return override_secs;
         }
-        match record_type {
-            RecordType::FinalizedBatch => FINALIZED_RETENTION_SECS,
-            RecordType::CancelledBatch => CANCELLED_RETENTION_SECS,
-            RecordType::ExpiredAuditGrant => AUDIT_GRANT_RETENTION_SECS,
-            RecordType::ChallengeRecord => CHALLENGE_RETENTION_SECS,
-        }
+        Self::default_window_for(record_type)
     }
 
     fn record_type_symbol(env: &Env, record_type: &RecordType) -> Symbol {
@@ -490,15 +651,24 @@ impl RetentionManagerContract {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod policy_error_tests;
+#[cfg(test)]
+mod policy_update_regression_tests;
+
+#[cfg(test)]
+mod archive_query_migration_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
-    use soroban_sdk::Env;
+    use pause_manager::{PauseManager, PauseManagerClient};
+    use soroban_sdk::testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{Env, IntoVal};
 
     fn setup() -> (Env, Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RetentionManagerContract);
+        let contract_id = env.register(RetentionManagerContract, ());
         let admin = Address::generate(&env);
         let client = RetentionManagerContractClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -665,23 +835,462 @@ mod tests {
     // ── Custom retention override ────────────────────────────────────────────
 
     #[test]
-    fn test_retention_override() {
+    fn test_retention_override_is_monotonic() {
         let (env, contract_id, _) = setup();
         let client = RetentionManagerContractClient::new(&env, &contract_id);
         let company_id = 8u64;
-        let record_id = 55u64;
+        let default = FINALIZED_RETENTION_SECS;
 
-        // Set a very short custom window (1 second)
-        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &1u64);
+        // Clearing with no override present is an allowed no-op.
+        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &0u64);
+
+        // A non-zero override must strictly extend the default.
+        assert_eq!(
+            client.try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &default),
+            Err(Ok(RetentionError::RetentionWindowShortened))
+        );
+        let extended = default + 100;
+        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &extended);
+
+        // Restating the current window or shortening it is rejected.
+        assert_eq!(
+            client.try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &extended),
+            Err(Ok(RetentionError::RetentionWindowShortened))
+        );
+        assert_eq!(
+            client.try_set_retention_override(
+                &company_id,
+                &RecordType::FinalizedBatch,
+                &(extended - 1)
+            ),
+            Err(Ok(RetentionError::RetentionWindowShortened))
+        );
+        // Clearing after an extension would shorten retention, so it is rejected.
+        assert_eq!(
+            client.try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &0u64),
+            Err(Ok(RetentionError::RetentionWindowShortened))
+        );
+    }
+
+    #[test]
+    fn test_retention_override_affects_only_new_records() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 9u64;
+
+        client.register_record(&company_id, &1u64, &RecordType::FinalizedBatch);
+        let before = client
+            .get_record(&company_id, &1u64, &RecordType::FinalizedBatch)
+            .unwrap();
+
+        let extended = FINALIZED_RETENTION_SECS + 100;
+        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &extended);
+        client.register_record(&company_id, &2u64, &RecordType::FinalizedBatch);
+        let after = client
+            .get_record(&company_id, &2u64, &RecordType::FinalizedBatch)
+            .unwrap();
+
+        // Existing records keep the window frozen at their registration time.
+        assert_eq!(
+            before.eligible_after - before.registered_at,
+            FINALIZED_RETENTION_SECS
+        );
+        assert_eq!(after.eligible_after - after.registered_at, extended);
+    }
+
+    #[test]
+    fn test_register_record_saturates_eligible_after() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 10u64;
+
+        env.ledger().with_mut(|l| l.timestamp = u64::MAX - 10);
+        client.register_record(&company_id, &1u64, &RecordType::FinalizedBatch);
+        let record = client
+            .get_record(&company_id, &1u64, &RecordType::FinalizedBatch)
+            .unwrap();
+
+        assert_eq!(record.eligible_after, u64::MAX);
+    }
+
+    // ── Adversarial retention policy updates (issue #978) ─────────────────
+
+    #[test]
+    fn test_set_retention_override_requires_admin_auth() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 20u64;
+
+        // Only the attacker's signature is present, never the admin's.
+        let attacker = Address::generate(&env);
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_retention_override",
+                args: (company_id, RecordType::FinalizedBatch, 100u64).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client
+            .try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &100u64)
+            .is_err());
+    }
+
+    #[test]
+    fn test_set_retention_override_rejected_while_paused() {
+        let (env, contract_id, admin) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let pm_id = env.register(PauseManager, ());
+        let pm = PauseManagerClient::new(&env, &pm_id);
+        pm.initialize(&admin);
+        client.set_pause_manager(&pm_id);
+        pm.pause();
+
+        assert!(client
+            .try_set_retention_override(&21u64, &RecordType::ChallengeRecord, &500u64)
+            .is_err());
+    }
+
+    #[test]
+    fn test_zero_override_is_a_noop_without_an_existing_override() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 22u64;
+        let record_id = 1u64;
+
+        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &0u64);
+        assert_eq!(
+            client.try_set_retention_override(&company_id, &RecordType::FinalizedBatch, &1u64),
+            Err(Ok(RetentionError::RetentionWindowShortened))
+        );
         client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
 
-        env.ledger().with_mut(|l| l.timestamp = l.timestamp + 2);
+        env.ledger().with_mut(|l| l.timestamp += 2);
+        assert!(!client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+    }
 
-        // Should be eligible because custom window (1s) has passed
+    #[test]
+    fn test_override_is_scoped_to_company_and_record_type() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        client.set_retention_override(
+            &23u64,
+            &RecordType::FinalizedBatch,
+            &(FINALIZED_RETENTION_SECS + 1),
+        );
+        client.set_retention_override(
+            &24u64,
+            &RecordType::FinalizedBatch,
+            &(FINALIZED_RETENTION_SECS + 1_000),
+        );
+        client.set_retention_override(
+            &23u64,
+            &RecordType::CancelledBatch,
+            &(FINALIZED_RETENTION_SECS + 2_000),
+        );
+
+        client.register_record(&23u64, &1u64, &RecordType::FinalizedBatch);
+        client.register_record(&24u64, &2u64, &RecordType::FinalizedBatch);
+        client.register_record(&23u64, &3u64, &RecordType::CancelledBatch);
+
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
+        assert!(client.is_eligible_for_pruning(&23u64, &1u64, &RecordType::FinalizedBatch));
+        assert!(!client.is_eligible_for_pruning(&24u64, &2u64, &RecordType::FinalizedBatch));
+        assert!(!client.is_eligible_for_pruning(&23u64, &3u64, &RecordType::CancelledBatch));
+    }
+
+    #[test]
+    fn test_extreme_override_clamps_eligible_after() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 25u64;
+        let record_id = 4u64;
+
+        client.set_retention_override(&company_id, &RecordType::FinalizedBatch, &u64::MAX);
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let record = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert_eq!(record.eligible_after, u64::MAX);
+
+        env.ledger().with_mut(|l| l.timestamp = u64::MAX - 1);
+        assert!(!client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+
+        // At the maximum representable timestamp the clamped window ends.
+        env.ledger().with_mut(|l| l.timestamp = u64::MAX);
         assert!(client.is_eligible_for_pruning(
             &company_id,
             &record_id,
             &RecordType::FinalizedBatch
         ));
+    }
+
+    #[test]
+    fn test_override_does_not_change_existing_record() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 26u64;
+        let record_id = 5u64;
+
+        let before = client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.set_retention_override(
+            &company_id,
+            &RecordType::FinalizedBatch,
+            &(FINALIZED_RETENTION_SECS + 1),
+        );
+
+        assert_eq!(
+            client
+                .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+                .unwrap()
+                .eligible_after,
+            before.eligible_after
+        );
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 2);
+        assert!(client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+    }
+
+    #[test]
+    fn test_archived_record_cannot_be_mutated() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 28u64;
+        let record_id = 1u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let record = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(record.pruned);
+
+        let audit =
+            client.try_set_audit_block(&company_id, &record_id, &RecordType::FinalizedBatch, &true);
+        assert_eq!(audit.unwrap_err().unwrap(), RetentionError::ArchivedRecord);
+
+        let challenge = client.try_set_challenge_block(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &true,
+        );
+        assert_eq!(
+            challenge.unwrap_err().unwrap(),
+            RetentionError::ArchivedRecord
+        );
+
+        let unchanged = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(unchanged.pruned);
+        assert!(!unchanged.audit_block);
+        assert!(!unchanged.challenge_block);
+    }
+
+    #[test]
+    fn test_archived_record_rejects_unblock_mutation() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 29u64;
+        let record_id = 1u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let audit = client.try_set_audit_block(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &false,
+        );
+        assert_eq!(audit.unwrap_err().unwrap(), RetentionError::ArchivedRecord);
+
+        let challenge = client.try_set_challenge_block(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &false,
+        );
+        assert_eq!(
+            challenge.unwrap_err().unwrap(),
+            RetentionError::ArchivedRecord
+        );
+    }
+
+    #[test]
+    fn test_prune_archived_record_is_idempotent() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 30u64;
+        let record_id = 1u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let record = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(record.pruned);
+    }
+
+    // ── Settlement-pending hold (#901) ─────────────────────────────────────
+
+    #[test]
+    fn test_prune_rejected_while_settlement_pending() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 31u64;
+        let record_id = 70u64;
+
+        let record = client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        assert_eq!(record.settlement_pending, None);
+
+        let held = client.set_settlement_pending(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &true,
+        );
+        assert_eq!(held.settlement_pending, Some(true));
+
+        // Window elapsed, no audit or challenge block: settlement alone must block.
+        env.ledger().with_mut(|l| {
+            l.timestamp = l.timestamp + FINALIZED_RETENTION_SECS + 1;
+        });
+
+        assert!(!client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+        let result = client.try_prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::SettlementPending
+        );
+
+        // The record is still intact and unpruned.
+        let stored = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(!stored.pruned);
+    }
+
+    #[test]
+    fn test_prune_succeeds_after_settlement_completes() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 32u64;
+        let record_id = 71u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        client.set_settlement_pending(&company_id, &record_id, &RecordType::FinalizedBatch, &true);
+
+        env.ledger().with_mut(|l| {
+            l.timestamp = l.timestamp + FINALIZED_RETENTION_SECS + 1;
+        });
+
+        // Settlement completes and the hold is cleared.
+        client.set_settlement_pending(&company_id, &record_id, &RecordType::FinalizedBatch, &false);
+
+        assert!(client.is_eligible_for_pruning(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch
+        ));
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let stored = client
+            .get_record(&company_id, &record_id, &RecordType::FinalizedBatch)
+            .unwrap();
+        assert!(stored.pruned);
+    }
+
+    #[test]
+    fn test_settlement_pending_blocks_at_window_boundary() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 33u64;
+        let record_id = 72u64;
+
+        let record = client.register_record(&company_id, &record_id, &RecordType::CancelledBatch);
+        client.set_settlement_pending(&company_id, &record_id, &RecordType::CancelledBatch, &true);
+
+        // Exactly at `eligible_after`: the window is satisfied but settlement is not.
+        env.ledger()
+            .with_mut(|l| l.timestamp = record.eligible_after);
+
+        let result = client.try_prune_record(&company_id, &record_id, &RecordType::CancelledBatch);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            RetentionError::SettlementPending
+        );
+
+        // One second later the hold still applies.
+        env.ledger()
+            .with_mut(|l| l.timestamp = record.eligible_after + 1);
+        let still_blocked =
+            client.try_prune_record(&company_id, &record_id, &RecordType::CancelledBatch);
+        assert_eq!(
+            still_blocked.unwrap_err().unwrap(),
+            RetentionError::SettlementPending
+        );
+    }
+
+    #[test]
+    fn test_set_settlement_pending_unknown_record_rejected() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+
+        let result =
+            client.try_set_settlement_pending(&404u64, &404u64, &RecordType::FinalizedBatch, &true);
+        assert_eq!(result.unwrap_err().unwrap(), RetentionError::RecordNotFound);
+    }
+
+    #[test]
+    fn test_archived_record_rejects_settlement_mutation() {
+        let (env, contract_id, _) = setup();
+        let client = RetentionManagerContractClient::new(&env, &contract_id);
+        let company_id = 34u64;
+        let record_id = 73u64;
+
+        client.register_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+        env.ledger()
+            .with_mut(|l| l.timestamp += FINALIZED_RETENTION_SECS + 1);
+        client.prune_record(&company_id, &record_id, &RecordType::FinalizedBatch);
+
+        let result = client.try_set_settlement_pending(
+            &company_id,
+            &record_id,
+            &RecordType::FinalizedBatch,
+            &true,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), RetentionError::ArchivedRecord);
     }
 }

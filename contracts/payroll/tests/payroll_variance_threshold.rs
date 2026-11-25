@@ -39,17 +39,17 @@ fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address) {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     verifier_client.init_verifier_admin(&Address::generate(env));
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     commitment_client.init_commitment_admin(&Address::generate(env));
 
-    let token_id = env.register_contract(None, Token);
-    let payroll_id = env.register_contract(None, Payroll);
+    let token_id = env.register(Token, ());
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     let admin = Address::generate(env);

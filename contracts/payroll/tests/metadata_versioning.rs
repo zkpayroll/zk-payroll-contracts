@@ -1,7 +1,7 @@
-/// Issue #478: Payroll run metadata versioning tests
-///
-/// Tests that metadata versioning is properly recorded for contract evolution safety,
-/// allowing later contract changes to handle different schema versions.
+//! Issue #478: Payroll run metadata versioning tests
+//!
+//! Tests that metadata versioning is properly recorded for contract evolution safety,
+//! allowing later contract changes to handle different schema versions.
 
 #[cfg(test)]
 mod tests {
@@ -43,26 +43,26 @@ mod tests {
     }
 
     struct TestContext<'a> {
-        env: Env,
-        admin: Address,
-        treasury: Address,
+        _env: Env,
+        _admin: Address,
+        _treasury: Address,
         alice: Address,
-        token_client: TokenClient<'a>,
+        _token_client: TokenClient<'a>,
         payroll_client: PayrollClient<'a>,
         commitment_client: SalaryCommitmentContractClient<'a>,
         source: Address,
     }
 
-    fn setup(env: &Env) -> TestContext {
+    fn setup(env: &Env) -> TestContext<'_> {
         env.mock_all_auths();
         env.ledger().set_sequence_number(100);
         env.ledger().set_timestamp(1000);
 
-        let token = env.register_contract(None, Token);
+        let token = env.register(Token, ());
         let admin = Address::generate(env);
         let treasury = Address::generate(env);
-        let verifier = env.register_contract(None, ProofVerifier);
-        let commitment_contract = env.register_contract(None, SalaryCommitmentContract);
+        let verifier = env.register(ProofVerifier, ());
+        let commitment_contract = env.register(SalaryCommitmentContract, ());
 
         let token_client = TokenClient::new(env, &token);
         token_client.initialize(
@@ -72,7 +72,7 @@ mod tests {
             &String::from_str(env, "USD Coin"),
         );
 
-        let payroll = env.register_contract(None, Payroll);
+        let payroll = env.register(Payroll, ());
         let payroll_client = PayrollClient::new(env, &payroll);
 
         let verifier_client = ProofVerifierClient::new(env, &verifier);
@@ -108,11 +108,11 @@ mod tests {
         commitment_client.store_commitment(&alice, &alice_commitment);
 
         TestContext {
-            env: env.clone(),
-            admin,
-            treasury,
+            _env: env.clone(),
+            _admin: admin,
+            _treasury: treasury,
             alice,
-            token_client,
+            _token_client: token_client,
             payroll_client,
             commitment_client,
             source,

@@ -8,6 +8,8 @@
 #![cfg(test)]
 
 mod common;
+#[path = "support/active_employee.rs"]
+mod employee_fixture;
 
 use ::token::TokenClient;
 use payroll::{
@@ -20,17 +22,21 @@ use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 /// The treasury balance `common::setup` mints.
 const TREASURY_BALANCE: i128 = 1_000_000;
 
-/// A one-payment batch of `amount`, paid to a fresh employee.
-fn run_of(env: &Env, amount: i128) -> (Vec<BytesN<256>>, Vec<i128>, Vec<Address>) {
+/// A one-payment batch of `amount`, paid to a fresh active employee.
+fn run_of(
+    env: &Env,
+    client: &PayrollClient,
+    amount: i128,
+) -> (Vec<BytesN<256>>, Vec<i128>, Vec<Address>) {
     (
         Vec::from_array(env, [BytesN::from_array(env, &[1; 256])]),
         Vec::from_array(env, [amount]),
-        Vec::from_array(env, [Address::generate(env)]),
+        Vec::from_array(env, [employee_fixture::active_employee(env, client)]),
     )
 }
 
 fn prepare(env: &Env, client: &PayrollClient, amount: i128, marker: u8) -> u64 {
-    let (proofs, amounts, employees) = run_of(env, amount);
+    let (proofs, amounts, employees) = run_of(env, client, amount);
     client.prepare_payroll_run(
         &proofs,
         &amounts,
@@ -42,7 +48,7 @@ fn prepare(env: &Env, client: &PayrollClient, amount: i128, marker: u8) -> u64 {
 }
 
 fn try_prepare(env: &Env, client: &PayrollClient, amount: i128, marker: u8) -> bool {
-    let (proofs, amounts, employees) = run_of(env, amount);
+    let (proofs, amounts, employees) = run_of(env, client, amount);
     client
         .try_prepare_payroll_run(
             &proofs,

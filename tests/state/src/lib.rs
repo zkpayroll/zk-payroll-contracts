@@ -29,15 +29,15 @@ fn mock_vk(env: &Env) -> VerificationKey {
 fn setup_payroll_environment(env: &Env) -> (PayrollClient<'static>, Address, Address) {
     env.mock_all_auths();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let token_id = env.register_contract(None, Token);
+    let verifier_id = env.register(ProofVerifier, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let token_id = env.register(Token, ());
 
     let treasury = Address::generate(env);
     let admin = Address::generate(env);
     let treasury_owner = Address::generate(env);
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     payroll_client.initialize(

@@ -4,9 +4,7 @@
 //! committed payroll obligations, dynamic reserve buffers, liquidity headroom, and
 //! actionable replenishment recommendations before disbursements occur.
 
-#![no_std]
-
-use soroban_sdk::{contracttype, Env};
+use soroban_sdk::contracttype;
 
 /// Classification of treasury replenishment readiness.
 #[contracttype]

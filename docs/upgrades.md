@@ -229,6 +229,25 @@ downgrade, missing-admin, disallowed-asset, and missing-decimals failure
 cases) and the `UP-09` cases in
 `contracts/integration_tests/src/upgrade_simulation.rs`.
 
+### Payroll Approval Revision Compatibility
+
+Payroll approval revision lineage is additive. `DraftRevisionKey` uses a
+separate namespace; the existing `ApprovalKey::DraftApproval` key and
+`MultiStageApproval` stored shape are unchanged. Existing trackers without
+lineage metadata are interpreted as revision 1. Their baseline record is
+materialized when the first child revision is written, so no bulk migration is
+required.
+
+Existing amendment entrypoints and the `approvals_rolled_back` event retain
+their signatures and payloads. New clients should use
+`amend_draft_from_revision` with the revision returned by
+`get_draft_revision_head` to reject stale edits. The additive
+`approval_invalidation_recorded` event and `DraftRevisionRecord` contain only
+revision numbers, hashes, timestamps, and a generic reason code; they never
+include salary values, employee identities, or proof material. See
+[`contracts/payroll/UPGRADE_COMPATIBILITY.md`](../contracts/payroll/UPGRADE_COMPATIBILITY.md)
+and [Approved Payroll Revision Protection](./approved-payroll-revision-protection.md).
+
 ---
 
 ## 4. Adding Migration Coverage

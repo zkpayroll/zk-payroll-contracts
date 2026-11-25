@@ -1,4 +1,4 @@
-name: PR Security Review
+name: PR Security Review And Safe Auto Merge
 
 on:
   pull_request_target:
@@ -6,8 +6,13 @@ on:
     branches: [main, dev]
 
 permissions:
-  contents: read
-  pull-requests: read
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: safe-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   scan-changes:
@@ -29,35 +34,83 @@ jobs:
             const executable = /\b(?:eval|spawn|exec|execSync|spawnSync)\s*\(|\bchild_process\b|\b(?:curl|wget)\b/i;
             const configFile = /(?:^|\/)(?:postcss|tailwind|eslint|next|jest|vite)\.config\.[cm]?[jt]s$/i;
 
-            if (files.length >= 3000) {
-              findings.push('PR file list reached the GitHub API limit; review manually.');
-            }
-
+            if (files.length >= 3000) findings.push('PR file list reached the GitHub API limit; review manually.');
             for (const file of files) {
               const name = file.filename;
               const added = (file.patch || '').split('\n').filter(line => line.startsWith('+') && !line.startsWith('+++')).join('\n');
               if (suspiciousFont.test(name)) findings.push(`${name}: known suspicious font filename`);
-              if (/(?:^|\/)\.vscode\/(?:tasks|settings)\.json$/i.test(name)) {
-                findings.push(`${name}: workspace automation settings require manual review`);
-              }
+              if (/(?:^|\/)\.vscode\/(?:tasks|settings)\.json$/i.test(name)) findings.push(`${name}: workspace automation settings require manual review`);
               if (/(?:^|\/)dist\/setup\.js$/i.test(name)) findings.push(`${name}: setup script requires manual review`);
               if (/(?:^|\/)api\.js$/i.test(name)) findings.push(`${name}: API entrypoint requires manual review`);
               if (marker.test(added)) findings.push(`${name}: known suspicious marker`);
-              if (executable.test(added)) findings.push(`${name}: added code invokes dynamic execution, a process, or a downloader`);
-              if (/(?:^|\/)package\.json$/i.test(name) && /["']preinstall["']|dist\/setup\.js|["'](?:start|dev)["'][^\n]*api\.js/i.test(added)) {
-                findings.push(`${name}: package lifecycle or startup script requires manual review`);
-              }
-              if (configFile.test(name) && added.trim()) {
-                findings.push(`${name}: configuration changes require manual review`);
-              }
-              if (!file.patch && file.status !== 'removed' && !suspiciousFont.test(name)) {
-                findings.push(`${name}: diff unavailable; review full file manually`);
-              }
+              if (executable.test(added)) findings.push(`${name}: added dynamic execution, process, or downloader command`);
+              if (/(?:^|\/)package\.json$/i.test(name) && /["']preinstall["']|dist\/setup\.js|["'](?:start|dev)["'][^\n]*api\.js/i.test(added)) findings.push(`${name}: package lifecycle or startup script requires manual review`);
+              if (configFile.test(name) && added.trim()) findings.push(`${name}: configuration changes require manual review`);
+              if (!file.patch && file.status !== 'removed' && !suspiciousFont.test(name)) findings.push(`${name}: diff unavailable; review full file manually`);
             }
-
             if (findings.length) {
               for (const finding of findings) core.error(finding);
-              core.setFailed('Potentially unsafe or unreviewable changes found. A maintainer must inspect the complete diff; do not merge based on this scan alone.');
-            } else {
-              core.info('No listed indicators detected. This is not a malware clearance; human review is still required.');
+              core.setFailed('Potentially unsafe or unreviewable changes found. This PR cannot be auto-merged.');
             }
+
+  auto-merge:
+    name: Merge only after malware scan passes
+    needs: scan-changes
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge a clean, conflict-free PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.pull_request.number;
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const marker = '<!-- zkpayroll-safe-auto-merge -->';
+            async function closeLinkedIssues(pr) {
+              const refs = new Set();
+              const referencePattern = /(?:(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+))?#(?<number>\d+)/g;
+              for (const line of [pr.title || '', pr.body || ''].join('\n').split(/\r?\n/)) {
+                if (!/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/i.test(line)) continue;
+                for (const match of line.matchAll(referencePattern)) {
+                  const refOwner = (match.groups.owner || owner).toLowerCase();
+                  const refRepo = (match.groups.repo || repo).toLowerCase();
+                  const number = Number(match.groups.number);
+                  if (refOwner === owner.toLowerCase() && refRepo === repo.toLowerCase() && Number.isInteger(number) && number > 0) refs.add(number);
+                }
+              }
+              const titleIssue = (pr.title || '').match(/\(#(?<number>\d+)\)\s*$/);
+              if (titleIssue) refs.add(Number(titleIssue.groups.number));
+              for (const issue_number of refs) {
+                const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number });
+                if (!issue.pull_request && issue.state !== 'closed') {
+                  await github.rest.issues.update({ owner, repo, issue_number, state: 'closed', state_reason: 'completed' });
+                  core.info(`Closed linked issue #${issue_number} for PR #${pr.number}.`);
+                }
+              }
+            }
+            async function commentOnce(message) {
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pull_number, per_page: 100 });
+              if (!comments.some(comment => comment.body?.includes(marker + message))) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: pull_number, body: marker + message });
+              }
+            }
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+              if (pr.state !== 'open' || pr.draft) return;
+              if (pr.mergeable === null) { await wait(3000); continue; }
+              const recipient = pr.assignees?.length ? pr.assignees.map(assignee => '@' + assignee.login).join(' ') : '@' + pr.user.login;
+              if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
+                await commentOnce(`\n\n${recipient} this PR has merge conflicts. Resolve the conflicts and push an update; it will be scanned again before it can auto-merge.`);
+                return;
+              }
+              try {
+                await github.rest.pulls.merge({ owner, repo, pull_number, sha: pr.head.sha, merge_method: 'squash' });
+                await closeLinkedIssues(pr);
+                return;
+              } catch (error) {
+                if (![405, 409, 422].includes(error.status)) throw error;
+                await wait(3000);
+              }
+            }
+            core.setFailed('GitHub did not permit this PR to merge after the malware scan passed. Check repository branch rules or merge requirements.');

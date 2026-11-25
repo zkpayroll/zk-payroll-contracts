@@ -80,6 +80,32 @@ Consumers listening for `run_executed` should index by `run_id` and cross-check
 - **Replay protection**: run IDs are deterministic and predictable. Use the `nonce` field
   for replay-protection logic.
 
+## Invariants for run identifiers (#992)
+
+These rules are enforced on chain and covered by focused tests.
+
+- **I1 (reserved sentinel).** `u64::MAX` can never be a valid run ID. It is reserved so
+  callers can use it as an explicit sentinel. `validate_run_id_checked` returns
+  `PayrollRunIdError::ReservedRunId` for it; the legacy `validate_run_id` still panics.
+- **I2 (monotonic, gap-free allocation).** `derive_run_id` reads `RunCounter`, returns
+  `counter + 1`, and persists the new value only on success. IDs are allocated strictly
+  in increasing order with no gaps from this path. A transaction that fails after
+  allocation rolls the counter back with the rest of its storage writes.
+- **I3 (exhaustion is non-mutating).** The last allocatable ID is `u64::MAX - 1`. When the
+  counter is at or beyond that value, `next_run_id_checked` returns
+  `RunCounterExhausted` and does **not** advance storage, so a rejected allocation has
+  no side effects and can never hand out the reserved sentinel.
+- **I4 (existence is separate from validity).** A syntactically valid ID does not imply a
+  stored run. `get_payroll_run_checked` returns `RunNotFound` when no record exists and
+  `UnauthorizedArchivedRun` when an archived record is queried by a non-admin. These are
+  distinct from `ReservedRunId`.
+- **I5 (stable, privacy-safe errors).** All `PayrollRunIdError` codes are unit-only and
+  append-only. No amount, employee address, commitment, or caller-supplied identifier is
+  echoed back. Off-chain callers that only need a boolean can use `is_valid_run_id`.
+
+The checked helpers are additive: existing panicking entrypoints keep their behavior, so
+no current caller is broken by the new error surface.
+
 ## Cross-references
 
 - Issue [#146](https://github.com/zkpayroll/zk-payroll-contracts/issues/146): archived

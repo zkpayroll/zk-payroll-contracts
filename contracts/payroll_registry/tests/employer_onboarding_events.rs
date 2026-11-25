@@ -13,7 +13,7 @@ const VALID_EMPLOYEE_WALLET: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 fn setup() -> (Env, PayrollRegistryClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     let client = PayrollRegistryClient::new(&env, &contract_id);
     (env, client)
 }
@@ -21,10 +21,8 @@ fn setup() -> (Env, PayrollRegistryClient<'static>) {
 fn event_topic0(env: &Env, index: usize) -> Symbol {
     let events = env.events().all();
     let event = events.events().get(index).unwrap();
-    let body = match &event.body {
-        ContractEventBody::V0(body) => body,
-    };
-    body.topics.get(0).unwrap().try_into_val(env).unwrap()
+    let ContractEventBody::V0(body) = &event.body;
+    body.topics.first().unwrap().try_into_val(env).unwrap()
 }
 
 #[test]
@@ -55,10 +53,8 @@ fn employer_onboarding_success_emits_registry_events_in_order() {
     assert_eq!(event_topic0(&env, 0), Symbol::new(&env, "EmployeeAdded"));
 
     let events = env.events().all();
-    let employee_event = events.events().get(0).unwrap();
-    let body = match &employee_event.body {
-        ContractEventBody::V0(body) => body,
-    };
+    let employee_event = events.events().first().unwrap();
+    let ContractEventBody::V0(body) = &employee_event.body;
     let vals: Vec<Val> = Vec::try_from_val(&env, &body.data).unwrap();
     let decoded: BytesN<32> = vals.get(0).unwrap().try_into_val(&env).unwrap();
     assert_eq!(

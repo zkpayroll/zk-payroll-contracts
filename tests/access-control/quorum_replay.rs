@@ -34,20 +34,20 @@ fn test_nonce(env: &Env, seed: u8) -> BytesN<32> {
 fn setup_payroll(env: &Env) -> (PayrollClient<'_>, Address, Address) {
     env.mock_all_auths();
 
-    let verifier_id = env.register_contract(None, ProofVerifier);
+    let verifier_id = env.register(ProofVerifier, ());
     let verifier_client = ProofVerifierClient::new(env, &verifier_id);
     let verifier_admin = Address::generate(env);
     verifier_client.init_verifier_admin(&verifier_admin);
     verifier_client.initialize_verifier(&mock_vk(env));
 
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
+    let commitment_id = env.register(SalaryCommitmentContract, ());
     let commitment_client = SalaryCommitmentContractClient::new(env, &commitment_id);
     let commitment_admin = Address::generate(env);
     commitment_client.init_commitment_admin(&commitment_admin);
 
-    let token_id = env.register_contract(None, Token);
+    let token_id = env.register(Token, ());
 
-    let payroll_id = env.register_contract(None, Payroll);
+    let payroll_id = env.register(Payroll, ());
     let payroll_client = PayrollClient::new(env, &payroll_id);
 
     let treasury = Address::generate(env);

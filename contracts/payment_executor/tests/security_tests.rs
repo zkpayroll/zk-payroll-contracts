@@ -36,11 +36,11 @@ fn setup_system<'a>(
 ) {
     env.mock_all_auths();
 
-    let executor_id = env.register_contract(None, PaymentExecutor);
-    let registry_id = env.register_contract(None, PayrollRegistry);
-    let commitment_id = env.register_contract(None, SalaryCommitmentContract);
-    let verifier_id = env.register_contract(None, ProofVerifier);
-    let token_id = env.register_contract(None, Token);
+    let executor_id = env.register(PaymentExecutor, ());
+    let registry_id = env.register(PayrollRegistry, ());
+    let commitment_id = env.register(SalaryCommitmentContract, ());
+    let verifier_id = env.register(ProofVerifier, ());
+    let token_id = env.register(Token, ());
 
     let executor = PaymentExecutorClient::new(env, &executor_id);
     let registry = PayrollRegistryClient::new(env, &registry_id);
@@ -155,7 +155,7 @@ fn test_proof_replay_protection() {
 fn test_authorization_add_employee_fails_for_non_admin() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, PayrollRegistry);
+    let registry_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &registry_id);
 
     let correct_admin = Address::generate(&env);

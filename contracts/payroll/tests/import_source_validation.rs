@@ -1,6 +1,6 @@
 mod common;
 
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 #[test]
 fn authorized_source_accepts_batch() {
@@ -109,5 +109,5 @@ fn dry_run_reports_unauthorized_source() {
 
     let report = payroll.dry_run_batch_process_payroll(&args);
     assert!(!report.would_succeed);
-    assert!(report.blockers.len() > 0);
+    assert!(!report.blockers.is_empty());
 }

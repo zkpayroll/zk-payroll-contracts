@@ -106,11 +106,7 @@ pub fn variance_bps(baseline: i128, proposed: i128) -> u32 {
     if baseline <= 0 {
         return u32::MAX;
     }
-    let delta: u128 = if proposed >= baseline {
-        (proposed - baseline) as u128
-    } else {
-        (baseline - proposed) as u128
-    };
+    let delta: u128 = proposed.abs_diff(baseline);
     let baseline_u: u128 = baseline as u128;
     // Guard the multiply before it can wrap: anything this large already
     // exceeds every configurable ceiling.

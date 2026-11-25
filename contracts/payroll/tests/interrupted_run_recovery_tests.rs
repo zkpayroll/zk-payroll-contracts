@@ -12,7 +12,7 @@ fn setup(env: &Env) -> (Address, PayrollClient<'_>) {
 
     client.initialize(
         &admin,
-        &env.register_contract(None, Token),
+        &env.register(Token, ()),
         &Address::generate(env),
         &Address::generate(env),
         &Address::generate(env),

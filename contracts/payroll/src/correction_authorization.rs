@@ -73,6 +73,17 @@ pub enum CorrectionLimitBreach {
     EmployeesCorrected,
 }
 
+impl CorrectionLimitBreach {
+    /// Privacy-safe reason code published in `correction_rejected` (#886).
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            CorrectionLimitBreach::CorrectionsPerPeriod => "count_limit",
+            CorrectionLimitBreach::TotalDelta => "delta_limit",
+            CorrectionLimitBreach::EmployeesCorrected => "employee_limit",
+        }
+    }
+}
+
 impl CorrectionUsage {
     /// Counters for a period with no recorded corrections.
     pub const ZERO: CorrectionUsage = CorrectionUsage {

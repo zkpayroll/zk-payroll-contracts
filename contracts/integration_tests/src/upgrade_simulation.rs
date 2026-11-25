@@ -86,7 +86,7 @@ mod upgrade_simulation {
         let admin = Address::generate(&env);
         let employee = Address::generate(&env);
 
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         client.init_commitment_admin(&admin);
 
@@ -137,7 +137,7 @@ mod upgrade_simulation {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
+        let registry_id = env.register(PayrollRegistry, ());
         let registry = PayrollRegistryClient::new(&env, &registry_id);
 
         // Store company info (v1 format).
@@ -177,7 +177,7 @@ mod upgrade_simulation {
         let treasury = Address::generate(&env);
         let employee = Address::generate(&env);
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
+        let registry_id = env.register(PayrollRegistry, ());
         let registry = PayrollRegistryClient::new(&env, &registry_id);
 
         // Populate all current key variants.
@@ -227,7 +227,7 @@ mod upgrade_simulation {
         let admin = Address::generate(&env);
         let employee = Address::generate(&env);
 
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         client.init_commitment_admin(&admin);
 
@@ -281,7 +281,7 @@ mod upgrade_simulation {
         let admin = Address::generate(&env);
         let employee = Address::generate(&env);
 
-        let contract_id = env.register_contract(None, SalaryCommitmentContract);
+        let contract_id = env.register(SalaryCommitmentContract, ());
         let client = SalaryCommitmentContractClient::new(&env, &contract_id);
         client.init_commitment_admin(&admin);
 
@@ -336,7 +336,7 @@ mod upgrade_simulation {
 
         let admin = Address::generate(&env);
 
-        let verifier_id = env.register_contract(None, ProofVerifier);
+        let verifier_id = env.register(ProofVerifier, ());
         let verifier = ProofVerifierClient::new(&env, &verifier_id);
 
         // Write the VK.
@@ -390,7 +390,7 @@ mod upgrade_simulation {
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
 
-        let registry_id = env.register_contract(None, PayrollRegistry);
+        let registry_id = env.register(PayrollRegistry, ());
         let registry = PayrollRegistryClient::new(&env, &registry_id);
 
         let company_id = registry.register_company(&admin, &treasury);
@@ -426,12 +426,12 @@ mod upgrade_simulation {
         let env = Env::default();
         env.mock_all_auths();
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor = PaymentExecutorClient::new(&env, &executor_id);
 
-        let registry = env.register_contract(None, PayrollRegistry);
-        let commitment = env.register_contract(None, SalaryCommitmentContract);
-        let verifier = env.register_contract(None, ProofVerifier);
+        let registry = env.register(PayrollRegistry, ());
+        let commitment = env.register(SalaryCommitmentContract, ());
+        let verifier = env.register(ProofVerifier, ());
         let token = Address::generate(&env);
 
         let addrs = ContractAddresses {
@@ -467,13 +467,13 @@ mod upgrade_simulation {
         let env = Env::default();
         env.mock_all_auths();
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor = PaymentExecutorClient::new(&env, &executor_id);
 
-        let registry = env.register_contract(None, PayrollRegistry);
-        let commitment = env.register_contract(None, SalaryCommitmentContract);
-        let verifier = env.register_contract(None, ProofVerifier);
-        let token = env.register_contract(None, Token);
+        let registry = env.register(PayrollRegistry, ());
+        let commitment = env.register(SalaryCommitmentContract, ());
+        let verifier = env.register(ProofVerifier, ());
+        let token = env.register(Token, ());
 
         let addrs = ContractAddresses {
             registry: registry.clone(),
@@ -551,13 +551,13 @@ mod upgrade_simulation {
         let env = Env::default();
         env.mock_all_auths();
 
-        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor_id = env.register(PaymentExecutor, ());
         let executor = PaymentExecutorClient::new(&env, &executor_id);
 
         let addrs = ContractAddresses {
-            registry: env.register_contract(None, PayrollRegistry),
-            commitment: env.register_contract(None, SalaryCommitmentContract),
-            verifier: env.register_contract(None, ProofVerifier),
+            registry: env.register(PayrollRegistry, ()),
+            commitment: env.register(SalaryCommitmentContract, ()),
+            verifier: env.register(ProofVerifier, ()),
             token: Address::generate(&env),
         };
         executor.initialize(&addrs);

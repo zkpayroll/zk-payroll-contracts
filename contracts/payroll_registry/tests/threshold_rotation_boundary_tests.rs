@@ -121,7 +121,7 @@ fn test_threshold_rotation_mid_grace_period_fails() {
     client.propose_threshold_rotation(&company_id, &admin, &new_threshold, &grace_period);
 
     let pending = client.get_pending_threshold_rotation(&company_id).unwrap();
-    let effective_after = pending.effective_after;
+    let _effective_after = pending.effective_after;
 
     // Midway through the grace period - activation should fail
     let mid_grace = initial_timestamp + grace_period / 2;

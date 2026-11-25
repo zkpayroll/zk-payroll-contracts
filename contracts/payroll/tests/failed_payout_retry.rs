@@ -7,12 +7,12 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
 fn setup(env: &Env) -> (Address, PayrollClient<'_>) {
     env.mock_all_auths();
     let admin = Address::generate(env);
-    let contract_id = env.register_contract(None, payroll::Payroll {});
+    let contract_id = env.register(payroll::Payroll {}, ());
     let client = PayrollClient::new(env, &contract_id);
 
     client.initialize(
         &admin,
-        &env.register_contract(None, Token),
+        &env.register(Token, ()),
         &Address::generate(env),
         &Address::generate(env),
         &Address::generate(env),
@@ -131,4 +131,55 @@ fn failed_checkpoint_at_end_of_batch_is_not_retry_eligible() {
     let checkpoint =
         client.get_batch_execution_checkpoint(&employer, &batch_root, &asset, &execution_nonce);
     assert!(checkpoint.failed);
+}
+
+#[test]
+fn failed_checkpoint_failure_state_is_preserved_after_rejected_resume() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+        &BatchCheckpointState::Failed,
+    );
+
+    // A resume with a cursor that is not eligible must be rejected and must
+    // leave the failed checkpoint untouched (no partial state change).
+    assert!(client
+        .try_resume_failed_payout_retry(
+            &admin,
+            &employer,
+            &batch_root,
+            &asset,
+            &execution_nonce,
+            &2,
+            &2,
+        )
+        .is_err());
+
+    let checkpoint =
+        client.get_batch_execution_checkpoint(&employer, &batch_root, &asset, &execution_nonce);
+    assert!(checkpoint.failed);
+    assert_eq!(checkpoint.state, BatchCheckpointState::Failed);
+    assert!(client.is_failed_payout_retry_eligible(
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &2,
+    ));
 }

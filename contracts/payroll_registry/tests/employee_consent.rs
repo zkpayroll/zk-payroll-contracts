@@ -27,7 +27,7 @@ fn test_record_consent_success() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.ledger().set_timestamp(1_000);
     e.as_contract(&__cid, || {
@@ -50,7 +50,7 @@ fn test_revoke_consent() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.ledger().set_timestamp(1_000);
     e.as_contract(&__cid, || {
@@ -77,7 +77,7 @@ fn test_no_consent_blocks_enrollment() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     // No consent recorded — require_active_consent must panic
     e.as_contract(&__cid, || require_active_consent(&e, &employer, &employee));
@@ -90,7 +90,7 @@ fn test_consent_replacement() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.ledger().set_timestamp(500);
     e.as_contract(&__cid, || {
@@ -125,7 +125,7 @@ fn test_revoked_consent_blocks_require() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.as_contract(&__cid, || {
         record_consent(&e, employer.clone(), employee.clone(), commitment(&e, 5))
@@ -146,7 +146,7 @@ fn test_require_active_consent_fails_after_revocation() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.as_contract(&__cid, || {
         record_consent(&e, employer.clone(), employee.clone(), commitment(&e, 7))
@@ -167,7 +167,7 @@ fn test_double_revoke_fails() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.as_contract(&__cid, || {
         record_consent(&e, employer.clone(), employee.clone(), commitment(&e, 8))
@@ -188,7 +188,7 @@ fn test_zero_commitment_hash_rejected() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     // Zero hash should be rejected
     e.as_contract(&__cid, || {
@@ -203,7 +203,7 @@ fn test_reconsentment_after_revocation() {
 
     let employer = Address::generate(&e);
     let employee = Address::generate(&e);
-    let __cid = e.register_contract(None, payroll_registry::PayrollRegistry);
+    let __cid = e.register(payroll_registry::PayrollRegistry, ());
 
     e.ledger().set_timestamp(100);
     e.as_contract(&__cid, || {

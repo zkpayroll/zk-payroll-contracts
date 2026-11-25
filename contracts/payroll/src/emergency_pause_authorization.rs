@@ -4,8 +4,6 @@
 //! and assertion primitives to immediately halt payroll execution during emergencies
 //! while preserving transparency and auditability.
 
-#![no_std]
-
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 /// Error codes for emergency pause operations.
@@ -86,7 +84,9 @@ pub struct EmergencyPauseState {
 }
 
 /// Validates that an emergency pause configuration is well-formed.
-pub fn validate_emergency_config(config: &EmergencyPauseConfig) -> Result<(), EmergencyPauseError> {
+pub fn validate_emergency_config(
+    _config: &EmergencyPauseConfig,
+) -> Result<(), EmergencyPauseError> {
     // Admin address must be set (guaranteed by soroban address type).
     Ok(())
 }
@@ -107,7 +107,7 @@ pub fn resolve_emergency_role(config: &EmergencyPauseConfig, caller: &Address) -
 }
 
 /// Creates a default initialized unpaused state.
-pub fn initialize_pause_state(env: &Env, admin: Address) -> EmergencyPauseState {
+pub fn initialize_pause_state(_env: &Env, admin: Address) -> EmergencyPauseState {
     EmergencyPauseState {
         is_paused: false,
         paused_by: admin,

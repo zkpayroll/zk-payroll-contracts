@@ -12,9 +12,7 @@ fn event_topics(env: &Env, index: usize) -> soroban_sdk::Vec<Val> {
     let Some(event) = recorded.events().get(index) else {
         panic!("no contract event recorded at index {index}");
     };
-    let xdr::ContractEventBody::V0(body) = &event.body else {
-        panic!("expected a v0 contract event body");
-    };
+    let xdr::ContractEventBody::V0(body) = &event.body;
     let mut topics = soroban_sdk::Vec::new(env);
     for topic in body.topics.iter() {
         topics.push_back(Val::try_from_val(env, topic).expect("invalid event topic"));
@@ -36,13 +34,13 @@ fn last_event_topics(env: &Env) -> soroban_sdk::Vec<Val> {
 fn setup() -> (Env, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     (env, contract_id)
 }
 
 fn setup_no_auth_mock() -> (Env, Address) {
     let env = Env::default();
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     (env, contract_id)
 }
 
@@ -255,7 +253,7 @@ fn test_authorization_add_employee_fails_for_non_admin() {
     // We intentionally do NOT mock_all_auths() here, because we want to test that
     // the registry correctly enforces `require_auth` dynamically against the correct admin.
 
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &contract_id);
 
     // Register a company with a specific admin address
@@ -694,7 +692,7 @@ fn test_register_company_duplicate_registration_panics() {
 fn test_treasury_cannot_add_employee() {
     let env = Env::default();
 
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -897,7 +895,7 @@ fn test_successful_payout_destination_update_by_employee() {
 #[should_panic(expected = "authorized")]
 fn test_update_payout_destination_rejects_non_owner() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1002,7 +1000,7 @@ fn test_offboarded_employee_cannot_be_changed() {
     let treasury = Address::generate(&env);
     let employee = Address::generate(&env);
     let commitment = BytesN::from_array(&env, &[0; 32]);
-    let client = PayrollRegistryClient::new(&env, &env.register_contract(None, PayrollRegistry {}));
+    let client = PayrollRegistryClient::new(&env, &env.register(PayrollRegistry {}, ()));
 
     let company_id = client.register_company(&admin, &treasury);
     client.add_employee(&company_id, &employee, &commitment);
@@ -1164,7 +1162,7 @@ fn test_payout_destination_review_rejects_duplicate_pending() {
 #[test]
 #[should_panic(expected = "Destination address is already on file")]
 fn test_payout_destination_review_rejects_duplicate_destination() {
-    let (env, client, company_id, _admin, employee, _treasury) = review_setup();
+    let (_env, client, company_id, _admin, employee, _treasury) = review_setup();
 
     // The destination on file defaults to the employee address.
     client.propose_payout_dest_change(&company_id, &employee, &employee);
@@ -1183,7 +1181,7 @@ fn test_payout_destination_review_rejects_zero_address() {
 #[should_panic(expected = "Unauthorized")]
 fn test_payout_destination_review_rejects_non_owner_proposer() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1341,7 +1339,7 @@ fn test_confirm_payout_method_rejects_unknown_employee() {
 #[should_panic(expected = "authorized")]
 fn test_confirm_payout_method_rejects_non_owner() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, PayrollRegistry);
+    let contract_id = env.register(PayrollRegistry, ());
     let registry = PayrollRegistryClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1451,7 +1449,7 @@ fn test_payout_method_confirmation_cleared_on_review_approval() {
 
 #[test]
 fn test_payout_method_confirmation_cleared_on_employee_removal() {
-    let (_env, client, company_id, admin, employee) = confirmation_setup();
+    let (_env, client, company_id, _admin, employee) = confirmation_setup();
 
     client.confirm_payout_method(&company_id, &employee);
     assert!(client.is_payout_method_confirmed(&company_id, &employee));
@@ -1481,7 +1479,6 @@ fn test_confirm_payout_method_allowed_after_rejected_review() {
     assert_eq!(record.destination, employee);
     assert!(client.is_payout_method_confirmed(&company_id, &employee));
 }
-
 
 #[test]
 fn latest_approved_payroll_revision_is_readable_and_monotonic() {
@@ -1532,7 +1529,10 @@ fn latest_approved_payroll_revision_rejects_stale_revision() {
         .try_record_approved_payroll_revision(&company_id, &admin, &7)
         .is_err());
     assert_eq!(
-        client.get_latest_approved_revision(&company_id).unwrap().revision,
+        client
+            .get_latest_approved_revision(&company_id)
+            .unwrap()
+            .revision,
         7
     );
 }

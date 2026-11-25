@@ -194,7 +194,7 @@ pub fn register_execution(
         .set(&nonce_key, &identity_hash);
 
     // Emit idempotency marker event
-    env.events().publish(
+    payroll_events::publish(&env,
         (Symbol::new(env, "execution_registered"),),
         (identity.company_id, employee_count),
     );

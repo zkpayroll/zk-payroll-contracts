@@ -182,6 +182,10 @@ pub struct DryRunArgs {
 /// Returns the list of contract-period-related blockers found in the
 /// supplied `DryRunArgs`. This is a pure function over the arguments and
 /// does not touch storage, so it is safe to call from any context.
+#[expect(
+    dead_code,
+    reason = "Preflight helper is not wired into the current entrypoint"
+)]
 pub(crate) fn check_contract_period_consistency(
     e: &Env,
     args: &DryRunArgs,
@@ -250,8 +254,6 @@ pub(crate) fn check_sequence_consistency(
         Some(last) => {
             if submitted == last {
                 report.push(PayrollFailureReason::DuplicateSequence);
-            } else if submitted < last {
-                report.push(PayrollFailureReason::SequenceNotMonotonic);
             } else if submitted != last.saturating_add(1) {
                 report.push(PayrollFailureReason::SequenceNotMonotonic);
             }
@@ -270,6 +272,10 @@ pub(crate) fn check_sequence_consistency(
 ///
 /// Returns `UnauthorizedImportSource` when a source address is supplied but
 /// is not present in the employer's allowlist of authorized import sources.
+#[expect(
+    dead_code,
+    reason = "Preflight helper is not wired into the current entrypoint"
+)]
 pub(crate) fn check_import_source(
     e: &Env,
     args: &DryRunArgs,
@@ -300,6 +306,10 @@ pub(crate) fn check_import_source(
 ///
 /// Returns `AmountBelowMinimum` if any entry in `args.amounts` is strictly
 /// less than `min_amount`.
+#[expect(
+    dead_code,
+    reason = "Preflight helper is not wired into the current entrypoint"
+)]
 pub(crate) fn check_minimum_amounts(
     e: &Env,
     args: &DryRunArgs,
@@ -318,6 +328,10 @@ pub(crate) fn check_minimum_amounts(
 
 /// Returns `true` when an approval workflow is configured, meaning direct
 /// execution via `batch_process_payroll` is unavailable.
+#[expect(
+    dead_code,
+    reason = "Preflight helper is not wired into the current entrypoint"
+)]
 pub(crate) fn approval_workflow_required(approval_threshold: Option<u32>) -> bool {
     matches!(approval_threshold, Some(threshold) if threshold > 0)
 }

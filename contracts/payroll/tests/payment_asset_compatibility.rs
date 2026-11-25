@@ -6,7 +6,18 @@ mod common;
 
 use payroll::{PaymentAssetCompatibilityError, Payroll, PayrollClient};
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
+
+/// Implements the balance interface required by initialization, but has no decimals method.
+#[contract]
+struct BalanceOnlyToken;
+
+#[contractimpl]
+impl BalanceOnlyToken {
+    pub fn balance(_env: Env, _owner: Address) -> i128 {
+        1_000_000
+    }
+}
 
 fn prepare(env: &Env, client: &PayrollClient, employee: &Address, marker: u8) -> Option<u64> {
     let (proofs, amounts, employees) = common::one_payment(env, employee);
@@ -168,7 +179,8 @@ fn token_without_decimals_is_unreachable_once_precision_is_pinned() {
     let (client, token, employee) = common::setup(&env);
     let admin = client.get_addresses().admin;
 
-    // The test token does not implement `decimals`.
+    // Replace the normal seven-decimal fixture with one that really lacks decimals.
+    env.register_at(&token, BalanceOnlyToken, ());
     client.set_payment_asset_decimals(&admin, &7);
     assert_eq!(
         client.try_check_payment_asset_compat(&token, &100),
