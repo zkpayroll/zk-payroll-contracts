@@ -1481,6 +1481,51 @@ pub fn emit_settlement_window_expired(e: &Env, run_id: u64, period: Symbol, expi
     );
 }
 
+/// Emitted when a settlement timeout recovery attempt is accepted (#1093).
+///
+/// Privacy-safe: carries only the opaque run id, the period label, the
+/// recovery mode symbol, and timing metadata (the ledger timestamp of the
+/// attempt plus the window's close boundary). Salary rows, employee
+/// addresses, commitments, and proof material are deliberately omitted.
+pub fn emit_settlement_recovery_attempted(
+    e: &Env,
+    run_id: u64,
+    period: Symbol,
+    recovery_mode: Symbol,
+    attempted_at: u64,
+    window_close_at: u64,
+) {
+    publish(
+        e,
+        (payroll_topic(), Symbol::new(e, "settlement_recovery")),
+        (run_id, period, recovery_mode, attempted_at, window_close_at),
+    );
+}
+
+/// Emitted when a settlement timeout recovery attempt is rejected because it
+/// falls outside the permitted recovery boundaries (#1093).
+///
+/// Privacy-safe: carries only the opaque run id, the period label, a short
+/// reason code (e.g. `too_early`, `too_late`, `not_expired`, `bad_state`),
+/// and the ledger timestamp of the rejected attempt. No salary, employee, or
+/// proof data is ever included.
+pub fn emit_settlement_recovery_rejected(
+    e: &Env,
+    run_id: u64,
+    period: Symbol,
+    reason: Symbol,
+    rejected_at: u64,
+) {
+    publish(
+        e,
+        (
+            payroll_topic(),
+            Symbol::new(e, "settlement_recovery_rejected"),
+        ),
+        (run_id, period, reason, rejected_at),
+    );
+}
+
 /// Emitted when a new admin is proposed (step 1 of 2).
 pub fn emit_admin_proposed(e: &Env, current_admin: Address, new_admin: Address) {
     publish(

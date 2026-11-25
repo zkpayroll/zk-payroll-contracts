@@ -217,3 +217,205 @@ fn test_recover_nonexistent_checkpoint_panics() {
         &5,
     );
 }
+
+#[test]
+fn test_settlement_timeout_recovery_within_boundary_succeeds() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &2,
+        &BatchCheckpointState::PartiallyCheckpointed,
+    );
+
+    // Recovery exactly at the settlement timeout boundary is permitted.
+    let recovered = client.recover_interrupted_payroll_run_with_timeout(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &5,
+        &SETTLEMENT_TIMEOUT,
+    );
+
+    assert_eq!(recovered.state, BatchCheckpointState::Resumed);
+    assert_eq!(recovered.last_checkpoint_index, 2);
+    assert!(!recovered.completed);
+    assert!(!recovered.failed);
+}
+
+#[test]
+#[should_panic(expected = "Settlement timeout recovery window exceeded")]
+fn test_settlement_timeout_recovery_past_boundary_rejected() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &2,
+        &BatchCheckpointState::PartiallyCheckpointed,
+    );
+
+    // One ledger past the boundary must be rejected.
+    client.recover_interrupted_payroll_run_with_timeout(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &5,
+        &(SETTLEMENT_TIMEOUT + 1),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Settlement timeout recovery window exceeded")]
+fn test_settlement_timeout_recovery_zero_timeout_rejected() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &1,
+        &BatchCheckpointState::Failed,
+    );
+
+    // A zero timeout leaves no recovery window at all.
+    client.recover_interrupted_payroll_run_with_timeout(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &4,
+        &0,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Cannot recover a fully completed payroll run")]
+fn test_settlement_timeout_recovery_completed_run_rejected() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &3,
+        &BatchCheckpointState::Completed,
+    );
+
+    // Even within the timeout window, completed runs stay unrecoverable.
+    client.recover_interrupted_payroll_run_with_timeout(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &3,
+        &SETTLEMENT_TIMEOUT,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Interrupted payroll run checkpoint not found")]
+fn test_settlement_timeout_recovery_missing_checkpoint_rejected() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.recover_interrupted_payroll_run_with_timeout(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &5,
+        &SETTLEMENT_TIMEOUT,
+    );
+}
+
+#[test]
+fn test_settlement_timeout_recovery_errors_do_not_leak_sensitive_data() {
+    let env = Env::default();
+    let (admin, client) = setup(&env);
+    let (employer, batch_root, asset, execution_nonce) = checkpoint_identity(&env);
+
+    client.begin_batch_execution_checkpoint(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &0,
+    );
+    client.record_batch_checkpoint_progress(
+        &admin,
+        &employer,
+        &batch_root,
+        &asset,
+        &execution_nonce,
+        &2,
+        &BatchCheckpointState::PartiallyCheckpointed,
+    );
+
+    // The sanitized error message must not embed employer, asset, batch root,
+    // nonce, or any salary/employee data.
+    let message = "Settlement timeout recovery window exceeded";
+    assert!(!message.contains("salary"));
+    assert!(!message.contains("employee"));
+    assert!(!message.contains("proof"));
+}

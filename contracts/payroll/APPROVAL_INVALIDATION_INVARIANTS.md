@@ -69,10 +69,51 @@ identifiers and the generic `ProtectedContentChanged` reason.
 **Enforcement points:** `current_draft_revision_record`,
 `preflight_amend_draft_with_rollback`, `amend_draft_from_revision`.
 
+## A9: An approval cannot reference a superseded draft revision
+
+An approval is bound to both the protected content hash (A1) and the draft revision it
+was created against. `submit_draft_approval` rejects any approval whose revision is not
+the current `current_draft_revision_record` revision, even when the supplied content hash
+matches. A superseded revision is therefore never approvable: once A2 or A8 advances the
+draft, approvals for the prior revision are dead. The rejection is the generic
+`Stale approval reused: protected fields changed` panic (or the typed
+`ApprovalInvalidationError::StaleParentRevision` code from the checked API) and names no
+amount, signer, or content hash.
+
+**Enforcement points:** `submit_draft_approval`, `current_draft_revision_record`,
+`preflight_amend_draft_with_rollback`.
+
+## A10: Settlement timeout recovery is bounded
+
+Settlement timeout recovery only applies to a run that is in a recoverable settlement
+state and whose timeout window has strictly elapsed. Recovery before the window elapses,
+on a run that is not awaiting settlement, or on an already-settled run is rejected
+without state writes. Recovery never re-opens a completed settlement and never moves
+funds based on a stale timeout assessment; the boundary is exclusive at the timeout
+timestamp. Rejections are unit-only typed errors that identify the failed precondition
+and the opaque run id only.
+
+**Enforcement points:** settlement timeout recovery entry points in
+`contracts/payroll/src/`, `contracts/events/src/`.
+
+## A11: Events and errors are privacy-safe
+
+Every event and error emitted by the approval and settlement paths carries only opaque
+identifiers (run id, draft id, revision number, record type, actor/admin address) and
+generic reason codes. Salary amounts, employee addresses, obligation leaves, and proof
+material are never included in event payloads, panic messages, or typed error variants.
+Redaction is verified by focused tests that assert the absence of sensitive fields in
+serialized events and error output.
+
+**Enforcement points:** `contracts/payroll/src/`, `contracts/events/src/`.
+
 ## Test coverage
 
 - `contracts/payroll/tests/approval_rollback.rs`: stale hash, duplicate signer, lock, and amendment rollback.
 - `contracts/payroll/tests/approval_invalidation_adversarial.rs`: stale hash after amendment, approvals not carrying over, re-initialization after amendment, and unauthorized cleanup.
 - `contracts/payroll/tests/stale_approval_cleanup.rs`: staleness boundaries and authorization.
+- `contracts/payroll/tests/approval_superseded_revision.rs`: approval rejected against a superseded draft revision, success on the current revision, and the boundary where the revision advances between init and submit.
+- `contracts/payroll/tests/settlement_timeout_recovery.rs`: recovery success after the timeout, rejection before the timeout and on non-settleable runs, and the exact-timeout boundary.
+- `contracts/payroll/tests/event_redaction.rs`: serialized approval and settlement events and typed errors contain no salary, employee, obligation, or proof fields.
 
 All events and errors use opaque run or draft identifiers. This document intentionally contains no salary values, employee addresses, or proof material.

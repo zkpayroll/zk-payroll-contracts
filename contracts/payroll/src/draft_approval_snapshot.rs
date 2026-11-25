@@ -81,6 +81,9 @@ pub enum DraftSnapshotError {
     /// The approval tracker no longer matches the snapshot (different hash,
     /// or quorum lost). Do not execute; re-run approval.
     ApprovalChangedSinceSnapshot = 6489,
+    /// The approval references a draft revision that has been superseded by
+    /// a newer amendment. Re-run approval against the current revision.
+    SupersededDraftRevision = 6490,
 }
 
 /// Emitted as `("payroll", "draft_snapshot_locked")`.
@@ -155,6 +158,35 @@ pub(crate) fn require_snapshot_unlocked(e: &Env, draft_id: u64) {
             "Draft approval snapshot is locked: release it with release_draft_approval_snapshot (which resets approvals) before changing the draft"
         );
     }
+}
+
+/// Current revision of a draft's approved content (#876).
+///
+/// The revision is the draft's amendment counter: every amendment that
+/// changes approved content bumps it, so an approval recorded against an
+/// older revision is stale. Returns `None` when no draft exists.
+pub fn current_draft_revision(e: &Env, draft_id: u64) -> Option<u32> {
+    e.storage()
+        .persistent()
+        .get::<DataKey, PayrollRunDraft>(&DataKey::RunDraft(draft_id))
+        .map(|draft| draft.amendment_count)
+}
+
+/// Guard for the approval path (#876).
+///
+/// Rejects an approval that references a draft revision other than the
+/// draft's current revision, so a superseded draft can never collect fresh
+/// approvals. The error carries no draft content, only the revision numbers.
+pub(crate) fn require_current_draft_revision(
+    e: &Env,
+    draft_id: u64,
+    referenced_revision: u32,
+) -> Result<(), DraftSnapshotError> {
+    let current = current_draft_revision(e, draft_id).ok_or(DraftSnapshotError::DraftNotFound)?;
+    if referenced_revision != current {
+        return Err(DraftSnapshotError::SupersededDraftRevision);
+    }
+    Ok(())
 }
 
 /// Compare the live draft and approval tracker against a locked snapshot.
@@ -287,5 +319,12 @@ impl Payroll {
     /// Whether a draft's approved content is currently snapshot-locked (#648).
     pub fn is_draft_snapshot_locked(e: Env, draft_id: u64) -> bool {
         is_locked(&e, draft_id)
+    }
+
+    /// Current revision of a draft's approved content (#876).
+    ///
+    /// Read-only; returns `None` when no draft exists for `draft_id`.
+    pub fn get_draft_revision(e: Env, draft_id: u64) -> Option<u32> {
+        current_draft_revision(&e, draft_id)
     }
 }

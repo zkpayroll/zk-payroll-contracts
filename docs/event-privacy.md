@@ -21,6 +21,36 @@ commitments, never serialized source documents. Consumers must treat unknown
 fields as non-contractual and ignore them so future schema additions do not
 force disclosure or break older indexers.
 
+## Redaction guarantees
+
+Payroll events and the errors they surface are redacted at the source. The
+following data must never appear in an event payload, an error message, or a
+log line emitted by the payroll contracts:
+
+- salary amounts, rates, or any per-employee compensation figure;
+- employee identifiers (addresses, names, account numbers) outside the
+  explicitly allowed commitment-lifecycle fields above;
+- proof bytes, raw commitments, or any serialized document contents.
+
+Errors report an opaque error code and, where useful, an opaque identifier
+(run id, request id, record id). They never echo the offending input. This
+applies equally to validation failures, state-transition rejections, and
+recovery paths.
+
+### Settlement recovery event
+
+The settlement recovery event follows the same rules. It carries only the
+opaque run id, the recovery outcome, and an evidence hash. It does not include
+the recovered amounts, the affected employee list, or any proof material, so
+it is safe to index and forward to downstream systems.
+
+### Enforcement
+
+Focused tests in `contracts/payroll/tests/` assert these guarantees for
+success, failure, and boundary cases: they check that emitted events and error
+results contain none of the prohibited salary, employee, or proof data. Any
+new event or error path must add a matching redaction test before release.
+
 ## Consumer rules
 
 1. Index topics for filtering; do not infer private records from event order.
