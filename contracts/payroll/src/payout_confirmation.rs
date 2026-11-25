@@ -64,6 +64,9 @@ pub enum PayoutConfirmationError {
     UnknownPayout = 7845,
     PayoutMismatch = 7846,
     InvalidConfirmationTime = 7847,
+    /// A batch cannot be finalized while any expected recipient remains
+    /// pending or has a failed settlement.
+    IncompleteSettlement = 7848,
 }
 
 /// Read-only contract interface for reconciliation preflight reports.
@@ -165,6 +168,22 @@ pub fn reconcile_payout_confirmations(
     })
 }
 
+/// Ensure that reconciliation represents a final recipient settlement before a
+/// caller marks the containing batch complete. Aggregate counts are used so
+/// this guard never exposes beneficiary or salary information.
+pub fn require_final_recipient_settlement(
+    reconciliation: &PayoutReconciliation,
+) -> Result<(), PayoutConfirmationError> {
+    if reconciliation.status != ReconciliationStatus::Reconciled
+        || reconciliation.confirmed_count != reconciliation.expected_count
+        || reconciliation.pending_count != 0
+        || reconciliation.failed_count != 0
+    {
+        return Err(PayoutConfirmationError::IncompleteSettlement);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +261,33 @@ mod tests {
             (report.failed_count, report.pending_count, report.status),
             (1, 0, ReconciliationStatus::Failed)
         );
+    }
+
+    #[test]
+    fn final_recipient_settlement_requires_every_expected_payout() {
+        let env = Env::default();
+        let expected = payout(&env, 1);
+        let unresolved = reconcile_payout_confirmations(
+            &env,
+            1,
+            &vec![&env, expected.clone()],
+            &Vec::new(&env),
+        )
+        .unwrap();
+        assert_eq!(
+            require_final_recipient_settlement(&unresolved),
+            Err(PayoutConfirmationError::IncompleteSettlement)
+        );
+
+        env.ledger().with_mut(|li| li.timestamp = 100);
+        let settled = reconcile_payout_confirmations(
+            &env,
+            1,
+            &vec![&env, expected.clone()],
+            &vec![&env, confirmation(&env, expected)],
+        )
+        .unwrap();
+        assert_eq!(require_final_recipient_settlement(&settled), Ok(()));
     }
     #[test]
     fn mixed_failed_and_confirmed_payouts_report_failed_state() {
