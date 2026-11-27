@@ -20,6 +20,49 @@ contiguous and increase by exactly one per successful `batch_process_payroll` ca
 also per `prepare_payroll_run` call, since each reserving operation increments the
 counter).
 
+## Deterministic request identifier (#480)
+
+The sequential `run_id` above is only knowable after the transaction lands. To
+let a dashboard or SDK reference a run before submitting it, the contract also
+exposes a stable, reproducible 32-byte identifier derived from immutable request
+fields:
+
+```
+identifier = sha256(
+    b"zkpayroll_run_identifier_v1"
+    || nonce[32]
+    || employee_count (u32, big-endian)
+    || draft_hash[32]   // 32 zero bytes when no draft hash was supplied
+)
+```
+
+| Function | Returns | Notes |
+|---|---|---|
+| `compute_payroll_run_identifier(nonce, employee_count, draft_hash)` | `BytesN<32>` | Pure; no storage or auth. Usable before submission. |
+| `get_payroll_run_identifier(run_id)` | `BytesN<32>` | Resolves from a pending or completed run record; panics when unavailable. |
+| `get_run_identifier_checked(run_id)` | `Result<BytesN<32>, PayrollRunIdentifierError>` | Checked variant for clients that prefer typed errors. |
+
+Properties:
+
+- **Reproducible off chain.** The encoding above is canonical, so the SDK can
+  compute the same value without an RPC call and later assert it matches
+  `get_payroll_run_identifier`.
+- **Stable across lifecycle changes.** The hash uses only `nonce`,
+  `employee_count`, and `draft_hash`, which are immutable after preparation.
+  Finalizing, archiving, or transferring a pending run's admin does not change
+  the identifier.
+- **Unique per run.** The nonce is already enforced as contract-wide unique by
+  the preparation and direct execution paths, so no two runs can share an
+  identifier. `employee_count` and `draft_hash` additionally bind the identifier
+  to the payload shape and reviewed draft.
+- **Privacy-safe.** The identifier hashes no salary amount, employee address, or
+  commitment value, and `PayrollRunIdentifierError` codes are unit-only:
+  `InvalidRunId` (reserved `u64::MAX`) and `RunNotFound`.
+- **Availability.** A prepared run that is cancelled leaves no pending or
+  completed record, so its identifier is no longer queryable even though the
+  nonce stays consumed. Compute and persist the identifier off chain before
+  cancelling if it is needed for reconciliation.
+
 ## Uniqueness guarantees
 
 | Property | Detail |

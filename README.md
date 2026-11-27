@@ -9,6 +9,7 @@ ZK Payroll Contracts enable companies to process payroll on-chain while keeping 
 ## Features
 
 - **Private Salary Commitments** — Salary amounts stored as ZK commitments
+- **Deterministic Run Identifiers** — Stable, reproducible 32-byte identifiers derived from immutable request fields, so dashboards and SDKs can reference a run before submission (#480)
 - **Proof-Based Payments** — Verify payments without exposing values
 - **Employee Identifier Normalization** — Canonical trimming, ASCII uppercasing, and validation for safe HR reference lookups and collision prevention
 - **Commitment Rotation Controls** — Approved (locked) salary commitments can be rotated in place after a payroll settles, without invalidating the settled record and without an unlock window
