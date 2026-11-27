@@ -773,6 +773,10 @@ pub enum StaleApprovalCheckError {
     NoApproval = 8203,
 }
 
+/// Deterministic, reproducible payroll run identifiers (#480).
+pub mod run_identifier;
+pub use run_identifier::{PayrollRunIdentifierError, RUN_IDENTIFIER_DOMAIN};
+
 /// Stable, privacy-safe errors for payroll run identifier checks (#991).
 ///
 /// Codes are append-only. Every variant is unit-only: no amount, employee
@@ -4322,6 +4326,52 @@ impl Payroll {
             .persistent()
             .get(&DataKey::PayrollRun(run_id))
             .ok_or(PayrollRunIdError::RunNotFound)
+    }
+
+    /// Compute the deterministic identifier for a payroll request before it is
+    /// submitted (#480).
+    ///
+    /// The identifier is `sha256(domain || nonce || employee_count ||
+    /// draft_hash)` and depends on no secret value. Pass 32 zero bytes for
+    /// `draft_hash` when the request does not supply one. Dashboards and SDKs
+    /// can call this to display the identifier before submitting, or reproduce
+    /// the same hash off-chain using [`RUN_IDENTIFIER_DOMAIN`].
+    pub fn compute_payroll_run_identifier(
+        e: Env,
+        nonce: BytesN<32>,
+        employee_count: u32,
+        draft_hash: BytesN<32>,
+    ) -> BytesN<32> {
+        run_identifier::compute(&e, &nonce, employee_count, &draft_hash)
+    }
+
+    /// Return the deterministic identifier of an existing payroll run (#480).
+    ///
+    /// Works for prepared-but-unfinalized and completed runs, and remains
+    /// stable across finalization, archival, and admin transfer. Panics with an
+    /// actionable, value-free message when the ID is reserved or no run record
+    /// exists.
+    pub fn get_payroll_run_identifier(e: Env, run_id: u64) -> BytesN<32> {
+        match run_identifier::try_for_run(&e, run_id) {
+            Ok(identifier) => identifier,
+            Err(PayrollRunIdentifierError::InvalidRunId) => {
+                panic!("Invalid payroll run ID: the reserved sentinel cannot address a run")
+            }
+            Err(_) => panic!(
+                "Payroll run identifier not available: no pending or executed run exists for this ID"
+            ),
+        }
+    }
+
+    /// Checked variant of [`Self::get_payroll_run_identifier`] (#480).
+    ///
+    /// Returns a stable, unit-only error instead of panicking. The error never
+    /// contains the run ID, a nonce, an amount, or employee data.
+    pub fn get_run_identifier_checked(
+        e: Env,
+        run_id: u64,
+    ) -> Result<BytesN<32>, PayrollRunIdentifierError> {
+        run_identifier::try_for_run(&e, run_id)
     }
 
     /// Return the latest accounting reconciliation marker for a run, if one
